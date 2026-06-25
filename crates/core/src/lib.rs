@@ -14,5 +14,6 @@ pub mod domain;
 pub mod error;
 pub mod models;
 pub mod ports;
+pub mod services;
 
 pub use error::CoreError;

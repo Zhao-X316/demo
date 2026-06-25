@@ -21,3 +21,5 @@ pinyin = "0.10"
 sha2 = "0.10"
 # 本地数据库（bundled 自带 SQLite，免系统依赖）
 rusqlite = { version = "0.31", features = ["bundled"] }
+# 日期运算（due_date = today + interval；日切）
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
