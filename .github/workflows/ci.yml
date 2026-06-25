@@ -1,0 +1,38 @@
+name: CI
+
+# 跨平台验证：后端(core + 模块)在 Windows / macOS / Linux 上编译并通过测试。
+# 证明纯 Rust 后端三平台通用（Tauri 外壳接入后再加打包 job）。
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  backend:
+    name: backend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
