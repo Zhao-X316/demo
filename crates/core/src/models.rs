@@ -22,6 +22,31 @@ impl ModuleKey {
             ModuleKey::Wrongbook => "wrongbook",
         }
     }
+    /// 从数据库字符串解析（未知值兜底为 Recitation）。
+    pub fn from_db(s: &str) -> Self {
+        match s {
+            "exam" => ModuleKey::Exam,
+            "wrongbook" => ModuleKey::Wrongbook,
+            _ => ModuleKey::Recitation,
+        }
+    }
+}
+
+impl MediaType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MediaType::Audio => "audio",
+            MediaType::Image => "image",
+            MediaType::Text => "text",
+        }
+    }
+    pub fn from_db(s: &str) -> Self {
+        match s {
+            "image" => MediaType::Image,
+            "text" => MediaType::Text,
+            _ => MediaType::Audio,
+        }
+    }
 }
 
 /// 学生（核心实体，全模块共用）。
@@ -124,4 +149,41 @@ pub enum MediaType {
     Audio,
     Image,
     Text,
+}
+
+/// 通用提交（音频/图片/文本）。状态用字符串以便模块灵活扩展。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Submission {
+    pub id: i64,
+    pub module: ModuleKey,
+    pub task_id: Option<i64>,
+    pub student_id: Option<i64>,
+    pub ref_id: Option<i64>,
+    pub media_type: MediaType,
+    pub file_path: String,
+    pub file_hash: String,
+    pub duration_ms: Option<i64>,
+    pub parsed_meta: Option<String>,
+    pub recognized_text: Option<String>,
+    pub recognize_status: String, // pending|ok|failed
+    pub anomaly_type: Option<String>,
+    pub status: String, // pending|scored|confirmed|anomaly|voided
+}
+
+/// 通用判定（两套体系并列）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Verdict {
+    pub id: i64,
+    pub submission_id: i64,
+    pub module: ModuleKey,
+    pub primary_score: Option<f64>,
+    pub pass: Option<bool>,
+    pub secondary_score: Option<f64>,
+    pub quality: Option<String>,
+    pub confidence: Option<f64>,
+    pub answer_version: i64,
+    pub metrics_json: Option<String>,
+    pub machine_note: Option<String>,
+    pub human_result: Option<String>, // pass|fail|reopen
+    pub human_note: Option<String>,
 }

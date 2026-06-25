@@ -5,6 +5,7 @@
 //! 只实现背诵特有部分：文件名解析、熟练度、评分编排、火山 ASR provider。
 
 pub mod asr_volcano;
+pub mod db;
 pub mod domain;
 pub mod grader;
 
@@ -18,6 +19,11 @@ static MIGRATIONS: &[Migration] = &[Migration {
     id: "recitation_0001",
     sql: include_str!("../migrations/0001_recitation.sql"),
 }];
+
+/// 模块迁移（供外壳/测试在 core 迁移之后运行）。
+pub fn recitation_migrations() -> &'static [Migration] {
+    MIGRATIONS
+}
 
 impl Module for RecitationModule {
     fn key(&self) -> ModuleKey {

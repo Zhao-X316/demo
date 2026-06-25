@@ -22,18 +22,10 @@ fn state_str(s: CardState) -> &'static str {
     }
 }
 
-fn parse_module(s: &str) -> ModuleKey {
-    match s {
-        "exam" => ModuleKey::Exam,
-        "wrongbook" => ModuleKey::Wrongbook,
-        _ => ModuleKey::Recitation,
-    }
-}
-
 fn row_to_card(r: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryCard> {
     Ok(MemoryCard {
         id: r.get("id")?,
-        module: parse_module(&r.get::<_, String>("module")?),
+        module: ModuleKey::from_db(&r.get::<_, String>("module")?),
         student_id: r.get("student_id")?,
         ref_type: r.get("ref_type")?,
         ref_id: r.get("ref_id")?,
