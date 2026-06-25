@@ -1,0 +1,22 @@
+# 教辅系统 · Rust 工作区（模块化单体）
+# 见 教辅系统_平台总体架构_v1.md §2.1
+#
+# 注意：src-tauri（应用外壳）在 macOS 上构建时再加入 members。
+# 当前 members 为可在任意平台构建/测试的纯逻辑 crate。
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/module-recitation",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+async-trait = "0.1"

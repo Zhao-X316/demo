@@ -1,0 +1,21 @@
+[package]
+name = "suite-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "教辅平台共享内核：实体/任务&复习引擎/识别&评分抽象/通用算法"
+
+# 注意：不能命名为 `core`，否则与 Rust 标准库 `core` 冲突（async_trait 宏展开为 ::core::*）。
+[lib]
+name = "suite_core"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+# 中文拼音（含内嵌数据，离线可用）——用于正确率的拼音容错
+pinyin = "0.10"
+# 文件 hash（去重账本）
+sha2 = "0.10"

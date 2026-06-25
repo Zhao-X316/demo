@@ -1,0 +1,14 @@
+[package]
+name = "module-recitation"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "M1 背诵批改：文件名解析 + 火山ASR + 正确率门控 + 熟练度 + 梯度复习"
+
+[dependencies]
+suite-core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true

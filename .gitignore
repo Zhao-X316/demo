@@ -1,0 +1,25 @@
+# Rust
+/target
+**/target
+Cargo.lock
+
+# Node / 前端
+node_modules
+dist
+.vite
+
+# Tauri 构建产物
+src-tauri/target
+src-tauri/gen
+
+# 凭据与本地数据（绝不入库）
+secrets.json
+*.db
+*.db-journal
+*.sqlite
+
+# 系统/编辑器
+.DS_Store
+.idea
+.vscode/*
+!.vscode/extensions.json
