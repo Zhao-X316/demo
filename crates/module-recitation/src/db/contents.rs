@@ -42,6 +42,11 @@ pub fn get_by_no(conn: &Connection, content_no: &str) -> CoreResult<Option<RecCo
     Ok(conn.query_row(&sql, [content_no], row).optional()?)
 }
 
+pub fn get_by_id(conn: &Connection, id: i64) -> CoreResult<Option<RecContent>> {
+    let sql = format!("SELECT {COLS} FROM rec_contents WHERE id=?1");
+    Ok(conn.query_row(&sql, [id], row).optional()?)
+}
+
 /// 按 content_no upsert；答案文本变化时 answer_version + 1（用于重判）。
 pub fn upsert(conn: &Connection, input: &ContentInput<'_>) -> CoreResult<RecContent> {
     match get_by_no(conn, input.content_no)? {

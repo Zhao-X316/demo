@@ -7,6 +7,7 @@
 //! - [`scheduler`]：间隔重复调度（记忆质量 → 下次间隔）
 
 pub mod accuracy;
+pub mod hashing;
 pub mod normalize;
 pub mod pinyin_util;
 pub mod scheduler;

@@ -8,6 +8,7 @@ pub mod asr_volcano;
 pub mod db;
 pub mod domain;
 pub mod grader;
+pub mod service;
 
 use suite_core::models::ModuleKey;
 use suite_core::ports::{Migration, Module};
