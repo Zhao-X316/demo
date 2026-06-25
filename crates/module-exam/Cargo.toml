@@ -1,0 +1,13 @@
+[package]
+name = "module-exam"
+version = "0.1.0"
+edition = "2021"
+description = "M2 改作业模块：图像识别 + 答案对比 + 逐选项知识点诊断 + 错题/掌握度"
+
+[dependencies]
+suite-core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rusqlite = "0.31"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
