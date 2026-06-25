@@ -5,6 +5,7 @@
 //! 只实现背诵特有部分：文件名解析、熟练度、评分编排、火山 ASR provider。
 
 pub mod asr_volcano;
+pub mod config;
 pub mod db;
 pub mod domain;
 pub mod grader;

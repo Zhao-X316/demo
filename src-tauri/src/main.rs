@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod secrets;
 mod state;
 
 use tauri::Manager;
@@ -20,6 +21,13 @@ fn main() {
             commands::students_list,
             commands::contents_list,
             commands::seed_demo,
+            commands::config_get,
+            commands::config_set,
+            commands::secrets_get,
+            commands::secrets_set,
+            commands::students_upsert,
+            commands::contents_upsert,
+            commands::tasks_generate,
         ])
         .run(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");

@@ -4,12 +4,14 @@ use chrono::{Duration, NaiveDate, Utc};
 use serde::Serialize;
 use tauri::State;
 
+use module_recitation::config::RecitationConfig;
 use module_recitation::db::contents::{self, ContentInput, RecContent};
 use module_recitation::service::{import, scoring, tasks as task_svc};
 use suite_core::db::repo::students::{self, StudentInput};
 use suite_core::db::repo::{submissions, tasks, verdicts};
 use suite_core::models::{ModuleKey, Student, TaskKind, TaskStatus};
 
+use crate::secrets::{self, VolcanoCreds};
 use crate::state::AppState;
 
 const MODULE: ModuleKey = ModuleKey::Recitation;
@@ -140,7 +142,7 @@ pub fn verdict_human_decide(
     note: Option<String>,
 ) -> R<String> {
     let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
-    let cfg = scoring::ScoreCfg::default();
+    let cfg = RecitationConfig::load(&conn).map_err(e)?.to_score_cfg();
     let next = scoring::human_decide(
         &conn,
         submission_id,
@@ -181,7 +183,7 @@ pub fn seed_demo(state: State<'_, AppState>) -> R<String> {
     task_svc::generate_normal(&conn, &date, &[(s1.id, c.id), (s2.id, c.id)]).map_err(e)?;
 
     let t = today_naive();
-    let cfg = scoring::ScoreCfg::default();
+    let cfg = RecitationConfig::load(&conn).map_err(e)?.to_score_cfg();
     // 张三完美背诵 → 通过；李四只背前两句 → 未通过(补背)
     let rows = [
         ("2023001", "张三", answer, "seed-h1"),
@@ -196,4 +198,78 @@ pub fn seed_demo(state: State<'_, AppState>) -> R<String> {
         }
     }
     Ok("已生成示例数据：2 名学生 + 静夜思，张三通过、李四待补背".to_string())
+}
+
+// ───────────────────────── 设置：评分配置 ─────────────────────────
+
+#[tauri::command]
+pub fn config_get(state: State<'_, AppState>) -> R<RecitationConfig> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    RecitationConfig::load(&conn).map_err(e)
+}
+
+#[tauri::command]
+pub fn config_set(state: State<'_, AppState>, cfg: RecitationConfig) -> R<()> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    cfg.save(&conn).map_err(e)
+}
+
+// ───────────────────────── 设置：火山凭据（本地文件） ─────────────────────────
+
+#[tauri::command]
+pub fn secrets_get(state: State<'_, AppState>) -> R<VolcanoCreds> {
+    secrets::load(&state.data_dir).map_err(e)
+}
+
+#[tauri::command]
+pub fn secrets_set(state: State<'_, AppState>, creds: VolcanoCreds) -> R<()> {
+    secrets::save(&state.data_dir, &creds).map_err(e)
+}
+
+// ───────────────────────── 管理：学生 / 内容 / 任务 ─────────────────────────
+
+#[tauri::command]
+pub fn students_upsert(
+    state: State<'_, AppState>,
+    student_no: String,
+    name: String,
+    enabled: bool,
+) -> R<Student> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    students::upsert(
+        &conn,
+        &StudentInput { student_no: &student_no, name: &name, class_id: None, enabled },
+    )
+    .map_err(e)
+}
+
+#[tauri::command]
+pub fn contents_upsert(
+    state: State<'_, AppState>,
+    content_no: String,
+    title: String,
+    answer_text: String,
+    enabled: bool,
+) -> R<RecContent> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    contents::upsert(
+        &conn,
+        &ContentInput {
+            content_no: &content_no,
+            title: &title,
+            answer_text: &answer_text,
+            subject_id: None,
+            enabled,
+        },
+    )
+    .map_err(e)
+}
+
+/// 为今日批量生成"新背"任务。返回生成数量。
+#[tauri::command]
+pub fn tasks_generate(state: State<'_, AppState>, pairs: Vec<(i64, i64)>) -> R<usize> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    let date = today_str();
+    let ids = task_svc::generate_normal(&conn, &date, &pairs).map_err(e)?;
+    Ok(ids.len())
 }

@@ -1,23 +1,40 @@
-import { modules } from "./shell/moduleRegistry";
+import { useState } from "react";
 import Dashboard from "./pages/Dashboard";
+import Manage from "./pages/Manage";
+import Settings from "./pages/Settings";
+
+type View = "dashboard" | "manage" | "settings";
+
+const NAV: { key: View; icon: string; label: string }[] = [
+  { key: "dashboard", icon: "📋", label: "今日看板" },
+  { key: "manage", icon: "🗂️", label: "管理" },
+  { key: "settings", icon: "⚙️", label: "设置" },
+];
 
 export default function App() {
+  const [view, setView] = useState<View>("dashboard");
   return (
     <div className="app">
       <aside className="sidebar">
-        <div className="logo">教辅系统</div>
+        <div className="logo">📖 背诵批改</div>
         <nav>
-          {modules.map((m) => (
-            <a key={m.key} className={m.key === "recitation" ? "nav active" : "nav"}>
-              <span className="nav-icon">{m.icon}</span>
-              {m.name}
-            </a>
+          {NAV.map((n) => (
+            <button
+              key={n.key}
+              className={n.key === view ? "nav active" : "nav"}
+              onClick={() => setView(n.key)}
+            >
+              <span className="nav-icon">{n.icon}</span>
+              {n.label}
+            </button>
           ))}
         </nav>
         <div className="sidebar-foot">v0.1 · 本地版</div>
       </aside>
       <main className="main">
-        <Dashboard />
+        {view === "dashboard" && <Dashboard />}
+        {view === "manage" && <Manage />}
+        {view === "settings" && <Settings />}
       </main>
     </div>
   );
