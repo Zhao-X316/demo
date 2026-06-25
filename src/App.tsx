@@ -1,12 +1,14 @@
 import { useState } from "react";
 import Dashboard from "./pages/Dashboard";
+import Import from "./pages/Import";
 import Manage from "./pages/Manage";
 import Settings from "./pages/Settings";
 
-type View = "dashboard" | "manage" | "settings";
+type View = "dashboard" | "import" | "manage" | "settings";
 
 const NAV: { key: View; icon: string; label: string }[] = [
   { key: "dashboard", icon: "📋", label: "今日看板" },
+  { key: "import", icon: "🎙️", label: "导入录音" },
   { key: "manage", icon: "🗂️", label: "管理" },
   { key: "settings", icon: "⚙️", label: "设置" },
 ];
@@ -33,6 +35,7 @@ export default function App() {
       </aside>
       <main className="main">
         {view === "dashboard" && <Dashboard />}
+        {view === "import" && <Import />}
         {view === "manage" && <Manage />}
         {view === "settings" && <Settings />}
       </main>

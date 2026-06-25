@@ -273,3 +273,108 @@ pub fn tasks_generate(state: State<'_, AppState>, pairs: Vec<(i64, i64)>) -> R<u
     let ids = task_svc::generate_normal(&conn, &date, &pairs).map_err(e)?;
     Ok(ids.len())
 }
+
+// ───────────────────────── 导入 + ASR 评分 ─────────────────────────
+
+#[derive(Serialize)]
+pub struct ImportResultDto {
+    file: String,
+    status: String, // imported | duplicate | anomaly | error
+    detail: String,
+    submission_id: Option<i64>,
+}
+
+/// 批量导入音频文件：计算哈希 → 解析文件名 → 入库/去重/异常。
+#[tauri::command]
+pub fn import_paths(state: State<'_, AppState>, paths: Vec<String>) -> R<Vec<ImportResultDto>> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
+        let path = std::path::Path::new(&p);
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let hash = match suite_core::domain::hashing::sha256_file(path) {
+            Ok(h) => h,
+            Err(err) => {
+                out.push(ImportResultDto { file: p.clone(), status: "error".into(), detail: format!("读取/哈希失败: {err}"), submission_id: None });
+                continue;
+            }
+        };
+        let item = import::ImportItem { file_path: &p, file_stem: &stem, file_hash: &hash, duration_ms: None };
+        let dto = match import::import_one(&conn, &item) {
+            Ok(import::ImportOutcome::Imported { submission_id, warning, .. }) => ImportResultDto {
+                file: p.clone(),
+                status: "imported".into(),
+                detail: warning.unwrap_or_else(|| "已导入".into()),
+                submission_id: Some(submission_id),
+            },
+            Ok(import::ImportOutcome::Duplicate { existing_submission_id }) => ImportResultDto {
+                file: p.clone(),
+                status: "duplicate".into(),
+                detail: "重复文件（已跳过）".into(),
+                submission_id: existing_submission_id,
+            },
+            Ok(import::ImportOutcome::Anomaly { submission_id, anomaly_type }) => ImportResultDto {
+                file: p.clone(),
+                status: "anomaly".into(),
+                detail: anomaly_label(&anomaly_type),
+                submission_id: Some(submission_id),
+            },
+            Err(err) => ImportResultDto { file: p.clone(), status: "error".into(), detail: err.to_string(), submission_id: None },
+        };
+        out.push(dto);
+    }
+    Ok(out)
+}
+
+fn anomaly_label(t: &str) -> String {
+    match t {
+        "parse_error" => "文件名无法解析".into(),
+        "student_not_found" => "找不到对应学生".into(),
+        "content_not_found" => "找不到对应内容".into(),
+        "no_task" => "当日无对应任务".into(),
+        other => other.to_string(),
+    }
+}
+
+#[derive(Serialize)]
+pub struct ScoreOutcomeDto {
+    verdict_id: i64,
+    accuracy: f64,
+    pass: bool,
+    fluency: f64,
+    quality: String,
+    text: String,
+    next: String,
+}
+
+/// 对一条提交跑火山 ASR 并评分（异步）。识别文本与词级时间戳回写后入评分编排。
+#[tauri::command]
+pub async fn asr_and_score(state: State<'_, AppState>, submission_id: i64) -> R<ScoreOutcomeDto> {
+    // 同步段：取音频路径 + 凭据（不可跨 await 持锁）
+    let (audio_path, req_id, creds) = {
+        let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+        let sub = submissions::get(&conn, submission_id)
+            .map_err(e)?
+            .ok_or_else(|| "提交不存在".to_string())?;
+        let creds = secrets::load(&state.data_dir).map_err(e)?;
+        (sub.file_path.clone(), sub.file_hash.clone(), creds)
+    };
+
+    // 异步段：调用火山
+    let out = crate::asr::recognize(&creds, &audio_path, &req_id).await?;
+
+    // 同步段：回写识别 + 评分
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    submissions::set_recognition(&conn, submission_id, Some(&out.text), "ok", None, Some(out.duration_ms as i64)).map_err(e)?;
+    let cfg = RecitationConfig::load(&conn).map_err(e)?.to_score_cfg();
+    let r = scoring::score_submission(&conn, submission_id, &out.words, today_naive(), &cfg).map_err(e)?;
+    Ok(ScoreOutcomeDto {
+        verdict_id: r.verdict_id,
+        accuracy: r.accuracy,
+        pass: r.pass,
+        fluency: r.fluency,
+        quality: r.quality,
+        text: out.text,
+        next: format!("{:?}", r.next),
+    })
+}

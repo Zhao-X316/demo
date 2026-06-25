@@ -1,6 +1,7 @@
 // 发布构建时隐藏 Windows 控制台窗口
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod asr;
 mod commands;
 mod secrets;
 mod state;
@@ -28,6 +29,8 @@ fn main() {
             commands::students_upsert,
             commands::contents_upsert,
             commands::tasks_generate,
+            commands::import_paths,
+            commands::asr_and_score,
         ])
         .run(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");
