@@ -30,3 +30,9 @@ impl Serialize for CoreError {
 }
 
 pub type CoreResult<T> = Result<T, CoreError>;
+
+impl From<rusqlite::Error> for CoreError {
+    fn from(e: rusqlite::Error) -> Self {
+        CoreError::Db(e.to_string())
+    }
+}

@@ -9,6 +9,7 @@
 //! 业务模块（M1 背诵、M2 题目批改、M3 错题统计…）依赖本 crate，
 //! 只实现各自差异部分；模块之间不互相依赖。
 
+pub mod db;
 pub mod domain;
 pub mod error;
 pub mod models;
