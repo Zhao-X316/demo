@@ -12,7 +12,7 @@ use suite_core::domain::normalize::NormalizeCfg;
 use suite_core::domain::scheduler::{LadderScheduler, ReviewQuality};
 use suite_core::error::{CoreError, CoreResult};
 use suite_core::models::{ModuleKey, TaskStatus};
-use suite_core::ports::{Grader, RecognizedWord};
+use suite_core::ports::{GradeResult, Grader, RecognizedWord};
 use suite_core::services::review::{self, ReviewRef};
 
 use crate::db::contents;
@@ -84,18 +84,49 @@ pub fn score_submission(
     let content = contents::get_by_id(conn, content_id)?
         .ok_or_else(|| CoreError::NotFound(format!("content {content_id}")))?;
 
+    let g = grade_and_record(conn, submission_id, &content, &asr_text, words, duration, cfg)?;
+
+    let review_ref =
+        ReviewRef { module: MODULE, student_id, ref_type: REF_TYPE, ref_id: content_id };
+    let next = apply_outcome(conn, &review_ref, sub.task_id, g.grade.pass, &g.quality, today, cfg)?;
+
+    Ok(ScoreOutcome {
+        verdict_id: g.verdict_id,
+        accuracy: g.grade.primary_score,
+        pass: g.grade.pass,
+        fluency: g.grade.secondary_score.unwrap_or(0.0),
+        quality: g.quality,
+        next,
+    })
+}
+
+struct Graded {
+    grade: GradeResult,
+    quality: String,
+    verdict_id: i64,
+}
+
+/// 评分 + 写新判定 + 提交转 scored（不含复习/补背副作用）。
+fn grade_and_record(
+    conn: &Connection,
+    submission_id: i64,
+    content: &crate::db::contents::RecContent,
+    asr_text: &str,
+    words: &[RecognizedWord],
+    duration_ms: u64,
+    cfg: &ScoreCfg,
+) -> CoreResult<Graded> {
     let grade = RecitationGrader.grade(RecitationGradeInput {
         answer_text: &content.answer_text,
-        asr_text: &asr_text,
+        asr_text,
         words,
-        duration_ms: duration,
+        duration_ms,
         normalize_cfg: &cfg.normalize,
         accuracy_cfg: &cfg.accuracy,
         fluency_cfg: &cfg.fluency,
     })?;
-
     let quality = grade.quality.clone().unwrap_or_else(|| "C".to_string());
-    let vid = verdicts::insert(
+    let verdict_id = verdicts::insert(
         conn,
         &verdicts::NewVerdict {
             submission_id,
@@ -111,43 +142,111 @@ pub fn score_submission(
         },
     )?;
     submissions::set_status(conn, submission_id, "scored")?;
+    Ok(Graded { grade, quality, verdict_id })
+}
 
-    let review_ref =
-        ReviewRef { module: MODULE, student_id, ref_type: REF_TYPE, ref_id: content_id };
-
-    let next = if grade.pass {
+/// 应用通过/未通过的副作用：通过→排复习+任务passed+作废残留补背；未通过→脱档+任务failed+生成补背。
+fn apply_outcome(
+    conn: &Connection,
+    review_ref: &ReviewRef<'_>,
+    task_id: Option<i64>,
+    pass: bool,
+    quality: &str,
+    today: NaiveDate,
+    cfg: &ScoreCfg,
+) -> CoreResult<NextAction> {
+    if pass {
         let sched = LadderScheduler::default();
-        let out = review::record_pass(conn, &review_ref, quality_to_review(&quality), today, &sched)?;
-        if let Some(tid) = sub.task_id {
+        let out = review::record_pass(conn, review_ref, quality_to_review(quality), today, &sched)?;
+        if let Some(tid) = task_id {
             tasks::set_status(conn, tid, TaskStatus::Passed)?;
         }
+        // 通过 → 作废该 学生+内容 残留的未关闭补背（如人工把 fail 改判为 pass）
+        tasks::close_open_kind(conn, MODULE, review_ref.student_id, review_ref.ref_id, suite_core::models::TaskKind::Makeup)?;
         let due = (today + Duration::days(out.interval_days as i64))
             .format("%Y-%m-%d")
             .to_string();
-        NextAction::Scheduled { due_date: due, stage: out.stage }
+        Ok(NextAction::Scheduled { due_date: due, stage: out.stage })
     } else {
-        review::record_lapse(conn, &review_ref, today)?;
-        if let Some(tid) = sub.task_id {
+        review::record_lapse(conn, review_ref, today)?;
+        if let Some(tid) = task_id {
             tasks::set_status(conn, tid, TaskStatus::Failed)?;
         }
         let due = (today + Duration::days(cfg.makeup_offset_days))
             .format("%Y-%m-%d")
             .to_string();
-        let mk = match sub.task_id {
-            Some(tid) => task_service::ensure_makeup(conn, student_id, content_id, tid, &due)?,
+        let mk = match task_id {
+            Some(tid) => task_service::ensure_makeup(
+                conn, review_ref.student_id, review_ref.ref_id, tid, &due,
+            )?,
             None => None,
         };
-        NextAction::Makeup { task_id: mk, due_date: due }
-    };
+        Ok(NextAction::Makeup { task_id: mk, due_date: due })
+    }
+}
 
+/// 重判（答案版本变更后）：重新评分并写新判定，但**不**改动既有复习/补背排程
+/// （如需改变排程由人工 `human_decide`）。
+pub fn rescore(
+    conn: &Connection,
+    submission_id: i64,
+    words: &[RecognizedWord],
+    cfg: &ScoreCfg,
+) -> CoreResult<ScoreOutcome> {
+    let sub = submissions::get(conn, submission_id)?
+        .ok_or_else(|| CoreError::NotFound(format!("submission {submission_id}")))?;
+    let content_id = sub.ref_id.ok_or_else(|| CoreError::Invalid("提交缺少内容".into()))?;
+    let asr_text = sub.recognized_text.clone().unwrap_or_default();
+    let duration = sub.duration_ms.unwrap_or(0).max(0) as u64;
+    let content = contents::get_by_id(conn, content_id)?
+        .ok_or_else(|| CoreError::NotFound(format!("content {content_id}")))?;
+
+    let g = grade_and_record(conn, submission_id, &content, &asr_text, words, duration, cfg)?;
     Ok(ScoreOutcome {
-        verdict_id: vid,
-        accuracy: grade.primary_score,
-        pass: grade.pass,
-        fluency: grade.secondary_score.unwrap_or(0.0),
-        quality,
-        next,
+        verdict_id: g.verdict_id,
+        accuracy: g.grade.primary_score,
+        pass: g.grade.pass,
+        fluency: g.grade.secondary_score.unwrap_or(0.0),
+        quality: g.quality,
+        next: NextAction::Scheduled { due_date: String::new(), stage: -1 }, // 占位：rescore 不改排程
     })
+}
+
+/// 人工最终判定（pass|fail|reopen）。写入 human_result 并据此驱动复习/补背。
+pub fn human_decide(
+    conn: &Connection,
+    submission_id: i64,
+    result: &str,
+    note: Option<&str>,
+    decided_by: Option<&str>,
+    today: NaiveDate,
+    cfg: &ScoreCfg,
+) -> CoreResult<NextAction> {
+    let sub = submissions::get(conn, submission_id)?
+        .ok_or_else(|| CoreError::NotFound(format!("submission {submission_id}")))?;
+    let student_id = sub.student_id.ok_or_else(|| CoreError::Invalid("提交缺少学生".into()))?;
+    let content_id = sub.ref_id.ok_or_else(|| CoreError::Invalid("提交缺少内容".into()))?;
+
+    let verdict = verdicts::get_by_submission(conn, submission_id)?
+        .ok_or_else(|| CoreError::NotFound("尚无判定，无法人工确认".into()))?;
+    verdicts::set_human_result(conn, verdict.id, result, note, decided_by)?;
+    submissions::set_status(conn, submission_id, "confirmed")?;
+
+    let quality = verdict.quality.clone().unwrap_or_else(|| "C".to_string());
+    let review_ref =
+        ReviewRef { module: MODULE, student_id, ref_type: REF_TYPE, ref_id: content_id };
+
+    match result {
+        "pass" => apply_outcome(conn, &review_ref, sub.task_id, true, &quality, today, cfg),
+        "fail" => apply_outcome(conn, &review_ref, sub.task_id, false, &quality, today, cfg),
+        "reopen" => {
+            if let Some(tid) = sub.task_id {
+                tasks::set_status(conn, tid, TaskStatus::Reopened)?;
+            }
+            Ok(NextAction::Makeup { task_id: None, due_date: String::new() })
+        }
+        other => Err(CoreError::Invalid(format!("未知人工结论: {other}"))),
+    }
 }
 
 #[cfg(test)]

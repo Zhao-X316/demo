@@ -40,6 +40,33 @@ pub fn ensure_makeup(
     Ok(Some(id))
 }
 
+/// 批量生成"新背"任务：为给定 (学生, 内容) 列表在某日期建 normal 任务（幂等）。返回任务 id 列表。
+pub fn generate_normal(
+    conn: &Connection,
+    due_date: &str,
+    pairs: &[(i64, i64)],
+) -> CoreResult<Vec<i64>> {
+    let mut out = Vec::with_capacity(pairs.len());
+    for &(student_id, content_id) in pairs {
+        let id = tasks::insert(
+            conn,
+            &tasks::NewTask {
+                module: MODULE,
+                student_id,
+                subject_id: None,
+                ref_type: REF_TYPE,
+                ref_id: content_id,
+                kind: TaskKind::Normal,
+                due_date,
+                source_task_id: None,
+                card_id: None,
+            },
+        )?;
+        out.push(id);
+    }
+    Ok(out)
+}
+
 /// 到期复习生成：扫描到期记忆卡片，为每张生成一条复习任务（去重）。
 pub fn generate_due_reviews(conn: &Connection, today: &str) -> CoreResult<Vec<i64>> {
     let cards = memory_cards::due(conn, MODULE, today)?;

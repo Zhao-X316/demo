@@ -141,6 +141,23 @@ pub fn exists_open_kind(
     Ok(n > 0)
 }
 
+/// 关闭某 学生+内容 下所有未关闭的指定种类任务（如人工改判后作废补背）。返回关闭数量。
+pub fn close_open_kind(
+    conn: &Connection,
+    module: ModuleKey,
+    student_id: i64,
+    ref_id: i64,
+    kind: TaskKind,
+) -> CoreResult<usize> {
+    let n = conn.execute(
+        "UPDATE tasks SET status='closed', updated_at=datetime('now')
+         WHERE module=?1 AND student_id=?2 AND ref_id=?3 AND kind=?4
+           AND status IN ('open','submitted','reopened')",
+        (module.as_str(), student_id, ref_id, kind_str(kind)),
+    )?;
+    Ok(n)
+}
+
 /// 今日任务列表。
 pub fn list_by_date(conn: &Connection, module: ModuleKey, date: &str) -> CoreResult<Vec<Task>> {
     let sql = format!("SELECT {COLS} FROM tasks WHERE module=?1 AND due_date=?2 ORDER BY kind, id");
