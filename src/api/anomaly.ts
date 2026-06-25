@@ -13,7 +13,7 @@ export const anomaliesList = () => call<Anomaly[]>("anomalies_list");
 
 export const anomalyReassign = (submission_id: number, student_no?: string, content_no?: string) =>
   call<number | null>("anomaly_reassign", {
-    submission_id,
-    student_no: student_no ?? null,
-    content_no: content_no ?? null,
+    submissionId: submission_id,
+    studentNo: student_no ?? null,
+    contentNo: content_no ?? null,
   });

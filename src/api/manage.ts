@@ -22,14 +22,14 @@ export const studentsList = () => call<Student[]>("students_list");
 export const contentsList = () => call<RecContent[]>("contents_list");
 
 export const studentsUpsert = (student_no: string, name: string, enabled: boolean) =>
-  call<Student>("students_upsert", { student_no, name, enabled });
+  call<Student>("students_upsert", { studentNo: student_no, name, enabled });
 
 export const contentsUpsert = (
   content_no: string,
   title: string,
   answer_text: string,
   enabled: boolean,
-) => call<RecContent>("contents_upsert", { content_no, title, answer_text, enabled });
+) => call<RecContent>("contents_upsert", { contentNo: content_no, title, answerText: answer_text, enabled });
 
 export const tasksGenerate = (pairs: [number, number][]) =>
   call<number>("tasks_generate", { pairs });

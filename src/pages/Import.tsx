@@ -1,30 +1,54 @@
 import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { asrAndScore, importPaths, type ImportResult } from "../api/importing";
+import {
+  asrAndScore,
+  importAutoname,
+  importPaths,
+  type AutonameResult,
+  type ImportResult,
+} from "../api/importing";
 import { AudioPlayer } from "../components/AudioPlayer";
 
 interface Row extends ImportResult {
-  asr?: string; // 识别评分结果摘要
+  asr?: string;
   asrBusy?: boolean;
 }
 
+const AUDIO_FILTER = [{ name: "音频", extensions: ["m4a", "mp3", "wav", "ogg", "aac", "flac"] }];
+
 export default function Import() {
   const [rows, setRows] = useState<Row[]>([]);
+  const [auto, setAuto] = useState<AutonameResult[]>([]);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const pick = async () => {
+  // 智能识别导入：分析录音内容 → 识别学生/内容 → 自动改名评分
+  const smartImport = async () => {
     setErr("");
     try {
-      const sel = await open({
-        multiple: true,
-        filters: [{ name: "音频", extensions: ["m4a", "mp3", "wav", "ogg", "aac", "flac"] }],
-      });
+      const sel = await open({ multiple: true, filters: AUDIO_FILTER });
       if (!sel) return;
       const paths = Array.isArray(sel) ? sel : [sel];
       setBusy(true);
-      const res = await importPaths(paths);
-      setRows(res);
+      setAuto(await importAutoname(paths));
+      setRows([]);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // 按文件名导入（备用：文件名已是 日期_学号_姓名_编号）
+  const nameImport = async () => {
+    setErr("");
+    try {
+      const sel = await open({ multiple: true, filters: AUDIO_FILTER });
+      if (!sel) return;
+      const paths = Array.isArray(sel) ? sel : [sel];
+      setBusy(true);
+      setRows(await importPaths(paths));
+      setAuto([]);
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -45,29 +69,58 @@ export default function Import() {
     }
   };
 
-  const runAll = async () => {
-    for (let i = 0; i < rows.length; i++) {
-      if (rows[i].status === "imported" && rows[i].submission_id && !rows[i].asr) {
-        // 顺序执行，避免并发打满火山额度
-        // eslint-disable-next-line no-await-in-loop
-        await runAsr(i);
-      }
-    }
-  };
-
-  const importedCount = rows.filter((r) => r.status === "imported").length;
-
   return (
     <div className="page">
       <div className="page-head">
         <h1>导入录音</h1>
         <div className="row">
-          <button className="primary" onClick={pick} disabled={busy}>选择音频文件</button>
-          {importedCount > 0 && <button onClick={runAll} disabled={busy}>全部识别评分</button>}
+          <button className="primary" onClick={smartImport} disabled={busy}>
+            {busy ? "处理中…" : "智能识别导入"}
+          </button>
+          <button onClick={nameImport} disabled={busy}>按文件名导入</button>
         </div>
       </div>
-      <p className="muted">文件名格式：<code>日期_学号_姓名_内容编号</code>，如 <code>20260625_2023001_张三_C012.m4a</code></p>
+      <p className="muted">
+        智能识别：录音开头说「姓名 + 日期 + 背诵内容」，系统自动识别、命名为
+        <code>日期_学号_姓名_编号</code> 并评分。
+      </p>
       {err && <div className="error">出错：{err}</div>}
+
+      {auto.length > 0 && (
+        <table className="tbl">
+          <thead>
+            <tr><th>原文件</th><th>识别结果</th><th>学生 / 内容</th><th>评分</th></tr>
+          </thead>
+          <tbody>
+            {auto.map((r, i) => (
+              <tr key={i}>
+                <td className="filecell">
+                  {baseName(r.file)}
+                  {r.status !== "error" && <AudioPlayer path={r.file} />}
+                </td>
+                <td>
+                  <span className={`pill pill-${pillClass(r.status)}`}>{autoLabel(r.status)}</span>
+                  {r.new_name && <div className="muted">→ {r.new_name}</div>}
+                  {r.status !== "scored" && <div className="muted">{r.detail}</div>}
+                </td>
+                <td className="muted">
+                  {r.student ?? "—"}
+                  {r.content ? <div>{r.content}</div> : null}
+                </td>
+                <td>
+                  {r.accuracy != null ? (
+                    <span className={r.pass ? "acc ok" : "acc bad"}>
+                      {Math.round(r.accuracy)}% {r.pass ? "✓" : "✗"}
+                    </span>
+                  ) : (
+                    "—"
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
 
       {rows.length > 0 && (
         <table className="tbl">
@@ -113,8 +166,12 @@ function statusLabel(s: string): string {
   const m: Record<string, string> = { imported: "已导入", duplicate: "重复", anomaly: "异常", error: "错误" };
   return m[s] ?? s;
 }
+function autoLabel(s: string): string {
+  const m: Record<string, string> = { scored: "已评分", duplicate: "重复", unmatched: "未识别", error: "错误" };
+  return m[s] ?? s;
+}
 function pillClass(s: string): string {
-  if (s === "imported") return "passed";
-  if (s === "anomaly" || s === "error") return "failed";
+  if (s === "imported" || s === "scored") return "passed";
+  if (s === "anomaly" || s === "error" || s === "unmatched") return "failed";
   return "submitted";
 }

@@ -6,10 +6,10 @@ use tauri::State;
 
 use module_recitation::config::RecitationConfig;
 use module_recitation::db::contents::{self, ContentInput, RecContent};
-use module_recitation::service::{import, scoring, tasks as task_svc};
+use module_recitation::service::{import, matching, scoring, tasks as task_svc};
 use suite_core::db::repo::students::{self, StudentInput};
-use suite_core::db::repo::{submissions, tasks, verdicts};
-use suite_core::models::{ModuleKey, Student, TaskKind, TaskStatus};
+use suite_core::db::repo::{file_ledger, submissions, tasks, verdicts};
+use suite_core::models::{MediaType, ModuleKey, Student, TaskKind, TaskStatus};
 
 use crate::secrets::{self, VolcanoCreds};
 use crate::state::AppState;
@@ -336,6 +336,164 @@ fn anomaly_label(t: &str) -> String {
         "no_task" => "当日无对应任务".into(),
         other => other.to_string(),
     }
+}
+
+// ───────────────────────── 智能识别导入（按录音内容自动命名） ─────────────────────────
+
+#[derive(Serialize)]
+pub struct AutonameDto {
+    file: String,
+    status: String, // scored | duplicate | unmatched | error
+    detail: String,
+    new_name: Option<String>,
+    student: Option<String>,
+    content: Option<String>,
+    accuracy: Option<f64>,
+    pass: Option<bool>,
+}
+
+/// 内容匹配阈值（覆盖率%）：低于此值视为未能识别内容。
+const MATCH_MIN: f64 = 50.0;
+
+/// 分析录音 → 识别学生/内容 → 自动重命名为 `日期_学号_姓名_内容编号` → 落库评分。
+/// 录音内容约定为「姓名 + 日期 + 背诵内容」。日期暂用当天（后续可解析口述日期）。
+#[tauri::command]
+pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>) -> R<Vec<AutonameDto>> {
+    let creds = secrets::load(&state.data_dir).map_err(e)?;
+    let mut out = Vec::with_capacity(paths.len());
+
+    for p in paths {
+        let path = std::path::Path::new(&p);
+        let fail = |detail: String| AutonameDto {
+            file: p.clone(),
+            status: "error".into(),
+            detail,
+            new_name: None,
+            student: None,
+            content: None,
+            accuracy: None,
+            pass: None,
+        };
+
+        // 哈希 + 去重（同步段）
+        let hash = match suite_core::domain::hashing::sha256_file(path) {
+            Ok(h) => h,
+            Err(err) => {
+                out.push(fail(format!("哈希失败: {err}")));
+                continue;
+            }
+        };
+        let dup = {
+            let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+            file_ledger::get(&conn, &hash).map_err(e)?.is_some()
+        };
+        if dup {
+            out.push(AutonameDto {
+                file: p.clone(),
+                status: "duplicate".into(),
+                detail: "重复文件（已跳过）".into(),
+                new_name: None,
+                student: None,
+                content: None,
+                accuracy: None,
+                pass: None,
+            });
+            continue;
+        }
+
+        // 转码 + ASR（异步段，不持锁）
+        let tmp = std::env::temp_dir();
+        let transcoded = crate::audio::transcode_to_wav16k(&p, &tmp);
+        let asr_path = transcoded.as_ref().and_then(|x| x.to_str()).unwrap_or(&p).to_string();
+        let asr = crate::asr::recognize(&creds, &asr_path, &hash).await;
+        if let Some(t) = transcoded {
+            let _ = std::fs::remove_file(t);
+        }
+        let asr = match asr {
+            Ok(a) => a,
+            Err(err) => {
+                out.push(fail(format!("识别失败: {err}")));
+                continue;
+            }
+        };
+        let dur = if asr.duration_ms > 0 {
+            Some(asr.duration_ms as i64)
+        } else {
+            crate::audio::ffprobe_duration_ms(&p).map(|d| d as i64)
+        };
+
+        // 匹配 + 落库 + 评分（同步段）
+        let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+        let rcfg = RecitationConfig::load(&conn).map_err(e)?;
+        let scfg = rcfg.to_score_cfg();
+        let student = matching::find_student(&conn, &asr.text).map_err(e)?;
+        let content = matching::best_content(&conn, &asr.text, &scfg.normalize, &scfg.accuracy).map_err(e)?;
+
+        match (student, content) {
+            (Some(s), Some((c, score))) if score >= MATCH_MIN => {
+                let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("m4a");
+                let new_name =
+                    format!("{}_{}_{}_{}.{}", today_str().replace('-', ""), s.student_no, s.name, c.content_no, ext);
+                let final_path = match path.parent() {
+                    Some(dir) => {
+                        let np = dir.join(&new_name);
+                        if std::fs::rename(&p, &np).is_ok() {
+                            np.to_string_lossy().to_string()
+                        } else {
+                            p.clone()
+                        }
+                    }
+                    None => p.clone(),
+                };
+                let (sub_id, _t) =
+                    import::import_resolved(&conn, &final_path, &hash, s.id, c.id, dur).map_err(e)?;
+                submissions::set_recognition(&conn, sub_id, Some(&asr.text), "ok", None, dur).map_err(e)?;
+                let r = scoring::score_submission(&conn, sub_id, &asr.words, today_naive(), &scfg).map_err(e)?;
+                out.push(AutonameDto {
+                    file: p.clone(),
+                    status: "scored".into(),
+                    detail: format!("匹配度 {score:.0}%"),
+                    new_name: Some(new_name),
+                    student: Some(format!("{} {}", s.student_no, s.name)),
+                    content: Some(format!("{} {}", c.content_no, c.title)),
+                    accuracy: Some(r.accuracy),
+                    pass: Some(r.pass),
+                });
+            }
+            _ => {
+                let meta = serde_json::json!({ "asr": asr.text }).to_string();
+                let sub_id = submissions::insert(
+                    &conn,
+                    &submissions::NewSubmission {
+                        module: MODULE,
+                        task_id: None,
+                        student_id: None,
+                        ref_id: None,
+                        media_type: MediaType::Audio,
+                        file_path: &p,
+                        file_hash: &hash,
+                        duration_ms: dur,
+                        parsed_meta: Some(&meta),
+                        anomaly_type: Some("autoname_unmatched"),
+                        status: "anomaly",
+                    },
+                )
+                .map_err(e)?;
+                file_ledger::record(&conn, &hash, &p, sub_id).map_err(e)?;
+                out.push(AutonameDto {
+                    file: p.clone(),
+                    status: "unmatched".into(),
+                    detail: "未能识别学生/内容，已入异常池待人工".into(),
+                    new_name: None,
+                    student: None,
+                    content: None,
+                    accuracy: None,
+                    pass: None,
+                });
+            }
+        }
+    }
+    Ok(out)
 }
 
 // ───────────────────────── 异常池 ─────────────────────────

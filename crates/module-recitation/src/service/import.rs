@@ -132,6 +132,41 @@ pub fn import_one(conn: &Connection, item: &ImportItem<'_>) -> CoreResult<Import
     Ok(ImportOutcome::Imported { submission_id: sub_id, task_id: task.id, warning })
 }
 
+/// 已解析身份的导入（用于"内容识别→自动命名"）：直接按 学生/内容 建提交、挂开放任务、记账本。
+/// 返回 (submission_id, task_id)。调用方随后写识别结果并评分。
+pub fn import_resolved(
+    conn: &Connection,
+    file_path: &str,
+    file_hash: &str,
+    student_id: i64,
+    content_id: i64,
+    duration_ms: Option<i64>,
+) -> CoreResult<(i64, Option<i64>)> {
+    let task = tasks::find_latest_open(conn, MODULE, student_id, content_id)?;
+    let task_id = task.as_ref().map(|t| t.id);
+    let sub_id = submissions::insert(
+        conn,
+        &submissions::NewSubmission {
+            module: MODULE,
+            task_id,
+            student_id: Some(student_id),
+            ref_id: Some(content_id),
+            media_type: MediaType::Audio,
+            file_path,
+            file_hash,
+            duration_ms,
+            parsed_meta: None,
+            anomaly_type: None,
+            status: "pending",
+        },
+    )?;
+    file_ledger::record(conn, file_hash, file_path, sub_id)?;
+    if let Some(tid) = task_id {
+        tasks::set_status(conn, tid, TaskStatus::Submitted)?;
+    }
+    Ok((sub_id, task_id))
+}
+
 /// 改派异常提交：给定正确的 学生/内容 id（任一可沿用原值），重设关联、挂上开放任务、回到 pending。
 /// 返回关联到的 task_id（无开放任务则 None，仍可单独识别评分）。
 pub fn reassign(

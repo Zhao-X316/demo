@@ -31,6 +31,7 @@ fn main() {
             commands::contents_upsert,
             commands::tasks_generate,
             commands::import_paths,
+            commands::import_autoname,
             commands::asr_and_score,
             commands::anomalies_list,
             commands::anomaly_reassign,

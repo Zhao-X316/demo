@@ -34,6 +34,6 @@ export interface TodayView {
 export const dashboardToday = () => call<TodayView>("dashboard_today");
 
 export const humanDecide = (submission_id: number, result: string, note?: string) =>
-  call<string>("verdict_human_decide", { submission_id, result, note: note ?? null });
+  call<string>("verdict_human_decide", { submissionId: submission_id, result, note: note ?? null });
 
 export const seedDemo = () => call<string>("seed_demo");
