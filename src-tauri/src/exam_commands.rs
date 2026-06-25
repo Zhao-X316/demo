@@ -15,7 +15,7 @@ type R<T> = Result<T, String>;
 fn e<E: ToString>(err: E) -> String {
     err.to_string()
 }
-fn lock(state: &State<'_, AppState>) -> R<std::sync::MutexGuard<'_, rusqlite::Connection>> {
+fn lock<'a>(state: &'a State<'a, AppState>) -> R<std::sync::MutexGuard<'a, rusqlite::Connection>> {
     state.db.lock().map_err(|_| "数据库忙".to_string())
 }
 
