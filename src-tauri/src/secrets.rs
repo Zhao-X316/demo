@@ -15,6 +15,12 @@ pub struct VolcanoCreds {
     /// 资源/集群标识（火山不同识别套餐需要，可留空）。
     #[serde(default)]
     pub cluster: String,
+    /// 火山方舟(Ark) 视觉大模型 API Key（改作业模块用，与 ASR 凭据不同）。
+    #[serde(default)]
+    pub ark_api_key: String,
+    /// 方舟接入点/模型 ID（如 ep-xxx 或 doubao-1.5-vision-pro），留空用默认。
+    #[serde(default)]
+    pub ark_model: String,
 }
 
 fn secrets_path(dir: &Path) -> PathBuf {

@@ -4,8 +4,10 @@
 mod asr;
 mod audio;
 mod commands;
+mod exam_commands;
 mod secrets;
 mod state;
+mod vlm;
 
 use tauri::Manager;
 
@@ -35,6 +37,16 @@ fn main() {
             commands::asr_and_score,
             commands::anomalies_list,
             commands::anomaly_reassign,
+            exam_commands::kp_list,
+            exam_commands::kp_create,
+            exam_commands::kp_rename,
+            exam_commands::kp_delete,
+            exam_commands::questions_list,
+            exam_commands::question_get,
+            exam_commands::question_create,
+            exam_commands::question_set_options,
+            exam_commands::question_delete,
+            exam_commands::question_vlm_analyze,
         ])
         .run(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");
