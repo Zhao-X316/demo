@@ -11,6 +11,8 @@ dist
 # Tauri 构建产物
 src-tauri/target
 src-tauri/gen
+# 平台图标由 CI 用 assets/icon.png 经 `tauri icon` 生成（保留源 assets/icon.png）
+src-tauri/icons/
 
 # 凭据与本地数据（绝不入库）
 secrets.json

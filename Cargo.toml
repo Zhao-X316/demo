@@ -9,6 +9,9 @@ members = [
     "crates/core",
     "crates/module-recitation",
 ]
+# src-tauri 是独立包（按平台单独构建，需 icons/webkit），不纳入后端工作区，
+# 这样 `cargo test --workspace` 只跑可跨平台的纯逻辑 crate。
+exclude = ["src-tauri"]
 
 [workspace.package]
 edition = "2021"

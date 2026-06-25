@@ -36,3 +36,38 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  app:
+    name: app build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (src-tauri)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      - name: Install frontend deps
+        run: npm install
+
+      - name: Generate app icons
+        run: npx --yes @tauri-apps/cli icon assets/icon.png
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build Tauri app (compile, no bundle)
+        run: cargo build --manifest-path src-tauri/Cargo.toml

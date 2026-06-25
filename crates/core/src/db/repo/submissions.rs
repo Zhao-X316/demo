@@ -69,6 +69,12 @@ pub fn get(conn: &Connection, id: i64) -> CoreResult<Option<Submission>> {
     Ok(conn.query_row(&sql, [id], row_to_submission).optional()?)
 }
 
+/// 某任务的最新提交（看板用）。
+pub fn find_by_task(conn: &Connection, task_id: i64) -> CoreResult<Option<Submission>> {
+    let sql = format!("SELECT {COLS} FROM submissions WHERE task_id = ?1 ORDER BY id DESC LIMIT 1");
+    Ok(conn.query_row(&sql, [task_id], row_to_submission).optional()?)
+}
+
 /// 写入识别结果。
 pub fn set_recognition(
     conn: &Connection,

@@ -50,6 +50,17 @@ pub fn get_by_no(conn: &Connection, student_no: &str) -> CoreResult<Option<Stude
     Ok(s)
 }
 
+pub fn get_by_id(conn: &Connection, id: i64) -> CoreResult<Option<Student>> {
+    let s = conn
+        .query_row(
+            "SELECT id, student_no, name, class_id, enabled FROM students WHERE id = ?1",
+            [id],
+            row_to_student,
+        )
+        .optional()?;
+    Ok(s)
+}
+
 pub fn list(conn: &Connection, only_enabled: bool) -> CoreResult<Vec<Student>> {
     let sql = if only_enabled {
         "SELECT id, student_no, name, class_id, enabled FROM students WHERE enabled = 1 ORDER BY student_no"
