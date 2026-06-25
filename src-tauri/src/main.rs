@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod asr;
+mod audio;
 mod commands;
 mod secrets;
 mod state;
@@ -31,6 +32,8 @@ fn main() {
             commands::tasks_generate,
             commands::import_paths,
             commands::asr_and_score,
+            commands::anomalies_list,
+            commands::anomaly_reassign,
         ])
         .run(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");

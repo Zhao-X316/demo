@@ -54,6 +54,7 @@ fn status_str(s: TaskStatus) -> &'static str {
 pub struct SubmissionCard {
     submission_id: i64,
     status: String,
+    file_path: String,
     recognized_text: Option<String>,
     accuracy: Option<f64>,
     pass: Option<bool>,
@@ -103,6 +104,7 @@ pub fn dashboard_today(state: State<'_, AppState>) -> R<TodayView> {
                 Some(SubmissionCard {
                     submission_id: s.id,
                     status: s.status,
+                    file_path: s.file_path,
                     recognized_text: s.recognized_text,
                     accuracy: v.as_ref().and_then(|x| x.primary_score),
                     pass: v.as_ref().and_then(|x| x.pass),
@@ -336,6 +338,65 @@ fn anomaly_label(t: &str) -> String {
     }
 }
 
+// ───────────────────────── 异常池 ─────────────────────────
+
+#[derive(Serialize)]
+pub struct AnomalyDto {
+    submission_id: i64,
+    file_path: String,
+    anomaly_type: String,
+    parsed_meta: Option<String>,
+    student_id: Option<i64>,
+    ref_id: Option<i64>,
+}
+
+#[tauri::command]
+pub fn anomalies_list(state: State<'_, AppState>) -> R<Vec<AnomalyDto>> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    let subs = submissions::list_anomalies(&conn, MODULE).map_err(e)?;
+    Ok(subs
+        .into_iter()
+        .map(|s| AnomalyDto {
+            submission_id: s.id,
+            file_path: s.file_path,
+            anomaly_type: anomaly_label(&s.anomaly_type.unwrap_or_default()),
+            parsed_meta: s.parsed_meta,
+            student_id: s.student_id,
+            ref_id: s.ref_id,
+        })
+        .collect())
+}
+
+/// 人工改派：传正确学号/内容编号（任一可空，沿用原值）。返回挂到的任务 id。
+#[tauri::command]
+pub fn anomaly_reassign(
+    state: State<'_, AppState>,
+    submission_id: i64,
+    student_no: Option<String>,
+    content_no: Option<String>,
+) -> R<Option<i64>> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    let sid = match student_no.as_deref() {
+        Some(no) if !no.is_empty() => Some(
+            students::get_by_no(&conn, no)
+                .map_err(e)?
+                .ok_or_else(|| format!("找不到学号 {no}"))?
+                .id,
+        ),
+        _ => None,
+    };
+    let rid = match content_no.as_deref() {
+        Some(no) if !no.is_empty() => Some(
+            contents::get_by_no(&conn, no)
+                .map_err(e)?
+                .ok_or_else(|| format!("找不到内容编号 {no}"))?
+                .id,
+        ),
+        _ => None,
+    };
+    import::reassign(&conn, submission_id, sid, rid).map_err(e)
+}
+
 #[derive(Serialize)]
 pub struct ScoreOutcomeDto {
     verdict_id: i64,
@@ -360,8 +421,25 @@ pub async fn asr_and_score(state: State<'_, AppState>, submission_id: i64) -> R<
         (sub.file_path.clone(), sub.file_hash.clone(), creds)
     };
 
+    // 可选 ffmpeg 转码（提升火山兼容性），失败则用原文件
+    let tmp = std::env::temp_dir();
+    let transcoded = crate::audio::transcode_to_wav16k(&audio_path, &tmp);
+    let asr_path = transcoded
+        .as_ref()
+        .and_then(|p| p.to_str())
+        .unwrap_or(&audio_path)
+        .to_string();
+
     // 异步段：调用火山
-    let out = crate::asr::recognize(&creds, &audio_path, &req_id).await?;
+    let mut out = crate::asr::recognize(&creds, &asr_path, &req_id).await?;
+    if out.duration_ms == 0 {
+        if let Some(d) = crate::audio::ffprobe_duration_ms(&audio_path) {
+            out.duration_ms = d;
+        }
+    }
+    if let Some(p) = transcoded {
+        let _ = std::fs::remove_file(p);
+    }
 
     // 同步段：回写识别 + 评分
     let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;

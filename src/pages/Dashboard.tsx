@@ -6,6 +6,7 @@ import {
   type TaskCard,
   type TodayView,
 } from "../api/dashboard";
+import { AudioPlayer } from "../components/AudioPlayer";
 
 export default function Dashboard() {
   const [view, setView] = useState<TodayView | null>(null);
@@ -120,6 +121,7 @@ function Card(props: { c: TaskCard; onDecide: (id: number, r: string) => void; b
               熟练度 {fmt(s.fluency)} {s.quality ? `(${s.quality})` : ""}
             </span>
           </div>
+          <AudioPlayer path={s.file_path} />
           {s.recognized_text && <div className="asr">识别：{s.recognized_text}</div>}
           {s.machine_note && <div className="note muted">{s.machine_note}</div>}
           <div className="actions">

@@ -7,7 +7,7 @@
 
 use rusqlite::Connection;
 use suite_core::db::repo::{file_ledger, submissions, tasks};
-use suite_core::error::CoreResult;
+use suite_core::error::{CoreError, CoreResult};
 use suite_core::models::{MediaType, ModuleKey, TaskStatus};
 
 use crate::db::contents;
@@ -132,6 +132,30 @@ pub fn import_one(conn: &Connection, item: &ImportItem<'_>) -> CoreResult<Import
     Ok(ImportOutcome::Imported { submission_id: sub_id, task_id: task.id, warning })
 }
 
+/// 改派异常提交：给定正确的 学生/内容 id（任一可沿用原值），重设关联、挂上开放任务、回到 pending。
+/// 返回关联到的 task_id（无开放任务则 None，仍可单独识别评分）。
+pub fn reassign(
+    conn: &Connection,
+    submission_id: i64,
+    student_id: Option<i64>,
+    ref_id: Option<i64>,
+) -> CoreResult<Option<i64>> {
+    let sub = submissions::get(conn, submission_id)?
+        .ok_or_else(|| CoreError::NotFound(format!("submission {submission_id}")))?;
+    let sid = student_id
+        .or(sub.student_id)
+        .ok_or_else(|| CoreError::Invalid("缺少学生，无法改派".into()))?;
+    let rid = ref_id
+        .or(sub.ref_id)
+        .ok_or_else(|| CoreError::Invalid("缺少内容，无法改派".into()))?;
+    let task_id = tasks::find_latest_open(conn, MODULE, sid, rid)?.map(|t| t.id);
+    submissions::reassign(conn, submission_id, sid, rid, task_id)?;
+    if let Some(tid) = task_id {
+        tasks::set_status(conn, tid, TaskStatus::Submitted)?;
+    }
+    Ok(task_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +192,32 @@ mod tests {
         )
         .unwrap();
         (s.id, tid)
+    }
+
+    #[test]
+    fn reassign_attaches_task_and_clears_anomaly() {
+        let conn = setup();
+        let (sid, _tid) = seed_full(&conn);
+        let cid = contents::get_by_no(&conn, "C012").unwrap().unwrap().id;
+        // 未知学生 → 进异常池
+        let item = ImportItem {
+            file_path: "/x/20260625_9999999_王五_C012_1.m4a",
+            file_stem: "20260625_9999999_王五_C012_1",
+            file_hash: "h-anom",
+            duration_ms: None,
+        };
+        let subid = match import_one(&conn, &item).unwrap() {
+            ImportOutcome::Anomaly { submission_id, .. } => submission_id,
+            o => panic!("应进异常池: {o:?}"),
+        };
+        // 改派到张三 + C012
+        let task = reassign(&conn, subid, Some(sid), Some(cid)).unwrap();
+        assert!(task.is_some(), "应挂上开放任务");
+        let sub = submissions::get(&conn, subid).unwrap().unwrap();
+        assert_eq!(sub.status, "pending");
+        assert_eq!(sub.student_id, Some(sid));
+        assert_eq!(sub.ref_id, Some(cid));
+        assert!(sub.anomaly_type.is_none());
     }
 
     #[test]

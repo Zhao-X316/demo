@@ -19,8 +19,10 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 | 前端 `src`（今日看板） | ✅ 实现 + 构建通过 | React shell + 模块注册表 + 看板(三组卡片+人工判定) |
 | 跨平台 CI | ✅ 后端三平台 + 应用 Win/Mac 编译 | `.github/workflows/ci.yml` |
 | 打包 CI（安装包） | ✅ 工作流就绪 | `release.yml`：手动/tag 触发出 `.msi/.exe/.dmg` |
-| 火山 ASR 真接口 | ⏳ 占位 | `asr_volcano.rs` 待接 reqwest |
-| 其余页面（导入/异常/管理/设置） | ⏳ 待补 | 看板已先行 |
+| 火山 ASR 真接口 | ✅ 接入（极速版flash, reqwest） | `src-tauri/asr.rs`；凭据取自设置页 |
+| 页面（看板/导入/异常池/管理/设置） | ✅ 全部完成 | 五页齐全，M1 在 UI 上闭环 |
+| 音频回放 | ✅ asset 协议 | 看板/导入/异常池均可播放原录音 |
+| ffmpeg 转码/时长探测 | ✅ 可选集成 | 装了 ffmpeg 则转 16k 单声道 wav + 探测时长，否则降级 |
 
 已验证（CI 实测）：后端 55 测试在 **Windows/macOS/Linux** 全通过；前端 `tsc+vite` 构建通过；**Tauri 应用在 macOS 上编译通过**（Windows 同步验证中）。
 

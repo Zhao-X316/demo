@@ -1,14 +1,16 @@
 import { useState } from "react";
+import AnomalyPage from "./pages/Anomaly";
 import Dashboard from "./pages/Dashboard";
 import Import from "./pages/Import";
 import Manage from "./pages/Manage";
 import Settings from "./pages/Settings";
 
-type View = "dashboard" | "import" | "manage" | "settings";
+type View = "dashboard" | "import" | "anomaly" | "manage" | "settings";
 
 const NAV: { key: View; icon: string; label: string }[] = [
   { key: "dashboard", icon: "📋", label: "今日看板" },
   { key: "import", icon: "🎙️", label: "导入录音" },
+  { key: "anomaly", icon: "⚠️", label: "异常池" },
   { key: "manage", icon: "🗂️", label: "管理" },
   { key: "settings", icon: "⚙️", label: "设置" },
 ];
@@ -36,6 +38,7 @@ export default function App() {
       <main className="main">
         {view === "dashboard" && <Dashboard />}
         {view === "import" && <Import />}
+        {view === "anomaly" && <AnomalyPage />}
         {view === "manage" && <Manage />}
         {view === "settings" && <Settings />}
       </main>

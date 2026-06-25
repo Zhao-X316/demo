@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { asrAndScore, importPaths, type ImportResult } from "../api/importing";
+import { AudioPlayer } from "../components/AudioPlayer";
 
 interface Row extends ImportResult {
   asr?: string; // 识别评分结果摘要
@@ -76,7 +77,10 @@ export default function Import() {
           <tbody>
             {rows.map((r, i) => (
               <tr key={i}>
-                <td className="filecell">{baseName(r.file)}</td>
+                <td className="filecell">
+                  {baseName(r.file)}
+                  {r.status !== "error" && <AudioPlayer path={r.file} />}
+                </td>
                 <td><span className={`pill pill-${pillClass(r.status)}`}>{statusLabel(r.status)}</span></td>
                 <td className="muted">{r.detail}</td>
                 <td>

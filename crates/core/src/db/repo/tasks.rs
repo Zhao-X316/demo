@@ -108,6 +108,22 @@ pub fn set_status(conn: &Connection, id: i64, status: TaskStatus) -> CoreResult<
 }
 
 /// 导入匹配：找该 学生+内容+日期 下任意未关闭任务（open/submitted/reopened），优先匹配。
+/// 改派用：不限日期，找该 学生+内容 最近一条未关闭任务。
+pub fn find_latest_open(
+    conn: &Connection,
+    module: ModuleKey,
+    student_id: i64,
+    ref_id: i64,
+) -> CoreResult<Option<Task>> {
+    let sql = format!(
+        "SELECT {COLS} FROM tasks WHERE module=?1 AND student_id=?2 AND ref_id=?3 \
+         AND status IN ('open','submitted','reopened') ORDER BY due_date DESC, id DESC LIMIT 1"
+    );
+    Ok(conn
+        .query_row(&sql, (module.as_str(), student_id, ref_id), row_to_task)
+        .optional()?)
+}
+
 pub fn find_open_match(
     conn: &Connection,
     module: ModuleKey,
