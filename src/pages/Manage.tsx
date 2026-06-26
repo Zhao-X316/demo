@@ -5,12 +5,14 @@ import {
   contentsList,
   contentsSetEnabled,
   contentsUpsert,
+  parseSyllabus,
   studentsDelete,
   studentsImport,
   studentsList,
   studentsSetEnabled,
   studentsUpsert,
   tasksGenerate,
+  type ParsedContent,
   type RecContent,
   type Student,
 } from "../api/manage";
@@ -295,6 +297,7 @@ export default function Manage() {
           />
           <button className="primary" onClick={importContents}>批量导入内容</button>
         </details>
+        <SyllabusImport onImported={refresh} />
 
         {selC.size > 0 && (
           <div className="filter-bar">
@@ -339,5 +342,121 @@ export default function Manage() {
         </table>
       </section>
     </div>
+  );
+}
+
+interface SylRow extends ParsedContent {
+  include: boolean;
+}
+
+function SyllabusImport({ onImported }: { onImported: () => void }) {
+  const [prefix, setPrefix] = useState("");
+  const [text, setText] = useState("");
+  const [rows, setRows] = useState<SylRow[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+
+  const parse = async () => {
+    if (!prefix.trim()) return setNote("先填学科册前缀，如 道法8上");
+    if (!text.trim()) return setNote("先粘贴清单文本");
+    setBusy(true);
+    setNote("");
+    try {
+      const r = await parseSyllabus(text, prefix.trim());
+      setRows(r.map((x) => ({ ...x, include: true })));
+      setNote(`解析出 ${r.length} 条，检查/改标题/取消勾选后导入`);
+    } catch (e) {
+      setNote("解析失败：" + String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setTitle = (i: number, v: string) =>
+    setRows((rs) => rs.map((x, j) => (j === i ? { ...x, title: v } : x)));
+  const toggle = (i: number) =>
+    setRows((rs) => rs.map((x, j) => (j === i ? { ...x, include: !x.include } : x)));
+
+  const included = rows.filter((r) => r.include).length;
+
+  const doImport = async () => {
+    const sel = rows.filter((r) => r.include);
+    if (sel.length === 0) return setNote("没有勾选的条目");
+    setBusy(true);
+    setNote("");
+    try {
+      const r = await contentsImport(
+        sel.map((x) => ({
+          content_no: x.content_no,
+          title: x.is_key ? "★" + x.title : x.title,
+          answer_text: x.answer_text,
+        })),
+      );
+      setRows([]);
+      setText("");
+      onImported();
+      setNote(`导入成功 ${r.ok}${r.failed ? `，失败 ${r.failed}（${r.errors[0] ?? ""}…）` : ""}`);
+    } catch (e) {
+      setNote("导入失败：" + String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <details className="batch">
+      <summary>从背诵清单导入（粘贴「第X课 → 1．2．点」清单，自动按点切分）</summary>
+      <div className="row">
+        <input placeholder="学科册前缀 如 道法8上" value={prefix} onChange={(e) => setPrefix(e.target.value)} />
+        <button disabled={busy} onClick={parse}>{busy ? "处理中…" : "解析预览"}</button>
+      </div>
+      <textarea
+        rows={4}
+        placeholder="粘贴整份背诵清单文本（支持 .md/.txt/直接粘贴）…"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+      />
+      {note && <div className="muted">{note}</div>}
+      {rows.length > 0 && (
+        <>
+          <div className="filter-bar">
+            解析 <b>{rows.length}</b> 条 · 勾选 <b>{included}</b> 条
+            <button className="primary sm" disabled={busy} onClick={doImport}>确认导入 {included} 条</button>
+          </div>
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th className="ckcol"></th>
+                <th>编号</th>
+                <th>标题（可改）</th>
+                <th>答案</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={i} className={r.include ? "" : "disabled-row"}>
+                  <td className="ckcol">
+                    <input type="checkbox" checked={r.include} onChange={() => toggle(i)} />
+                  </td>
+                  <td>
+                    {r.content_no}
+                    {r.is_key && " ★"}
+                  </td>
+                  <td>
+                    <input value={r.title} onChange={(e) => setTitle(i, e.target.value)} style={{ width: "100%" }} />
+                  </td>
+                  <td>
+                    <details>
+                      <summary className="muted">展开</summary>
+                      <div className="muted">{r.answer_text}</div>
+                    </details>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+    </details>
   );
 }

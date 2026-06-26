@@ -47,6 +47,7 @@ fn main() {
             commands::contents_import,
             commands::contents_set_enabled,
             commands::contents_delete,
+            commands::parse_syllabus,
             commands::tasks_generate,
             commands::import_paths,
             commands::import_stage,

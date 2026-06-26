@@ -59,3 +59,17 @@ export const contentsSetEnabled = (ids: number[], enabled: boolean) =>
   call<number>("contents_set_enabled", { ids, enabled });
 export const contentsDelete = (ids: number[]) =>
   call<DeleteResult>("contents_delete", { ids });
+
+// ── 背诵清单解析 ──
+export interface ParsedContent {
+  content_no: string;
+  title: string;
+  answer_text: string;
+  is_key: boolean;
+  lesson_no: number;
+  point_seq: number;
+  original_no: string;
+  lesson_title: string;
+}
+export const parseSyllabus = (text: string, prefix: string) =>
+  call<ParsedContent[]>("parse_syllabus", { text, prefix });

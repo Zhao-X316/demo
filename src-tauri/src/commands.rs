@@ -512,6 +512,16 @@ pub fn contents_delete(state: State<'_, AppState>, ids: Vec<i64>) -> R<DeleteRes
     Ok(DeleteResult { deleted, blocked })
 }
 
+/// 解析背诵清单文本 → 一条条 content 候选（老师预览/编辑确认后再调 contents_import 入库）。
+/// `prefix` = 学科册（如 "道法8上"），用于拼 content_no。不落库、无副作用。
+#[tauri::command]
+pub fn parse_syllabus(
+    text: String,
+    prefix: String,
+) -> R<Vec<module_recitation::domain::syllabus::ParsedContent>> {
+    Ok(module_recitation::domain::syllabus::parse_syllabus(&text, &prefix))
+}
+
 /// 为今日批量生成"新背"任务。返回生成数量。
 #[tauri::command]
 pub fn tasks_generate(state: State<'_, AppState>, pairs: Vec<(i64, i64)>) -> R<usize> {
