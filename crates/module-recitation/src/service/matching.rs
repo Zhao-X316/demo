@@ -32,6 +32,26 @@ pub fn best_content(
     Ok(best)
 }
 
+/// 与识别文本匹配度最高的前 N 篇启用内容（按分降序，含匹配分 0-100）。用于异常池候选建议。
+pub fn top_contents(
+    conn: &Connection,
+    asr_text: &str,
+    ncfg: &NormalizeCfg,
+    acfg: &AccuracyCfg,
+    n: usize,
+) -> CoreResult<Vec<(RecContent, f64)>> {
+    let asr_norm = normalize(asr_text, ncfg);
+    let mut scored: Vec<(RecContent, f64)> = Vec::new();
+    for c in contents::list(conn, true)? {
+        let ans_norm = normalize(&c.answer_text, ncfg);
+        let score = evaluate(&ans_norm, &asr_norm, acfg).accuracy;
+        scored.push((c, score));
+    }
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(n);
+    Ok(scored)
+}
+
 /// 花名册中姓名出现在文本里的学生（取最靠前出现者）。
 pub fn find_student(conn: &Connection, asr_text: &str) -> CoreResult<Option<Student>> {
     let mut best: Option<(usize, Student)> = None;

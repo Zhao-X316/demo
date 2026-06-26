@@ -86,3 +86,53 @@ textarea { resize: vertical; }
 .audioplayer { display: block; margin-top: 8px; height: 32px; max-width: 320px; }
 .filecell { max-width: 280px; word-break: break-all; }
 code { background: #eef1f7; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+
+/* ── 今日看板：汇总卡 + 下钻筛选（P0） ── */
+.stat-row { display: flex; gap: 12px; margin: 16px 0 8px; flex-wrap: wrap; }
+.stat-card {
+  flex: 1 1 120px; min-width: 110px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
+  cursor: pointer; text-align: left; transition: border-color .12s, box-shadow .12s;
+}
+.stat-card:hover { border-color: var(--brand); }
+.stat-card.active { border-color: var(--brand); box-shadow: 0 0 0 2px rgba(45,108,223,.15); }
+.stat-value { font-size: 26px; font-weight: 700; line-height: 1.1; }
+.stat-label { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.stat-card.ok .stat-value { color: var(--ok); }
+.stat-card.bad .stat-value { color: var(--bad); }
+
+.filter-bar {
+  display: flex; align-items: center; gap: 8px; margin: 8px 0;
+  font-size: 13px; color: var(--muted);
+}
+.filter-bar b { color: var(--text); font-weight: 600; }
+.link {
+  background: none; border: none; color: var(--brand); cursor: pointer;
+  padding: 2px 4px; font-size: 13px;
+}
+.link:hover { text-decoration: underline; }
+
+.tbl tr.clickable { cursor: pointer; }
+.tbl tr.clickable:hover td { background: #f0f4fc; }
+.tbl tr.active-row td { background: #e8f0ff; }
+.tbl td.ok { color: var(--ok); }
+.tbl td.bad { color: var(--bad); }
+
+/* ── 管理页：多选 + 批量导入/删减（P1） ── */
+.ckcol { width: 36px; text-align: center; }
+.tbl tr.disabled-row td { color: var(--muted); background: #fafbfe; }
+.link.danger { color: var(--bad); }
+.batch { margin: 10px 0; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; background: var(--panel); }
+.batch summary { cursor: pointer; color: var(--brand); font-size: 13px; }
+.batch textarea { width: 100%; margin: 8px 0; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.row select { padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; font-size: 13px; background: var(--panel); }
+
+/* ── 异常池：候选建议 chip（P2 ③） ── */
+.suggest { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 10px 0; }
+.chip {
+  border: 1px solid var(--line); background: var(--panel); border-radius: 14px;
+  padding: 3px 10px; font-size: 12px; cursor: pointer;
+}
+.chip:hover { border-color: var(--brand); }
+.chip-ok { border-color: var(--ok); color: var(--ok); }
+.primary.sm { padding: 4px 10px; font-size: 12px; }

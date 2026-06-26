@@ -39,6 +39,32 @@ pub fn upsert(conn: &Connection, input: &StudentInput<'_>) -> CoreResult<Student
         .ok_or_else(|| crate::error::CoreError::Db("upsert 后未取回学生".into()))
 }
 
+/// 批量启用/停用（软删，保留历史）。返回受影响行数。
+pub fn set_enabled(conn: &Connection, ids: &[i64], enabled: bool) -> CoreResult<usize> {
+    let mut n = 0;
+    for &id in ids {
+        n += conn.execute(
+            "UPDATE students SET enabled = ?1, updated_at = datetime('now') WHERE id = ?2",
+            (enabled as i64, id),
+        )?;
+    }
+    Ok(n)
+}
+
+/// 批量硬删。被任务/提交等外键引用的删不掉（计入 blocked），其余删除。
+/// 返回 (删除数, 删不掉的 id 列表——这些只能用 set_enabled 停用)。
+pub fn delete(conn: &Connection, ids: &[i64]) -> CoreResult<(usize, Vec<i64>)> {
+    let mut deleted = 0;
+    let mut blocked = Vec::new();
+    for &id in ids {
+        match conn.execute("DELETE FROM students WHERE id = ?1", [id]) {
+            Ok(n) => deleted += n,
+            Err(_) => blocked.push(id), // 多为外键约束：有历史任务/提交
+        }
+    }
+    Ok((deleted, blocked))
+}
+
 pub fn get_by_no(conn: &Connection, student_no: &str) -> CoreResult<Option<Student>> {
     let s = conn
         .query_row(

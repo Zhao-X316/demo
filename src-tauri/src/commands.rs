@@ -76,9 +76,33 @@ pub struct TaskCard {
     submission: Option<SubmissionCard>,
 }
 
+/// 今日单个背诵内容的统计（看板汇总下钻用）。
+#[derive(Serialize)]
+pub struct TodayContentStat {
+    content_no: String,
+    content_title: String,
+    should: i64,     // 应背 = 该内容今日任务数
+    submitted: i64,  // 实背 = 已交
+    passed: i64,     // 通过
+    failed: i64,     // 不通过
+}
+
+/// 今日看板顶部汇总。
+#[derive(Serialize, Default)]
+pub struct TodaySummary {
+    should: i64,     // 应背人数 = 今日任务总数
+    submitted: i64,  // 实背人数 = 有提交的任务数
+    passed: i64,     // 通过人数
+    failed: i64,     // 不通过人数
+    pending: i64,    // 待确认 = 已交未判
+    makeup: i64,     // 补背人数 = 今日补背任务数
+    contents: Vec<TodayContentStat>,
+}
+
 #[derive(Serialize)]
 pub struct TodayView {
     date: String,
+    summary: TodaySummary,
     normal: Vec<TaskCard>,
     makeup: Vec<TaskCard>,
     review: Vec<TaskCard>,
@@ -93,7 +117,8 @@ pub fn dashboard_today(state: State<'_, AppState>) -> R<TodayView> {
     let date = today_str();
     let tasks_today = tasks::list_by_date(&conn, MODULE, &date).map_err(e)?;
 
-    let mut view = TodayView { date, normal: vec![], makeup: vec![], review: vec![] };
+    let mut view =
+        TodayView { date, summary: TodaySummary::default(), normal: vec![], makeup: vec![], review: vec![] };
     for t in tasks_today {
         let student = students::get_by_id(&conn, t.student_id).map_err(e)?;
         let content = contents::get_by_id(&conn, t.ref_id).map_err(e)?;
@@ -116,14 +141,61 @@ pub fn dashboard_today(state: State<'_, AppState>) -> R<TodayView> {
             }
             None => None,
         };
+
+        // —— 顶部汇总统计（不额外查库，顺手 tally）——
+        let st = status_str(t.status);
+        let has_sub = submission.is_some();
+        let is_pass = st == "passed";
+        let is_fail = st == "failed";
+        let c_no = content.as_ref().map(|c| c.content_no.clone()).unwrap_or_default();
+        let c_title = content.as_ref().map(|c| c.title.clone()).unwrap_or_default();
+        view.summary.should += 1;
+        if matches!(t.kind, TaskKind::Makeup) {
+            view.summary.makeup += 1;
+        }
+        if has_sub {
+            view.summary.submitted += 1;
+        }
+        if is_pass {
+            view.summary.passed += 1;
+        } else if is_fail {
+            view.summary.failed += 1;
+        } else if has_sub {
+            view.summary.pending += 1;
+        }
+        let idx = view.summary.contents.iter().position(|x| x.content_no == c_no);
+        let cs = match idx {
+            Some(i) => &mut view.summary.contents[i],
+            None => {
+                view.summary.contents.push(TodayContentStat {
+                    content_no: c_no.clone(),
+                    content_title: c_title.clone(),
+                    should: 0,
+                    submitted: 0,
+                    passed: 0,
+                    failed: 0,
+                });
+                view.summary.contents.last_mut().unwrap()
+            }
+        };
+        cs.should += 1;
+        if has_sub {
+            cs.submitted += 1;
+        }
+        if is_pass {
+            cs.passed += 1;
+        } else if is_fail {
+            cs.failed += 1;
+        }
+
         let card = TaskCard {
             task_id: t.id,
             kind: kind_str(t.kind).to_string(),
-            status: status_str(t.status).to_string(),
+            status: st.to_string(),
             student_no: student.as_ref().map(|s| s.student_no.clone()).unwrap_or_default(),
             student_name: student.as_ref().map(|s| s.name.clone()).unwrap_or_default(),
-            content_no: content.as_ref().map(|c| c.content_no.clone()).unwrap_or_default(),
-            content_title: content.as_ref().map(|c| c.title.clone()).unwrap_or_default(),
+            content_no: c_no,
+            content_title: c_title,
             submission,
         };
         match t.kind {
@@ -133,6 +205,64 @@ pub fn dashboard_today(state: State<'_, AppState>) -> R<TodayView> {
         }
     }
     Ok(view)
+}
+
+// ───────────────────────── 日切（没交→补背 / 到期→复习 自动上看板）─────────────────────────
+
+#[derive(Serialize)]
+pub struct RolloverDto {
+    rolled: usize,  // 结转为补背的任务数（昨天 open/未交/过期）
+    reviews: usize, // 推上看板的到期复习数
+}
+
+/// 跑一次"日切"：① 把昨天仍 open 的任务标过期并结转次日补背；② 把到期的复习卡生成今日复习任务。
+/// 两个子步骤内部都幂等（去重），可安全重复调用。
+pub fn run_day_rollover(conn: &rusqlite::Connection) -> R<(usize, usize)> {
+    let rolled = task_svc::rollover(conn, today_naive()).map_err(e)?;
+    let reviews = task_svc::generate_due_reviews(conn, &today_str()).map_err(e)?;
+    Ok((rolled, reviews.len()))
+}
+
+/// 看板兜底命令：前端加载/检测到跨天时调一次，保证 没交→补背、到期→复习 自动出现（App 常驻不关也不漏）。
+#[tauri::command]
+pub fn day_rollover(state: State<'_, AppState>) -> R<RolloverDto> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    let (rolled, reviews) = run_day_rollover(&conn)?;
+    Ok(RolloverDto { rolled, reviews })
+}
+
+// ───────────────────────── 异常池候选建议（Top-N）─────────────────────────
+
+#[derive(Serialize)]
+pub struct ContentCandidate {
+    content_no: String,
+    title: String,
+    score: f64, // 匹配度 0-100
+}
+
+#[derive(Serialize)]
+pub struct SuggestDto {
+    student_no: Option<String>,
+    student_name: Option<String>,
+    contents: Vec<ContentCandidate>,
+}
+
+/// 给一段识别文本算"最可能的学生 + Top-3 内容候选"，供异常池一键采纳。
+#[tauri::command]
+pub fn suggest_match(state: State<'_, AppState>, text: String) -> R<SuggestDto> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    let rcfg = RecitationConfig::load(&conn).map_err(e)?;
+    let scfg = rcfg.to_score_cfg();
+    let student = matching::find_student(&conn, &text).map_err(e)?;
+    let tops = matching::top_contents(&conn, &text, &scfg.normalize, &scfg.accuracy, 3).map_err(e)?;
+    Ok(SuggestDto {
+        student_no: student.as_ref().map(|s| s.student_no.clone()),
+        student_name: student.as_ref().map(|s| s.name.clone()),
+        contents: tops
+            .into_iter()
+            .map(|(c, score)| ContentCandidate { content_no: c.content_no, title: c.title, score })
+            .collect(),
+    })
 }
 
 /// 人工最终判定：pass | fail | reopen。
@@ -267,6 +397,121 @@ pub fn contents_upsert(
     .map_err(e)
 }
 
+// ───────────────────────── 批量导入 / 删减 ─────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct StudentRow {
+    student_no: String,
+    name: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ContentRow {
+    content_no: String,
+    title: String,
+    answer_text: String,
+}
+
+#[derive(Serialize)]
+pub struct BatchImport {
+    ok: usize,
+    failed: usize,
+    errors: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct DeleteResult {
+    deleted: usize,
+    blocked: Vec<String>, // 有历史记录删不掉的（返回编号，提示改用停用）
+}
+
+/// 批量导入学生（每行 学号 + 姓名）。逐行 upsert。
+#[tauri::command]
+pub fn students_import(state: State<'_, AppState>, rows: Vec<StudentRow>) -> R<BatchImport> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    let mut ok = 0;
+    let mut errors = Vec::new();
+    for r in &rows {
+        let no = r.student_no.trim();
+        let name = r.name.trim();
+        if no.is_empty() || name.is_empty() {
+            errors.push(format!("跳过空行: 学号='{no}' 姓名='{name}'"));
+            continue;
+        }
+        match students::upsert(
+            &conn,
+            &StudentInput { student_no: no, name, class_id: None, enabled: true },
+        ) {
+            Ok(_) => ok += 1,
+            Err(err) => errors.push(format!("{no} {name}: {err}")),
+        }
+    }
+    Ok(BatchImport { ok, failed: errors.len(), errors })
+}
+
+#[tauri::command]
+pub fn students_set_enabled(state: State<'_, AppState>, ids: Vec<i64>, enabled: bool) -> R<usize> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    students::set_enabled(&conn, &ids, enabled).map_err(e)
+}
+
+#[tauri::command]
+pub fn students_delete(state: State<'_, AppState>, ids: Vec<i64>) -> R<DeleteResult> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    let (deleted, blocked_ids) = students::delete(&conn, &ids).map_err(e)?;
+    let mut blocked = Vec::new();
+    for id in blocked_ids {
+        if let Some(s) = students::get_by_id(&conn, id).map_err(e)? {
+            blocked.push(format!("{} {}", s.student_no, s.name));
+        }
+    }
+    Ok(DeleteResult { deleted, blocked })
+}
+
+/// 批量导入背诵内容（每行 编号 + 标题 + 答案）。逐行 upsert。
+#[tauri::command]
+pub fn contents_import(state: State<'_, AppState>, rows: Vec<ContentRow>) -> R<BatchImport> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    let mut ok = 0;
+    let mut errors = Vec::new();
+    for r in &rows {
+        let no = r.content_no.trim();
+        let title = r.title.trim();
+        let ans = r.answer_text.trim();
+        if no.is_empty() || title.is_empty() || ans.is_empty() {
+            errors.push(format!("跳过不完整行: 编号='{no}'（需 编号/标题/答案 三项）"));
+            continue;
+        }
+        match contents::upsert(
+            &conn,
+            &ContentInput { content_no: no, title, answer_text: ans, subject_id: None, enabled: true },
+        ) {
+            Ok(_) => ok += 1,
+            Err(err) => errors.push(format!("{no}: {err}")),
+        }
+    }
+    Ok(BatchImport { ok, failed: errors.len(), errors })
+}
+
+#[tauri::command]
+pub fn contents_set_enabled(state: State<'_, AppState>, ids: Vec<i64>, enabled: bool) -> R<usize> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    contents::set_enabled(&conn, &ids, enabled).map_err(e)
+}
+
+#[tauri::command]
+pub fn contents_delete(state: State<'_, AppState>, ids: Vec<i64>) -> R<DeleteResult> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    let (deleted, blocked_ids) = contents::delete(&conn, &ids).map_err(e)?;
+    let mut blocked = Vec::new();
+    for id in blocked_ids {
+        if let Some(c) = contents::get_by_id(&conn, id).map_err(e)? {
+            blocked.push(format!("{} {}", c.content_no, c.title));
+        }
+    }
+    Ok(DeleteResult { deleted, blocked })
+}
+
 /// 为今日批量生成"新背"任务。返回生成数量。
 #[tauri::command]
 pub fn tasks_generate(state: State<'_, AppState>, pairs: Vec<(i64, i64)>) -> R<usize> {
@@ -336,6 +581,49 @@ fn anomaly_label(t: &str) -> String {
         "no_task" => "当日无对应任务".into(),
         other => other.to_string(),
     }
+}
+
+// ───────────────────────── 暂存导入（先导入、后分析）─────────────────────────
+
+#[derive(Serialize)]
+pub struct StageDto {
+    file: String,
+    status: String, // staged | duplicate | error
+    detail: String,
+}
+
+/// 第一步「导入」：只做哈希 + 去重检查，**不调 ASR、不落库**。
+/// 返回每个文件能否进入「待分析」队列；真正的识别评分由前端随后对 staged 文件调用
+/// `import_autoname` 完成（即「开始分析」）。
+#[tauri::command]
+pub fn import_stage(state: State<'_, AppState>, paths: Vec<String>) -> R<Vec<StageDto>> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
+        let path = std::path::Path::new(&p);
+        let hash = match suite_core::domain::hashing::sha256_file(path) {
+            Ok(h) => h,
+            Err(err) => {
+                out.push(StageDto {
+                    file: p.clone(),
+                    status: "error".into(),
+                    detail: format!("读取/哈希失败: {err}"),
+                });
+                continue;
+            }
+        };
+        let dup = file_ledger::get(&conn, &hash).map_err(e)?.is_some();
+        out.push(if dup {
+            StageDto {
+                file: p.clone(),
+                status: "duplicate".into(),
+                detail: "重复文件（已导入过，跳过）".into(),
+            }
+        } else {
+            StageDto { file: p.clone(), status: "staged".into(), detail: "已加入待分析队列".into() }
+        });
+    }
+    Ok(out)
 }
 
 // ───────────────────────── 智能识别导入（按录音内容自动命名） ─────────────────────────

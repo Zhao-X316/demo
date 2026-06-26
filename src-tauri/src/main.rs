@@ -16,11 +16,21 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let st = state::init(app)?;
+            // 启动即跑一次日切：没交→补背、到期→复习 自动上看板。失败只记录、不阻断启动。
+            if let Ok(conn) = st.db.lock() {
+                match commands::run_day_rollover(&conn) {
+                    Ok((rolled, reviews)) => {
+                        eprintln!("[启动日切] 结转补背 {rolled} 条，到期复习 {reviews} 条");
+                    }
+                    Err(err) => eprintln!("[启动日切] 跳过：{err}"),
+                }
+            }
             app.manage(st);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::dashboard_today,
+            commands::day_rollover,
             commands::verdict_human_decide,
             commands::students_list,
             commands::contents_list,
@@ -30,13 +40,21 @@ fn main() {
             commands::secrets_get,
             commands::secrets_set,
             commands::students_upsert,
+            commands::students_import,
+            commands::students_set_enabled,
+            commands::students_delete,
             commands::contents_upsert,
+            commands::contents_import,
+            commands::contents_set_enabled,
+            commands::contents_delete,
             commands::tasks_generate,
             commands::import_paths,
+            commands::import_stage,
             commands::import_autoname,
             commands::asr_and_score,
             commands::anomalies_list,
             commands::anomaly_reassign,
+            commands::suggest_match,
             exam_commands::kp_list,
             exam_commands::kp_create,
             exam_commands::kp_rename,

@@ -1,17 +1,52 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   dashboardToday,
+  dayRollover,
   humanDecide,
   seedDemo,
   type TaskCard,
+  type TodaySummary,
   type TodayView,
 } from "../api/dashboard";
 import { AudioPlayer } from "../components/AudioPlayer";
+
+type Metric = "all" | "submitted" | "passed" | "failed" | "pending";
+interface Filter {
+  metric: Metric;
+  contentNo: string | null;
+  kind: "all" | "makeup"; // 补背维度（与 metric 正交）
+}
+
+const METRIC_LABEL: Record<Metric, string> = {
+  all: "全部",
+  submitted: "实背",
+  passed: "通过",
+  failed: "不通过",
+  pending: "待确认",
+};
+
+function cardMatches(c: TaskCard, f: Filter): boolean {
+  if (f.contentNo && c.content_no !== f.contentNo) return false;
+  if (f.kind === "makeup" && c.kind !== "makeup") return false;
+  switch (f.metric) {
+    case "all":
+      return true;
+    case "submitted":
+      return c.submission != null;
+    case "passed":
+      return c.status === "passed";
+    case "failed":
+      return c.status === "failed";
+    case "pending":
+      return c.submission != null && c.status !== "passed" && c.status !== "failed";
+  }
+}
 
 export default function Dashboard() {
   const [view, setView] = useState<TodayView | null>(null);
   const [err, setErr] = useState<string>("");
   const [busy, setBusy] = useState(false);
+  const [filter, setFilter] = useState<Filter>({ metric: "all", contentNo: null, kind: "all" });
 
   const refresh = useCallback(async () => {
     try {
@@ -23,7 +58,26 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    void refresh();
+    let day = new Date().toDateString();
+    const boot = async () => {
+      // 加载前先跑一次日切（启动钩子已兜底，这里再补一次确保看板最新）
+      try {
+        await dayRollover();
+      } catch {
+        /* 忽略：启动钩子已处理 */
+      }
+      await refresh();
+    };
+    void boot();
+    // 常驻兜底：每 5 分钟检查是否跨天，跨天则重跑日切 + 刷新（App 一直开着也不漏补背/复习）
+    const timer = window.setInterval(() => {
+      const now = new Date().toDateString();
+      if (now !== day) {
+        day = now;
+        void boot();
+      }
+    }, 5 * 60 * 1000);
+    return () => window.clearInterval(timer);
   }, [refresh]);
 
   const onSeed = async () => {
@@ -50,7 +104,25 @@ export default function Dashboard() {
     }
   };
 
+  const sum = view?.summary;
   const total = view ? view.normal.length + view.makeup.length + view.review.length : 0;
+  const filtered = useMemo(() => {
+    if (!view) return { normal: [], makeup: [], review: [] };
+    return {
+      normal: view.normal.filter((c) => cardMatches(c, filter)),
+      makeup: view.makeup.filter((c) => cardMatches(c, filter)),
+      review: view.review.filter((c) => cardMatches(c, filter)),
+    };
+  }, [view, filter]);
+
+  const filterActive = filter.metric !== "all" || filter.contentNo != null || filter.kind !== "all";
+  const toggleMetric = (m: Metric) =>
+    setFilter((f) => ({ ...f, metric: f.metric === m ? "all" : m }));
+  const toggleContent = (no: string) =>
+    setFilter((f) => ({ ...f, contentNo: f.contentNo === no ? null : no }));
+  const toggleMakeup = () =>
+    setFilter((f) => ({ ...f, kind: f.kind === "makeup" ? "all" : "makeup" }));
+  const clearFilter = () => setFilter({ metric: "all", contentNo: null, kind: "all" });
 
   return (
     <div className="page">
@@ -68,10 +140,125 @@ export default function Dashboard() {
         <p className="muted">今天没有任务。点"生成示例数据"即可体验完整流程（无需录音/ASR）。</p>
       )}
 
-      <Group title="新背" cards={view?.normal ?? []} onDecide={onDecide} busy={busy} />
-      <Group title="补背" cards={view?.makeup ?? []} onDecide={onDecide} busy={busy} />
-      <Group title="到期复习" cards={view?.review ?? []} onDecide={onDecide} busy={busy} />
+      {sum && total > 0 && (
+        <>
+          <SummaryBar
+            sum={sum}
+            metric={filter.metric}
+            makeupActive={filter.kind === "makeup"}
+            onPick={toggleMetric}
+            onPickMakeup={toggleMakeup}
+          />
+          <ContentTable
+            sum={sum}
+            activeNo={filter.contentNo}
+            onPick={toggleContent}
+          />
+          {filterActive && (
+            <div className="filter-bar">
+              筛选：
+              {filter.metric !== "all" && <b>{METRIC_LABEL[filter.metric]}</b>}
+              {filter.kind === "makeup" && <b> · 补背</b>}
+              {filter.contentNo && <b> · 内容 {filter.contentNo}</b>}
+              <button className="link" onClick={clearFilter}>
+                清除筛选
+              </button>
+            </div>
+          )}
+        </>
+      )}
+
+      <Group title="新背" cards={filtered.normal} onDecide={onDecide} busy={busy} />
+      <Group title="补背" cards={filtered.makeup} onDecide={onDecide} busy={busy} />
+      <Group title="到期复习" cards={filtered.review} onDecide={onDecide} busy={busy} />
+      {filterActive &&
+        filtered.normal.length + filtered.makeup.length + filtered.review.length === 0 && (
+          <p className="muted">该筛选下没有学生。</p>
+        )}
     </div>
+  );
+}
+
+function SummaryBar(props: {
+  sum: TodaySummary;
+  metric: Metric;
+  makeupActive: boolean;
+  onPick: (m: Metric) => void;
+  onPickMakeup: () => void;
+}) {
+  const { sum, metric, makeupActive, onPick, onPickMakeup } = props;
+  const stats: { key: Metric; label: string; value: number; tone?: string }[] = [
+    { key: "all", label: "应背人数", value: sum.should },
+    { key: "submitted", label: "实背人数", value: sum.submitted },
+    { key: "passed", label: "通过人数", value: sum.passed, tone: "ok" },
+    { key: "failed", label: "不通过人数", value: sum.failed, tone: "bad" },
+    { key: "pending", label: "待确认", value: sum.pending },
+  ];
+  return (
+    <div className="stat-row">
+      {stats.map((s) => (
+        <button
+          key={s.key}
+          className={`stat-card ${s.tone ?? ""} ${metric === s.key ? "active" : ""}`}
+          onClick={() => onPick(s.key)}
+          title="点击筛选下方学生"
+        >
+          <div className="stat-value">{s.value}</div>
+          <div className="stat-label">{s.label}</div>
+        </button>
+      ))}
+      <button
+        className={`stat-card ${makeupActive ? "active" : ""}`}
+        onClick={onPickMakeup}
+        title="点击只看补背学生"
+      >
+        <div className="stat-value">{sum.makeup}</div>
+        <div className="stat-label">补背人数</div>
+      </button>
+    </div>
+  );
+}
+
+function ContentTable(props: {
+  sum: TodaySummary;
+  activeNo: string | null;
+  onPick: (no: string) => void;
+}) {
+  const { sum, activeNo, onPick } = props;
+  if (sum.contents.length === 0) return null;
+  return (
+    <section className="group">
+      <h2>今日背诵内容 <span className="badge">{sum.contents.length}</span></h2>
+      <table className="tbl">
+        <thead>
+          <tr>
+            <th>内容</th>
+            <th>应背</th>
+            <th>实背</th>
+            <th>通过</th>
+            <th>不通过</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sum.contents.map((c) => (
+            <tr
+              key={c.content_no}
+              className={`clickable ${activeNo === c.content_no ? "active-row" : ""}`}
+              onClick={() => onPick(c.content_no)}
+              title="点击只看这个内容的学生"
+            >
+              <td>
+                {c.content_no} · {c.content_title}
+              </td>
+              <td>{c.should}</td>
+              <td>{c.submitted}</td>
+              <td className="ok">{c.passed}</td>
+              <td className="bad">{c.failed}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
   );
 }
 

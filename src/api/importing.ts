@@ -34,3 +34,13 @@ export interface AutonameResult {
 
 export const importAutoname = (paths: string[]) =>
   call<AutonameResult[]>("import_autoname", { paths });
+
+export interface StageResult {
+  file: string;
+  status: string; // staged | duplicate | error
+  detail: string;
+}
+
+// 第一步「导入」：只哈希去重、入待分析队列，不调 ASR
+export const importStage = (paths: string[]) =>
+  call<StageResult[]>("import_stage", { paths });
