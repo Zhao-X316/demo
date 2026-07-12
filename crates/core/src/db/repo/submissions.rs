@@ -69,10 +69,27 @@ pub fn get(conn: &Connection, id: i64) -> CoreResult<Option<Submission>> {
     Ok(conn.query_row(&sql, [id], row_to_submission).optional()?)
 }
 
+pub fn get_by_hash(conn: &Connection, file_hash: &str) -> CoreResult<Option<Submission>> {
+    let sql = format!("SELECT {COLS} FROM submissions WHERE file_hash = ?1");
+    Ok(conn
+        .query_row(&sql, [file_hash], row_to_submission)
+        .optional()?)
+}
+
+pub fn set_file_path(conn: &Connection, id: i64, file_path: &str) -> CoreResult<()> {
+    conn.execute(
+        "UPDATE submissions SET file_path=?2, updated_at=datetime('now') WHERE id=?1",
+        (id, file_path),
+    )?;
+    Ok(())
+}
+
 /// 某任务的最新提交（看板用）。
 pub fn find_by_task(conn: &Connection, task_id: i64) -> CoreResult<Option<Submission>> {
     let sql = format!("SELECT {COLS} FROM submissions WHERE task_id = ?1 ORDER BY id DESC LIMIT 1");
-    Ok(conn.query_row(&sql, [task_id], row_to_submission).optional()?)
+    Ok(conn
+        .query_row(&sql, [task_id], row_to_submission)
+        .optional()?)
 }
 
 /// 写入识别结果。
@@ -116,12 +133,42 @@ pub fn reassign(
     Ok(())
 }
 
+pub fn set_resolution_preserve_task(
+    conn: &Connection,
+    id: i64,
+    student_id: i64,
+    ref_id: i64,
+) -> CoreResult<()> {
+    conn.execute(
+        "UPDATE submissions SET student_id=?2, ref_id=?3,
+            anomaly_type=NULL, status='pending', updated_at=datetime('now') WHERE id=?1",
+        (id, student_id, ref_id),
+    )?;
+    Ok(())
+}
+
 pub fn list_anomalies(conn: &Connection, module: ModuleKey) -> CoreResult<Vec<Submission>> {
     let sql = format!(
         "SELECT {COLS} FROM submissions WHERE module=?1 AND status='anomaly' ORDER BY id DESC"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([module.as_str()], row_to_submission)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// 导入历史：某模块最近的提交（含已评分/异常/暂存等全部状态），最新在前。
+pub fn list_recent(
+    conn: &Connection,
+    module: ModuleKey,
+    limit: i64,
+) -> CoreResult<Vec<Submission>> {
+    let sql = format!("SELECT {COLS} FROM submissions WHERE module=?1 ORDER BY id DESC LIMIT ?2");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map((module.as_str(), limit), row_to_submission)?;
     let mut out = Vec::new();
     for r in rows {
         out.push(r?);
@@ -160,7 +207,10 @@ mod tests {
         assert_eq!(got.status, "anomaly");
         assert_eq!(got.anomaly_type.as_deref(), Some("task_not_found"));
 
-        assert_eq!(list_anomalies(&conn, ModuleKey::Recitation).unwrap().len(), 1);
+        assert_eq!(
+            list_anomalies(&conn, ModuleKey::Recitation).unwrap().len(),
+            1
+        );
 
         set_recognition(&conn, id, Some("床前明月光"), "ok", None, Some(3200)).unwrap();
         let got = get(&conn, id).unwrap().unwrap();

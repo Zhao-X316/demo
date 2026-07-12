@@ -63,3 +63,6 @@ export const humanDecide = (submission_id: number, result: string, note?: string
   call<string>("verdict_human_decide", { submissionId: submission_id, result, note: note ?? null });
 
 export const seedDemo = () => call<string>("seed_demo");
+
+// 撤销一条已布置任务（仅未开始的）
+export const taskCancel = (task_id: number) => call<void>("task_cancel", { taskId: task_id });

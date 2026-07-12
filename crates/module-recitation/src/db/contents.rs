@@ -3,6 +3,9 @@
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use suite_core::error::CoreResult;
+use suite_core::models::ModuleKey;
+
+const MODULE: ModuleKey = ModuleKey::Recitation;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecContent {
@@ -57,8 +60,12 @@ pub fn upsert(conn: &Connection, input: &ContentInput<'_>) -> CoreResult<RecCont
                     answer_version = answer_version + ?4, subject_id=?5, enabled=?6,
                     updated_at=datetime('now') WHERE content_no=?1",
                 (
-                    input.content_no, input.title, input.answer_text, bump,
-                    input.subject_id, input.enabled as i64,
+                    input.content_no,
+                    input.title,
+                    input.answer_text,
+                    bump,
+                    input.subject_id,
+                    input.enabled as i64,
                 ),
             )?;
         }
@@ -95,6 +102,18 @@ pub fn delete(conn: &Connection, ids: &[i64]) -> CoreResult<(usize, Vec<i64>)> {
     let mut deleted = 0;
     let mut blocked = Vec::new();
     for &id in ids {
+        let refs: i64 = conn.query_row(
+            "SELECT
+                (SELECT count(*) FROM tasks WHERE module=?1 AND ref_type='content' AND ref_id=?2) +
+                (SELECT count(*) FROM submissions WHERE module=?1 AND ref_id=?2) +
+                (SELECT count(*) FROM memory_cards WHERE module=?1 AND ref_type='content' AND ref_id=?2)",
+            (MODULE.as_str(), id),
+            |r| r.get(0),
+        )?;
+        if refs > 0 {
+            blocked.push(id);
+            continue;
+        }
         match conn.execute("DELETE FROM rec_contents WHERE id=?1", [id]) {
             Ok(n) => deleted += n,
             Err(_) => blocked.push(id), // 外键约束：有历史任务/提交
@@ -135,7 +154,13 @@ mod tests {
         let conn = setup();
         let c = upsert(
             &conn,
-            &ContentInput { content_no: "C012", title: "静夜思", answer_text: "床前明月光", subject_id: None, enabled: true },
+            &ContentInput {
+                content_no: "C012",
+                title: "静夜思",
+                answer_text: "床前明月光",
+                subject_id: None,
+                enabled: true,
+            },
         )
         .unwrap();
         assert_eq!(c.answer_version, 1);
@@ -143,7 +168,13 @@ mod tests {
         // 仅改标题，版本不变
         let c2 = upsert(
             &conn,
-            &ContentInput { content_no: "C012", title: "静夜思(唐)", answer_text: "床前明月光", subject_id: None, enabled: true },
+            &ContentInput {
+                content_no: "C012",
+                title: "静夜思(唐)",
+                answer_text: "床前明月光",
+                subject_id: None,
+                enabled: true,
+            },
         )
         .unwrap();
         assert_eq!(c2.answer_version, 1);
@@ -151,10 +182,49 @@ mod tests {
         // 改答案，版本 +1
         let c3 = upsert(
             &conn,
-            &ContentInput { content_no: "C012", title: "静夜思(唐)", answer_text: "床前明月光疑是地上霜", subject_id: None, enabled: true },
+            &ContentInput {
+                content_no: "C012",
+                title: "静夜思(唐)",
+                answer_text: "床前明月光疑是地上霜",
+                subject_id: None,
+                enabled: true,
+            },
         )
         .unwrap();
         assert_eq!(c3.answer_version, 2);
         assert_eq!(list(&conn, true).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn delete_blocks_contents_with_history() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO students (student_no, name, enabled) VALUES ('2023001', '张三', 1)",
+            [],
+        )
+        .unwrap();
+        let sid = conn.last_insert_rowid();
+        let c = upsert(
+            &conn,
+            &ContentInput {
+                content_no: "C012",
+                title: "静夜思",
+                answer_text: "床前明月光",
+                subject_id: None,
+                enabled: true,
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (module, student_id, ref_type, ref_id, due_date)
+             VALUES ('recitation', ?1, 'content', ?2, '2026-06-25')",
+            (sid, c.id),
+        )
+        .unwrap();
+
+        let (deleted, blocked) = delete(&conn, &[c.id]).unwrap();
+        assert_eq!(deleted, 0);
+        assert_eq!(blocked, vec![c.id]);
+        assert!(get_by_id(&conn, c.id).unwrap().is_some());
     }
 }

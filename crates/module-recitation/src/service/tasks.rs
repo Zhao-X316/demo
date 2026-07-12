@@ -2,6 +2,7 @@
 
 use chrono::{Duration, NaiveDate};
 use rusqlite::Connection;
+use serde::Serialize;
 use suite_core::db::repo::{memory_cards, tasks};
 use suite_core::error::CoreResult;
 use suite_core::models::{ModuleKey, TaskKind, TaskStatus};
@@ -11,6 +12,15 @@ const REF_TYPE: &str = "content";
 
 /// 默认补背在次日。
 pub const DEFAULT_MAKEUP_OFFSET_DAYS: i64 = 1;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct GenerateNormalReport {
+    pub created: usize,
+    pub revived: usize,
+    pub skipped_open: usize,
+    pub skipped_completed: usize,
+    pub task_ids: Vec<i64>,
+}
 
 /// 生成补背任务（去重：同 学生+内容 已有未关闭补背则不新建）。返回新任务 id 或 None。
 pub fn ensure_makeup(
@@ -40,14 +50,55 @@ pub fn ensure_makeup(
     Ok(Some(id))
 }
 
-/// 批量生成"新背"任务：为给定 (学生, 内容) 列表在某日期建 normal 任务（幂等）。返回任务 id 列表。
+/// 批量生成"新背"任务：为给定 (学生, 内容) 列表在某日期建 normal 任务（幂等）。
 pub fn generate_normal(
     conn: &Connection,
     due_date: &str,
     pairs: &[(i64, i64)],
-) -> CoreResult<Vec<i64>> {
-    let mut out = Vec::with_capacity(pairs.len());
+) -> CoreResult<GenerateNormalReport> {
+    let mut out = GenerateNormalReport::default();
     for &(student_id, content_id) in pairs {
+        if let Some(existing) = tasks::find_by_unique_key(
+            conn,
+            MODULE,
+            student_id,
+            content_id,
+            due_date,
+            TaskKind::Normal,
+        )? {
+            match existing.status {
+                TaskStatus::Closed => {
+                    let id = tasks::insert(
+                        conn,
+                        &tasks::NewTask {
+                            module: MODULE,
+                            student_id,
+                            subject_id: None,
+                            ref_type: REF_TYPE,
+                            ref_id: content_id,
+                            kind: TaskKind::Normal,
+                            due_date,
+                            source_task_id: None,
+                            card_id: None,
+                        },
+                    )?;
+                    out.revived += 1;
+                    out.task_ids.push(id);
+                }
+                TaskStatus::Open | TaskStatus::Submitted | TaskStatus::Reopened => {
+                    out.skipped_open += 1;
+                }
+                TaskStatus::Passed | TaskStatus::Failed | TaskStatus::Expired => {
+                    out.skipped_completed += 1;
+                }
+            }
+            continue;
+        }
+        // 学生已欠这篇（有未完成的新背/补背/复习）就跳过，避免「新背 + 补背」同篇重复布置
+        if tasks::exists_open_any(conn, MODULE, student_id, content_id)? {
+            out.skipped_open += 1;
+            continue;
+        }
         let id = tasks::insert(
             conn,
             &tasks::NewTask {
@@ -62,7 +113,8 @@ pub fn generate_normal(
                 card_id: None,
             },
         )?;
-        out.push(id);
+        out.created += 1;
+        out.task_ids.push(id);
     }
     Ok(out)
 }
@@ -122,7 +174,12 @@ mod tests {
         run_migrations(&conn, crate::recitation_migrations()).unwrap();
         let s = upsert_student(
             &conn,
-            &StudentInput { student_no: "2023001", name: "张三", class_id: None, enabled: true },
+            &StudentInput {
+                student_no: "2023001",
+                name: "张三",
+                class_id: None,
+                enabled: true,
+            },
         )
         .unwrap();
         (conn, s.id)
@@ -143,8 +200,14 @@ mod tests {
         upsert_after_review(
             &conn,
             &CardUpdate {
-                module: MODULE, student_id: sid, ref_type: REF_TYPE, ref_id: 7,
-                state: CardState::Review, stage: 2, interval_days: 4, quality: "A",
+                module: MODULE,
+                student_id: sid,
+                ref_type: REF_TYPE,
+                ref_id: 7,
+                state: CardState::Review,
+                stage: 2,
+                interval_days: 4,
+                quality: "A",
                 due_date: "2026-06-20",
             },
         )
@@ -157,20 +220,44 @@ mod tests {
     }
 
     #[test]
+    fn normal_generation_reports_completed_duplicates() {
+        let (conn, sid) = setup();
+        let first = generate_normal(&conn, "2026-06-25", &[(sid, 12)]).unwrap();
+        assert_eq!(first.created, 1);
+        let id = first.task_ids[0];
+        tasks::set_status(&conn, id, TaskStatus::Passed).unwrap();
+
+        let again = generate_normal(&conn, "2026-06-25", &[(sid, 12)]).unwrap();
+        assert_eq!(again.created, 0);
+        assert_eq!(again.revived, 0);
+        assert_eq!(again.skipped_completed, 1);
+        assert!(again.task_ids.is_empty());
+    }
+
+    #[test]
     fn rollover_expires_and_makes_up() {
         let (conn, sid) = setup();
         let tid = tasks::insert(
             &conn,
             &tasks::NewTask {
-                module: MODULE, student_id: sid, subject_id: None, ref_type: REF_TYPE,
-                ref_id: 9, kind: TaskKind::Normal, due_date: "2026-06-20",
-                source_task_id: None, card_id: None,
+                module: MODULE,
+                student_id: sid,
+                subject_id: None,
+                ref_type: REF_TYPE,
+                ref_id: 9,
+                kind: TaskKind::Normal,
+                due_date: "2026-06-20",
+                source_task_id: None,
+                card_id: None,
             },
         )
         .unwrap();
         let n = rollover(&conn, NaiveDate::from_ymd_opt(2026, 6, 25).unwrap()).unwrap();
         assert_eq!(n, 1);
-        assert_eq!(tasks::get(&conn, tid).unwrap().unwrap().status, TaskStatus::Expired);
+        assert_eq!(
+            tasks::get(&conn, tid).unwrap().unwrap().status,
+            TaskStatus::Expired
+        );
         assert!(tasks::exists_open_kind(&conn, MODULE, sid, 9, TaskKind::Makeup).unwrap());
     }
 }

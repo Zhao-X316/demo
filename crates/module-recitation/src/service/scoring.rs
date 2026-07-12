@@ -46,7 +46,10 @@ pub enum NextAction {
     /// 通过 → 排入下次复习。
     Scheduled { due_date: String, stage: i32 },
     /// 未通过 → 生成补背（task_id 为 None 表示去重命中未新建）。
-    Makeup { task_id: Option<i64>, due_date: String },
+    Makeup {
+        task_id: Option<i64>,
+        due_date: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -76,19 +79,43 @@ pub fn score_submission(
 ) -> CoreResult<ScoreOutcome> {
     let sub = submissions::get(conn, submission_id)?
         .ok_or_else(|| CoreError::NotFound(format!("submission {submission_id}")))?;
-    let student_id = sub.student_id.ok_or_else(|| CoreError::Invalid("提交缺少学生".into()))?;
-    let content_id = sub.ref_id.ok_or_else(|| CoreError::Invalid("提交缺少内容".into()))?;
+    let student_id = sub
+        .student_id
+        .ok_or_else(|| CoreError::Invalid("提交缺少学生".into()))?;
+    let content_id = sub
+        .ref_id
+        .ok_or_else(|| CoreError::Invalid("提交缺少内容".into()))?;
     let asr_text = sub.recognized_text.clone().unwrap_or_default();
     let duration = sub.duration_ms.unwrap_or(0).max(0) as u64;
 
     let content = contents::get_by_id(conn, content_id)?
         .ok_or_else(|| CoreError::NotFound(format!("content {content_id}")))?;
 
-    let g = grade_and_record(conn, submission_id, &content, &asr_text, words, duration, cfg)?;
+    let g = grade_and_record(
+        conn,
+        submission_id,
+        &content,
+        &asr_text,
+        words,
+        duration,
+        cfg,
+    )?;
 
-    let review_ref =
-        ReviewRef { module: MODULE, student_id, ref_type: REF_TYPE, ref_id: content_id };
-    let next = apply_outcome(conn, &review_ref, sub.task_id, g.grade.pass, &g.quality, today, cfg)?;
+    let review_ref = ReviewRef {
+        module: MODULE,
+        student_id,
+        ref_type: REF_TYPE,
+        ref_id: content_id,
+    };
+    let next = apply_outcome(
+        conn,
+        &review_ref,
+        sub.task_id,
+        g.grade.pass,
+        &g.quality,
+        today,
+        cfg,
+    )?;
 
     Ok(ScoreOutcome {
         verdict_id: g.verdict_id,
@@ -142,7 +169,11 @@ fn grade_and_record(
         },
     )?;
     submissions::set_status(conn, submission_id, "scored")?;
-    Ok(Graded { grade, quality, verdict_id })
+    Ok(Graded {
+        grade,
+        quality,
+        verdict_id,
+    })
 }
 
 /// 应用通过/未通过的副作用：通过→排复习+任务passed+作废残留补背；未通过→脱档+任务failed+生成补背。
@@ -162,11 +193,20 @@ fn apply_outcome(
             tasks::set_status(conn, tid, TaskStatus::Passed)?;
         }
         // 通过 → 作废该 学生+内容 残留的未关闭补背（如人工把 fail 改判为 pass）
-        tasks::close_open_kind(conn, MODULE, review_ref.student_id, review_ref.ref_id, suite_core::models::TaskKind::Makeup)?;
+        tasks::close_open_kind(
+            conn,
+            MODULE,
+            review_ref.student_id,
+            review_ref.ref_id,
+            suite_core::models::TaskKind::Makeup,
+        )?;
         let due = (today + Duration::days(out.interval_days as i64))
             .format("%Y-%m-%d")
             .to_string();
-        Ok(NextAction::Scheduled { due_date: due, stage: out.stage })
+        Ok(NextAction::Scheduled {
+            due_date: due,
+            stage: out.stage,
+        })
     } else {
         review::record_lapse(conn, review_ref, today)?;
         if let Some(tid) = task_id {
@@ -177,11 +217,18 @@ fn apply_outcome(
             .to_string();
         let mk = match task_id {
             Some(tid) => task_service::ensure_makeup(
-                conn, review_ref.student_id, review_ref.ref_id, tid, &due,
+                conn,
+                review_ref.student_id,
+                review_ref.ref_id,
+                tid,
+                &due,
             )?,
             None => None,
         };
-        Ok(NextAction::Makeup { task_id: mk, due_date: due })
+        Ok(NextAction::Makeup {
+            task_id: mk,
+            due_date: due,
+        })
     }
 }
 
@@ -195,20 +242,33 @@ pub fn rescore(
 ) -> CoreResult<ScoreOutcome> {
     let sub = submissions::get(conn, submission_id)?
         .ok_or_else(|| CoreError::NotFound(format!("submission {submission_id}")))?;
-    let content_id = sub.ref_id.ok_or_else(|| CoreError::Invalid("提交缺少内容".into()))?;
+    let content_id = sub
+        .ref_id
+        .ok_or_else(|| CoreError::Invalid("提交缺少内容".into()))?;
     let asr_text = sub.recognized_text.clone().unwrap_or_default();
     let duration = sub.duration_ms.unwrap_or(0).max(0) as u64;
     let content = contents::get_by_id(conn, content_id)?
         .ok_or_else(|| CoreError::NotFound(format!("content {content_id}")))?;
 
-    let g = grade_and_record(conn, submission_id, &content, &asr_text, words, duration, cfg)?;
+    let g = grade_and_record(
+        conn,
+        submission_id,
+        &content,
+        &asr_text,
+        words,
+        duration,
+        cfg,
+    )?;
     Ok(ScoreOutcome {
         verdict_id: g.verdict_id,
         accuracy: g.grade.primary_score,
         pass: g.grade.pass,
         fluency: g.grade.secondary_score.unwrap_or(0.0),
         quality: g.quality,
-        next: NextAction::Scheduled { due_date: String::new(), stage: -1 }, // 占位：rescore 不改排程
+        next: NextAction::Scheduled {
+            due_date: String::new(),
+            stage: -1,
+        }, // 占位：rescore 不改排程
     })
 }
 
@@ -224,8 +284,12 @@ pub fn human_decide(
 ) -> CoreResult<NextAction> {
     let sub = submissions::get(conn, submission_id)?
         .ok_or_else(|| CoreError::NotFound(format!("submission {submission_id}")))?;
-    let student_id = sub.student_id.ok_or_else(|| CoreError::Invalid("提交缺少学生".into()))?;
-    let content_id = sub.ref_id.ok_or_else(|| CoreError::Invalid("提交缺少内容".into()))?;
+    let student_id = sub
+        .student_id
+        .ok_or_else(|| CoreError::Invalid("提交缺少学生".into()))?;
+    let content_id = sub
+        .ref_id
+        .ok_or_else(|| CoreError::Invalid("提交缺少内容".into()))?;
 
     let verdict = verdicts::get_by_submission(conn, submission_id)?
         .ok_or_else(|| CoreError::NotFound("尚无判定，无法人工确认".into()))?;
@@ -233,17 +297,36 @@ pub fn human_decide(
     submissions::set_status(conn, submission_id, "confirmed")?;
 
     let quality = verdict.quality.clone().unwrap_or_else(|| "C".to_string());
-    let review_ref =
-        ReviewRef { module: MODULE, student_id, ref_type: REF_TYPE, ref_id: content_id };
+    let review_ref = ReviewRef {
+        module: MODULE,
+        student_id,
+        ref_type: REF_TYPE,
+        ref_id: content_id,
+    };
+    let current_task_status = match sub.task_id {
+        Some(tid) => tasks::get(conn, tid)?.map(|t| t.status),
+        None => None,
+    };
 
     match result {
+        "pass" if current_task_status == Some(TaskStatus::Passed) => Ok(NextAction::Scheduled {
+            due_date: String::new(),
+            stage: -1,
+        }),
+        "fail" if current_task_status == Some(TaskStatus::Failed) => Ok(NextAction::Makeup {
+            task_id: None,
+            due_date: String::new(),
+        }),
         "pass" => apply_outcome(conn, &review_ref, sub.task_id, true, &quality, today, cfg),
         "fail" => apply_outcome(conn, &review_ref, sub.task_id, false, &quality, today, cfg),
         "reopen" => {
             if let Some(tid) = sub.task_id {
                 tasks::set_status(conn, tid, TaskStatus::Reopened)?;
             }
-            Ok(NextAction::Makeup { task_id: None, due_date: String::new() })
+            Ok(NextAction::Makeup {
+                task_id: None,
+                due_date: String::new(),
+            })
         }
         other => Err(CoreError::Invalid(format!("未知人工结论: {other}"))),
     }
@@ -265,26 +348,48 @@ mod tests {
         run_migrations(&conn, crate::recitation_migrations()).unwrap();
         let s = upsert_student(
             &conn,
-            &StudentInput { student_no: "2023001", name: "张三", class_id: None, enabled: true },
+            &StudentInput {
+                student_no: "2023001",
+                name: "张三",
+                class_id: None,
+                enabled: true,
+            },
         )
         .unwrap();
         let c = contents::upsert(
             &conn,
-            &contents::ContentInput { content_no: "C012", title: "静夜思", answer_text: answer, subject_id: None, enabled: true },
+            &contents::ContentInput {
+                content_no: "C012",
+                title: "静夜思",
+                answer_text: answer,
+                subject_id: None,
+                enabled: true,
+            },
         )
         .unwrap();
         tasks::insert(
             &conn,
             &NewTask {
-                module: MODULE, student_id: s.id, subject_id: None, ref_type: REF_TYPE,
-                ref_id: c.id, kind: TaskKind::Normal, due_date: "2026-06-25",
-                source_task_id: None, card_id: None,
+                module: MODULE,
+                student_id: s.id,
+                subject_id: None,
+                ref_type: REF_TYPE,
+                ref_id: c.id,
+                kind: TaskKind::Normal,
+                due_date: "2026-06-25",
+                source_task_id: None,
+                card_id: None,
             },
         )
         .unwrap();
         let out = import_one(
             &conn,
-            &ImportItem { file_path: "/x.m4a", file_stem: "20260625_2023001_张三_C012", file_hash: "h1", duration_ms: Some(5000) },
+            &ImportItem {
+                file_path: "/x.m4a",
+                file_stem: "20260625_2023001_张三_C012",
+                file_hash: "h1",
+                duration_ms: Some(5000),
+            },
         )
         .unwrap();
         let sub_id = match out {
@@ -307,10 +412,14 @@ mod tests {
         assert_eq!(out.accuracy, 100.0);
         assert!(matches!(out.next, NextAction::Scheduled { .. }));
         // 卡片已建立、due 已写
-        let card = memory_cards::get(&conn, MODULE, sid, REF_TYPE, cid).unwrap().unwrap();
+        let card = memory_cards::get(&conn, MODULE, sid, REF_TYPE, cid)
+            .unwrap()
+            .unwrap();
         assert!(card.due_date.is_some());
         // 任务标记通过
-        let t = tasks::get(&conn, score_task_id(&conn, sub)).unwrap().unwrap();
+        let t = tasks::get(&conn, score_task_id(&conn, sub))
+            .unwrap()
+            .unwrap();
         assert_eq!(t.status, TaskStatus::Passed);
     }
 
@@ -318,7 +427,8 @@ mod tests {
     fn fail_generates_makeup_and_marks_task_failed() {
         // 答案两句，只背一句 → < 95%
         let (conn, sid, cid, sub) = setup_imported("床前明月光疑是地上霜");
-        submissions::set_recognition(&conn, sub, Some("床前明月光"), "ok", None, Some(3000)).unwrap();
+        submissions::set_recognition(&conn, sub, Some("床前明月光"), "ok", None, Some(3000))
+            .unwrap();
         let today = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
         let out = score_submission(&conn, sub, &[], today, &ScoreCfg::default()).unwrap();
 
@@ -334,6 +444,10 @@ mod tests {
     }
 
     fn score_task_id(conn: &Connection, sub: i64) -> i64 {
-        submissions::get(conn, sub).unwrap().unwrap().task_id.unwrap()
+        submissions::get(conn, sub)
+            .unwrap()
+            .unwrap()
+            .task_id
+            .unwrap()
     }
 }

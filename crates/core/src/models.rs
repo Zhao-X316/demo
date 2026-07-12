@@ -65,6 +65,8 @@ pub struct Class {
     pub id: i64,
     pub name: String,
     pub term: Option<String>,
+    /// 绑定教材（学科+年级册，如「道法8上」），布置时默认到该班教材。
+    pub textbook: Option<String>,
 }
 
 /// 知识点（自引用成树；M2/M3/报表共用）。

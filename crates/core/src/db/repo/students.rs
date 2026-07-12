@@ -33,7 +33,12 @@ pub fn upsert(conn: &Connection, input: &StudentInput<'_>) -> CoreResult<Student
             class_id = excluded.class_id,
             enabled = excluded.enabled,
             updated_at = datetime('now')",
-        (input.student_no, input.name, input.class_id, input.enabled as i64),
+        (
+            input.student_no,
+            input.name,
+            input.class_id,
+            input.enabled as i64,
+        ),
     )?;
     get_by_no(conn, input.student_no)?
         .ok_or_else(|| crate::error::CoreError::Db("upsert 后未取回学生".into()))
@@ -46,6 +51,18 @@ pub fn set_enabled(conn: &Connection, ids: &[i64], enabled: bool) -> CoreResult<
         n += conn.execute(
             "UPDATE students SET enabled = ?1, updated_at = datetime('now') WHERE id = ?2",
             (enabled as i64, id),
+        )?;
+    }
+    Ok(n)
+}
+
+/// 批量分班。`class_id = None` 即移出班级。
+pub fn set_class(conn: &Connection, ids: &[i64], class_id: Option<i64>) -> CoreResult<usize> {
+    let mut n = 0;
+    for &id in ids {
+        n += conn.execute(
+            "UPDATE students SET class_id = ?1, updated_at = datetime('now') WHERE id = ?2",
+            (class_id, id),
         )?;
     }
     Ok(n)
@@ -114,7 +131,12 @@ mod tests {
 
         let s = upsert(
             &conn,
-            &StudentInput { student_no: "2023001", name: "张三", class_id: None, enabled: true },
+            &StudentInput {
+                student_no: "2023001",
+                name: "张三",
+                class_id: None,
+                enabled: true,
+            },
         )
         .unwrap();
         assert_eq!(s.student_no, "2023001");
@@ -123,7 +145,12 @@ mod tests {
         // 同学号再 upsert → 更新姓名，不新增
         upsert(
             &conn,
-            &StudentInput { student_no: "2023001", name: "张三丰", class_id: None, enabled: true },
+            &StudentInput {
+                student_no: "2023001",
+                name: "张三丰",
+                class_id: None,
+                enabled: true,
+            },
         )
         .unwrap();
         let got = get_by_no(&conn, "2023001").unwrap().unwrap();

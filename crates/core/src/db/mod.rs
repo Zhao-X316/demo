@@ -12,10 +12,16 @@ use crate::ports::Migration;
 pub mod repo;
 
 /// Core 通用表迁移（外壳应在各模块迁移之前先运行它）。
-pub static CORE_MIGRATIONS: &[Migration] = &[Migration {
-    id: "core_0001",
-    sql: include_str!("schema/0001_core.sql"),
-}];
+pub static CORE_MIGRATIONS: &[Migration] = &[
+    Migration {
+        id: "core_0001",
+        sql: include_str!("schema/0001_core.sql"),
+    },
+    Migration {
+        id: "core_0002",
+        sql: include_str!("schema/0002_class_textbook.sql"),
+    },
+];
 
 /// 打开磁盘数据库并开启外键。
 pub fn open(path: &std::path::Path) -> CoreResult<Connection> {
@@ -68,7 +74,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT count(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 1);
+        assert_eq!(n, 2);
         // 关键表存在
         let t: i64 = conn
             .query_row(

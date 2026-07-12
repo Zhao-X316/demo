@@ -31,8 +31,24 @@ export const contentsUpsert = (
   enabled: boolean,
 ) => call<RecContent>("contents_upsert", { contentNo: content_no, title, answerText: answer_text, enabled });
 
+export interface TaskGenerateResult {
+  created: number;
+  revived: number;
+  skipped_open: number;
+  skipped_completed: number;
+  total_effective: number;
+}
+
 export const tasksGenerate = (pairs: [number, number][]) =>
-  call<number>("tasks_generate", { pairs });
+  call<TaskGenerateResult>("tasks_generate", { pairs });
+
+// 覆盖已布置：关掉这些学生今日未开始的新背任务，再按新内容重布。返回新建数。
+export const tasksReassign = (student_ids: number[], content_ids: number[]) =>
+  call<number>("tasks_reassign", { studentIds: student_ids, contentIds: content_ids });
+
+// 删除已布置内容：关掉这些学生今日、指定内容的新背任务（含已开始的）。返回关闭数。
+export const tasksRemove = (student_ids: number[], content_ids: number[]) =>
+  call<number>("tasks_remove", { studentIds: student_ids, contentIds: content_ids });
 
 // ── 批量导入 / 删减 ──
 export interface BatchImport {
@@ -51,6 +67,23 @@ export const studentsSetEnabled = (ids: number[], enabled: boolean) =>
   call<number>("students_set_enabled", { ids, enabled });
 export const studentsDelete = (ids: number[]) =>
   call<DeleteResult>("students_delete", { ids });
+
+// ── 班级（分班）──
+export interface Class {
+  id: number;
+  name: string;
+  term: string | null;
+  textbook: string | null; // 绑定教材，如「道法8上」
+}
+export const classesList = () => call<Class[]>("classes_list");
+export const classCreate = (name: string, textbook?: string, term?: string) =>
+  call<Class>("class_create", { name, textbook: textbook ?? null, term: term ?? null });
+export const classUpdate = (id: number, name: string, textbook?: string, term?: string) =>
+  call<Class>("class_update", { id, name, textbook: textbook ?? null, term: term ?? null });
+export const classDelete = (id: number) => call<void>("class_delete", { id });
+// class_id=null 即移出班级
+export const studentsSetClass = (ids: number[], class_id: number | null) =>
+  call<number>("students_set_class", { ids, classId: class_id });
 
 export const contentsImport = (
   rows: { content_no: string; title: string; answer_text: string }[],

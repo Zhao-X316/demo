@@ -75,10 +75,14 @@ pub struct NewTask<'a> {
 
 /// 插入任务；唯一键冲突（同 module+student+ref+due+kind）则忽略并返回既有 id。
 pub fn insert(conn: &Connection, t: &NewTask<'_>) -> CoreResult<i64> {
+    // 撞到同键的「已关闭」旧任务（被撤销/删除/覆盖过）则复活成 open；
+    // 进行中（submitted/passed…）的不动，避免重置学生已做的工作。
     conn.execute(
-        "INSERT OR IGNORE INTO tasks
+        "INSERT INTO tasks
             (module, student_id, subject_id, ref_type, ref_id, kind, due_date, source_task_id, card_id)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+         ON CONFLICT(module, student_id, ref_type, ref_id, due_date, kind)
+         DO UPDATE SET status='open', updated_at=datetime('now') WHERE tasks.status='closed'",
         (
             t.module.as_str(), t.student_id, t.subject_id, t.ref_type, t.ref_id,
             kind_str(t.kind), t.due_date, t.source_task_id, t.card_id,
@@ -88,7 +92,14 @@ pub fn insert(conn: &Connection, t: &NewTask<'_>) -> CoreResult<i64> {
     let id: i64 = conn.query_row(
         "SELECT id FROM tasks WHERE module=?1 AND student_id=?2 AND ref_type=?3 AND ref_id=?4 \
          AND due_date=?5 AND kind=?6",
-        (t.module.as_str(), t.student_id, t.ref_type, t.ref_id, t.due_date, kind_str(t.kind)),
+        (
+            t.module.as_str(),
+            t.student_id,
+            t.ref_type,
+            t.ref_id,
+            t.due_date,
+            kind_str(t.kind),
+        ),
         |r| r.get(0),
     )?;
     Ok(id)
@@ -97,6 +108,33 @@ pub fn insert(conn: &Connection, t: &NewTask<'_>) -> CoreResult<i64> {
 pub fn get(conn: &Connection, id: i64) -> CoreResult<Option<Task>> {
     let sql = format!("SELECT {COLS} FROM tasks WHERE id=?1");
     Ok(conn.query_row(&sql, [id], row_to_task).optional()?)
+}
+
+pub fn find_by_unique_key(
+    conn: &Connection,
+    module: ModuleKey,
+    student_id: i64,
+    ref_id: i64,
+    due_date: &str,
+    kind: TaskKind,
+) -> CoreResult<Option<Task>> {
+    let sql = format!(
+        "SELECT {COLS} FROM tasks WHERE module=?1 AND student_id=?2 AND ref_type='content' \
+         AND ref_id=?3 AND due_date=?4 AND kind=?5 LIMIT 1"
+    );
+    Ok(conn
+        .query_row(
+            &sql,
+            (
+                module.as_str(),
+                student_id,
+                ref_id,
+                due_date,
+                kind_str(kind),
+            ),
+            row_to_task,
+        )
+        .optional()?)
 }
 
 pub fn set_status(conn: &Connection, id: i64, status: TaskStatus) -> CoreResult<()> {
@@ -136,7 +174,11 @@ pub fn find_open_match(
          AND due_date=?4 AND status IN ('open','submitted','reopened') ORDER BY id LIMIT 1"
     );
     Ok(conn
-        .query_row(&sql, (module.as_str(), student_id, ref_id, due_date), row_to_task)
+        .query_row(
+            &sql,
+            (module.as_str(), student_id, ref_id, due_date),
+            row_to_task,
+        )
         .optional()?)
 }
 
@@ -152,6 +194,23 @@ pub fn exists_open_kind(
         "SELECT count(*) FROM tasks WHERE module=?1 AND student_id=?2 AND ref_id=?3 \
          AND kind=?4 AND status IN ('open','submitted','reopened')",
         (module.as_str(), student_id, ref_id, kind_str(kind)),
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// 该学生对该内容是否已有「未完成」任务（任意种类：新背/补背/复习）。
+/// 布置时用它避免重复布置——学生已欠这篇就不再加一条。
+pub fn exists_open_any(
+    conn: &Connection,
+    module: ModuleKey,
+    student_id: i64,
+    ref_id: i64,
+) -> CoreResult<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM tasks WHERE module=?1 AND student_id=?2 AND ref_id=?3 \
+         AND status IN ('open','submitted','reopened')",
+        (module.as_str(), student_id, ref_id),
         |r| r.get(0),
     )?;
     Ok(n > 0)
@@ -187,7 +246,11 @@ pub fn list_by_date(conn: &Connection, module: ModuleKey, date: &str) -> CoreRes
 }
 
 /// 日切：早于 today 仍 open 的任务（用于结转/过期）。
-pub fn list_open_before(conn: &Connection, module: ModuleKey, today: &str) -> CoreResult<Vec<Task>> {
+pub fn list_open_before(
+    conn: &Connection,
+    module: ModuleKey,
+    today: &str,
+) -> CoreResult<Vec<Task>> {
     let sql = format!(
         "SELECT {COLS} FROM tasks WHERE module=?1 AND status='open' AND due_date < ?2 ORDER BY due_date"
     );
@@ -211,7 +274,12 @@ mod tests {
         run_migrations(&conn, CORE_MIGRATIONS).unwrap();
         let s = upsert_student(
             &conn,
-            &StudentInput { student_no: "2023001", name: "张三", class_id: None, enabled: true },
+            &StudentInput {
+                student_no: "2023001",
+                name: "张三",
+                class_id: None,
+                enabled: true,
+            },
         )
         .unwrap();
         (conn, s.id)
@@ -221,9 +289,15 @@ mod tests {
     fn insert_is_idempotent_and_matchable() {
         let (conn, sid) = setup();
         let nt = NewTask {
-            module: ModuleKey::Recitation, student_id: sid, subject_id: None,
-            ref_type: "content", ref_id: 12, kind: TaskKind::Normal,
-            due_date: "2026-06-25", source_task_id: None, card_id: None,
+            module: ModuleKey::Recitation,
+            student_id: sid,
+            subject_id: None,
+            ref_type: "content",
+            ref_id: 12,
+            kind: TaskKind::Normal,
+            due_date: "2026-06-25",
+            source_task_id: None,
+            card_id: None,
         };
         let id1 = insert(&conn, &nt).unwrap();
         let id2 = insert(&conn, &nt).unwrap(); // 唯一键冲突 → 同 id
@@ -236,13 +310,21 @@ mod tests {
     #[test]
     fn makeup_dedup_guard() {
         let (conn, sid) = setup();
-        assert!(!exists_open_kind(&conn, ModuleKey::Recitation, sid, 12, TaskKind::Makeup).unwrap());
+        assert!(
+            !exists_open_kind(&conn, ModuleKey::Recitation, sid, 12, TaskKind::Makeup).unwrap()
+        );
         insert(
             &conn,
             &NewTask {
-                module: ModuleKey::Recitation, student_id: sid, subject_id: None,
-                ref_type: "content", ref_id: 12, kind: TaskKind::Makeup,
-                due_date: "2026-06-26", source_task_id: Some(1), card_id: None,
+                module: ModuleKey::Recitation,
+                student_id: sid,
+                subject_id: None,
+                ref_type: "content",
+                ref_id: 12,
+                kind: TaskKind::Makeup,
+                due_date: "2026-06-26",
+                source_task_id: Some(1),
+                card_id: None,
             },
         )
         .unwrap();
@@ -255,9 +337,15 @@ mod tests {
         insert(
             &conn,
             &NewTask {
-                module: ModuleKey::Recitation, student_id: sid, subject_id: None,
-                ref_type: "content", ref_id: 12, kind: TaskKind::Normal,
-                due_date: "2026-06-20", source_task_id: None, card_id: None,
+                module: ModuleKey::Recitation,
+                student_id: sid,
+                subject_id: None,
+                ref_type: "content",
+                ref_id: 12,
+                kind: TaskKind::Normal,
+                due_date: "2026-06-20",
+                source_task_id: None,
+                card_id: None,
             },
         )
         .unwrap();

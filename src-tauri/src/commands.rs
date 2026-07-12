@@ -8,8 +8,8 @@ use module_recitation::config::RecitationConfig;
 use module_recitation::db::contents::{self, ContentInput, RecContent};
 use module_recitation::service::{import, matching, scoring, tasks as task_svc};
 use suite_core::db::repo::students::{self, StudentInput};
-use suite_core::db::repo::{file_ledger, submissions, tasks, verdicts};
-use suite_core::models::{MediaType, ModuleKey, Student, TaskKind, TaskStatus};
+use suite_core::db::repo::{classes, file_ledger, submissions, tasks, verdicts};
+use suite_core::models::{Class, MediaType, ModuleKey, Student, TaskKind, TaskStatus};
 
 use crate::secrets::{self, VolcanoCreds};
 use crate::state::AppState;
@@ -120,6 +120,10 @@ pub fn dashboard_today(state: State<'_, AppState>) -> R<TodayView> {
     let mut view =
         TodayView { date, summary: TodaySummary::default(), normal: vec![], makeup: vec![], review: vec![] };
     for t in tasks_today {
+        // 已关闭（撤销/覆盖/删除已布置）的任务不再显示
+        if t.status == TaskStatus::Closed {
+            continue;
+        }
         let student = students::get_by_id(&conn, t.student_id).map_err(e)?;
         let content = contents::get_by_id(&conn, t.ref_id).map_err(e)?;
         let sub = submissions::find_by_task(&conn, t.id).map_err(e)?;
@@ -455,6 +459,57 @@ pub fn students_set_enabled(state: State<'_, AppState>, ids: Vec<i64>, enabled: 
     students::set_enabled(&conn, &ids, enabled).map_err(e)
 }
 
+// ───────────────────────── 班级（分班） ─────────────────────────
+
+#[tauri::command]
+pub fn classes_list(state: State<'_, AppState>) -> R<Vec<Class>> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    classes::list(&conn).map_err(e)
+}
+
+/// 建班（同名去重；可绑教材）。
+#[tauri::command]
+pub fn class_create(
+    state: State<'_, AppState>,
+    name: String,
+    textbook: Option<String>,
+    term: Option<String>,
+) -> R<Class> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    classes::create(&conn, &name, textbook.as_deref(), term.as_deref()).map_err(e)
+}
+
+/// 改班：改名 / 调教材 / 学期。
+#[tauri::command]
+pub fn class_update(
+    state: State<'_, AppState>,
+    id: i64,
+    name: String,
+    textbook: Option<String>,
+    term: Option<String>,
+) -> R<Class> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    classes::update(&conn, id, &name, textbook.as_deref(), term.as_deref()).map_err(e)
+}
+
+/// 删班：该班学生自动移出（class_id=NULL），再删班级。
+#[tauri::command]
+pub fn class_delete(state: State<'_, AppState>, id: i64) -> R<()> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    classes::delete(&conn, id).map_err(e)
+}
+
+/// 批量分班；`class_id = None` 即移出班级。
+#[tauri::command]
+pub fn students_set_class(
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+    class_id: Option<i64>,
+) -> R<usize> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    students::set_class(&conn, &ids, class_id).map_err(e)
+}
+
 #[tauri::command]
 pub fn students_delete(state: State<'_, AppState>, ids: Vec<i64>) -> R<DeleteResult> {
     let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
@@ -522,63 +577,148 @@ pub fn parse_syllabus(
     Ok(module_recitation::domain::syllabus::parse_syllabus(&text, &prefix))
 }
 
-/// 为今日批量生成"新背"任务。返回生成数量。
+#[derive(Serialize)]
+pub struct TaskGenerateDto {
+    created: usize,
+    revived: usize,
+    skipped_open: usize,
+    skipped_completed: usize,
+    total_effective: usize,
+}
+
+/// 为今日批量生成"新背"任务。返回真实生成/跳过数量。
 #[tauri::command]
-pub fn tasks_generate(state: State<'_, AppState>, pairs: Vec<(i64, i64)>) -> R<usize> {
+pub fn tasks_generate(state: State<'_, AppState>, pairs: Vec<(i64, i64)>) -> R<TaskGenerateDto> {
     let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     let date = today_str();
-    let ids = task_svc::generate_normal(&conn, &date, &pairs).map_err(e)?;
-    Ok(ids.len())
+    let report = task_svc::generate_normal(&conn, &date, &pairs).map_err(e)?;
+    Ok(TaskGenerateDto {
+        created: report.created,
+        revived: report.revived,
+        skipped_open: report.skipped_open,
+        skipped_completed: report.skipped_completed,
+        total_effective: report.created + report.revived,
+    })
+}
+
+/// 撤销一条「已布置」任务：设为 closed（不删行，避开外键）。
+/// 只允许撤销尚未开始的任务（status=open）；已交/已判的不能撤。
+#[tauri::command]
+pub fn task_cancel(state: State<'_, AppState>, task_id: i64) -> R<()> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    let t = tasks::get(&conn, task_id).map_err(e)?.ok_or_else(|| "任务不存在".to_string())?;
+    if t.status != TaskStatus::Open {
+        return Err("该任务已提交或已完成，不能撤销".to_string());
+    }
+    tasks::set_status(&conn, task_id, TaskStatus::Closed).map_err(e)
+}
+
+/// 覆盖已布置：把给定学生今日**未开始**的「新背」任务关闭，再按新内容重新布置。
+/// 已开始（已交/已判）的旧任务不动，保留学生已完成的工作。返回新建任务数。
+#[tauri::command]
+pub fn tasks_reassign(
+    state: State<'_, AppState>,
+    student_ids: Vec<i64>,
+    content_ids: Vec<i64>,
+) -> R<usize> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    let date = today_str();
+    let sset: std::collections::HashSet<i64> = student_ids.iter().copied().collect();
+    for t in tasks::list_by_date(&conn, MODULE, &date).map_err(e)? {
+        if t.kind == TaskKind::Normal && t.status == TaskStatus::Open && sset.contains(&t.student_id) {
+            tasks::set_status(&conn, t.id, TaskStatus::Closed).map_err(e)?;
+        }
+    }
+    let pairs: Vec<(i64, i64)> = student_ids
+        .iter()
+        .flat_map(|&s| content_ids.iter().map(move |&c| (s, c)))
+        .collect();
+    let report = task_svc::generate_normal(&conn, &date, &pairs).map_err(e)?;
+    Ok(report.created + report.revived)
+}
+
+/// 删除已布置内容：把给定学生今日、指定内容的「新背」任务全部关闭（含已开始的）。
+/// 关闭只标 closed，不删提交/判定记录。返回关闭数。
+#[tauri::command]
+pub fn tasks_remove(
+    state: State<'_, AppState>,
+    student_ids: Vec<i64>,
+    content_ids: Vec<i64>,
+) -> R<usize> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    let date = today_str();
+    let sset: std::collections::HashSet<i64> = student_ids.iter().copied().collect();
+    let cset: std::collections::HashSet<i64> = content_ids.iter().copied().collect();
+    let mut n = 0;
+    for t in tasks::list_by_date(&conn, MODULE, &date).map_err(e)? {
+        if t.kind == TaskKind::Normal
+            && t.status != TaskStatus::Closed
+            && sset.contains(&t.student_id)
+            && cset.contains(&t.ref_id)
+        {
+            tasks::set_status(&conn, t.id, TaskStatus::Closed).map_err(e)?;
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 // ───────────────────────── 导入 + ASR 评分 ─────────────────────────
 
+/// 导入历史一行（来自 submissions 表，含全部状态；切走再回来不丢）。
 #[derive(Serialize)]
-pub struct ImportResultDto {
-    file: String,
-    status: String, // imported | duplicate | anomaly | error
-    detail: String,
-    submission_id: Option<i64>,
+pub struct ImportHistoryRow {
+    submission_id: i64,
+    file_name: String,         // 当前文件名（智能识别改名后即「改后名」）
+    student: Option<String>,   // 张明 (2023001)
+    content: Option<String>,   // 道法8上-04课-05 为什么要以礼待人
+    status: String,            // 已评分 / 未识别·待改派 / 待分析 …
+    recognized: Option<String>,
 }
 
-/// 批量导入音频文件：计算哈希 → 解析文件名 → 入库/去重/异常。
+fn history_status(s: &str) -> String {
+    match s {
+        "scored" => "已评分".into(),
+        "confirmed" => "已确认".into(),
+        "anomaly" => "未识别·待改派".into(),
+        "staged" => "待分析".into(),
+        "pending" => "待识别".into(),
+        other => other.to_string(),
+    }
+}
+
+/// 导入历史：最近的提交（默认 200 条），enrich 学生/内容/状态。复用现有表，不改表。
 #[tauri::command]
-pub fn import_paths(state: State<'_, AppState>, paths: Vec<String>) -> R<Vec<ImportResultDto>> {
+pub fn import_history(state: State<'_, AppState>, limit: Option<i64>) -> R<Vec<ImportHistoryRow>> {
     let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
-    let mut out = Vec::with_capacity(paths.len());
-    for p in paths {
-        let path = std::path::Path::new(&p);
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-        let hash = match suite_core::domain::hashing::sha256_file(path) {
-            Ok(h) => h,
-            Err(err) => {
-                out.push(ImportResultDto { file: p.clone(), status: "error".into(), detail: format!("读取/哈希失败: {err}"), submission_id: None });
-                continue;
-            }
+    let subs = submissions::list_recent(&conn, MODULE, limit.unwrap_or(200)).map_err(e)?;
+    let mut out = Vec::with_capacity(subs.len());
+    for s in subs {
+        let student = match s.student_id {
+            Some(id) => students::get_by_id(&conn, id)
+                .map_err(e)?
+                .map(|st| format!("{} ({})", st.name, st.student_no)),
+            None => None,
         };
-        let item = import::ImportItem { file_path: &p, file_stem: &stem, file_hash: &hash, duration_ms: None };
-        let dto = match import::import_one(&conn, &item) {
-            Ok(import::ImportOutcome::Imported { submission_id, warning, .. }) => ImportResultDto {
-                file: p.clone(),
-                status: "imported".into(),
-                detail: warning.unwrap_or_else(|| "已导入".into()),
-                submission_id: Some(submission_id),
-            },
-            Ok(import::ImportOutcome::Duplicate { existing_submission_id }) => ImportResultDto {
-                file: p.clone(),
-                status: "duplicate".into(),
-                detail: "重复文件（已跳过）".into(),
-                submission_id: existing_submission_id,
-            },
-            Ok(import::ImportOutcome::Anomaly { submission_id, anomaly_type }) => ImportResultDto {
-                file: p.clone(),
-                status: "anomaly".into(),
-                detail: anomaly_label(&anomaly_type),
-                submission_id: Some(submission_id),
-            },
-            Err(err) => ImportResultDto { file: p.clone(), status: "error".into(), detail: err.to_string(), submission_id: None },
+        let content = match s.ref_id {
+            Some(id) => contents::get_by_id(&conn, id)
+                .map_err(e)?
+                .map(|c| format!("{} {}", c.content_no, c.title)),
+            None => None,
         };
-        out.push(dto);
+        let file_name = std::path::Path::new(&s.file_path)
+            .file_name()
+            .and_then(|x| x.to_str())
+            .unwrap_or(&s.file_path)
+            .to_string();
+        out.push(ImportHistoryRow {
+            submission_id: s.id,
+            file_name,
+            student,
+            content,
+            status: history_status(&s.status),
+            recognized: s.recognized_text,
+        });
     }
     Ok(out)
 }
@@ -606,8 +746,9 @@ pub struct StageDto {
 /// 返回每个文件能否进入「待分析」队列；真正的识别评分由前端随后对 staged 文件调用
 /// `import_autoname` 完成（即「开始分析」）。
 #[tauri::command]
-pub fn import_stage(state: State<'_, AppState>, paths: Vec<String>) -> R<Vec<StageDto>> {
+pub fn import_stage(state: State<'_, AppState>, paths: Vec<String>, force: Option<bool>) -> R<Vec<StageDto>> {
     let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    let force = force.unwrap_or(false);
     let mut out = Vec::with_capacity(paths.len());
     for p in paths {
         let path = std::path::Path::new(&p);
@@ -622,7 +763,7 @@ pub fn import_stage(state: State<'_, AppState>, paths: Vec<String>) -> R<Vec<Sta
                 continue;
             }
         };
-        let dup = file_ledger::get(&conn, &hash).map_err(e)?.is_some();
+        let dup = !force && file_ledger::get(&conn, &hash).map_err(e)?.is_some();
         out.push(if dup {
             StageDto {
                 file: p.clone(),
@@ -641,7 +782,7 @@ pub fn import_stage(state: State<'_, AppState>, paths: Vec<String>) -> R<Vec<Sta
 #[derive(Serialize)]
 pub struct AutonameDto {
     file: String,
-    status: String, // scored | duplicate | unmatched | error
+    status: String, // scored | rescored | duplicate | unmatched | error
     detail: String,
     new_name: Option<String>,
     student: Option<String>,
@@ -656,8 +797,9 @@ const MATCH_MIN: f64 = 50.0;
 /// 分析录音 → 识别学生/内容 → 自动重命名为 `日期_学号_姓名_内容编号` → 落库评分。
 /// 录音内容约定为「姓名 + 日期 + 背诵内容」。日期暂用当天（后续可解析口述日期）。
 #[tauri::command]
-pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>) -> R<Vec<AutonameDto>> {
+pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, force: Option<bool>) -> R<Vec<AutonameDto>> {
     let creds = secrets::load(&state.data_dir).map_err(e)?;
+    let force = force.unwrap_or(false);
     let mut out = Vec::with_capacity(paths.len());
 
     for p in paths {
@@ -681,15 +823,19 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>) -> 
                 continue;
             }
         };
-        let dup = {
+        let existing_submission_id = {
             let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
-            file_ledger::get(&conn, &hash).map_err(e)?.is_some()
+            if let Some(hit) = file_ledger::get(&conn, &hash).map_err(e)? {
+                hit.submission_id
+            } else {
+                submissions::get_by_hash(&conn, &hash).map_err(e)?.map(|s| s.id)
+            }
         };
-        if dup {
+        if existing_submission_id.is_some() && !force {
             out.push(AutonameDto {
                 file: p.clone(),
                 status: "duplicate".into(),
-                detail: "重复文件（已跳过）".into(),
+                detail: "重复文件（已跳过；勾选忽略重复可重新分析既有记录）".into(),
                 new_name: None,
                 student: None,
                 content: None,
@@ -729,29 +875,60 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>) -> 
 
         match (student, content) {
             (Some(s), Some((c, score))) if score >= MATCH_MIN => {
-                let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("m4a");
-                let new_name =
-                    format!("{}_{}_{}_{}.{}", today_str().replace('-', ""), s.student_no, s.name, c.content_no, ext);
-                let final_path = match path.parent() {
-                    Some(dir) => {
-                        let np = dir.join(&new_name);
-                        if std::fs::rename(&p, &np).is_ok() {
-                            np.to_string_lossy().to_string()
-                        } else {
-                            p.clone()
-                        }
+                let (sub_id, reused) = if let Some(existing_id) = existing_submission_id {
+                    let existing = submissions::get(&conn, existing_id)
+                        .map_err(e)?
+                        .ok_or_else(|| "既有提交不存在".to_string())?;
+                    if existing.status == "anomaly" {
+                        import::reassign(&conn, existing_id, Some(s.id), Some(c.id)).map_err(e)?;
+                    } else {
+                        submissions::set_resolution_preserve_task(&conn, existing_id, s.id, c.id).map_err(e)?;
                     }
-                    None => p.clone(),
+                    (existing_id, true)
+                } else {
+                    let (id, _t) = import::import_resolved(&conn, &p, &hash, s.id, c.id, dur).map_err(e)?;
+                    (id, false)
                 };
-                let (sub_id, _t) =
-                    import::import_resolved(&conn, &final_path, &hash, s.id, c.id, dur).map_err(e)?;
                 submissions::set_recognition(&conn, sub_id, Some(&asr.text), "ok", None, dur).map_err(e)?;
-                let r = scoring::score_submission(&conn, sub_id, &asr.words, today_naive(), &scfg).map_err(e)?;
+                let has_verdict = verdicts::get_by_submission(&conn, sub_id).map_err(e)?.is_some();
+                let r = if reused && has_verdict {
+                    scoring::rescore(&conn, sub_id, &asr.words, &scfg).map_err(e)?
+                } else {
+                    scoring::score_submission(&conn, sub_id, &asr.words, today_naive(), &scfg).map_err(e)?
+                };
+                let (new_name, detail) = if reused {
+                    (None, format!("重新分析既有记录 · 匹配度 {score:.0}%"))
+                } else {
+                    let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("m4a");
+                    let name = format!(
+                        "{}_{}_{}_{}.{}",
+                        today_str().replace('-', ""),
+                        s.student_no,
+                        s.name,
+                        c.content_no,
+                        ext
+                    );
+                    let detail = match path.parent() {
+                        Some(dir) => {
+                            let np = dir.join(&name);
+                            match std::fs::rename(&p, &np) {
+                                Ok(()) => {
+                                    let final_path = np.to_string_lossy().to_string();
+                                    submissions::set_file_path(&conn, sub_id, &final_path).map_err(e)?;
+                                    format!("匹配度 {score:.0}%")
+                                }
+                                Err(err) => format!("匹配度 {score:.0}%；文件重命名失败，已保留原路径：{err}"),
+                            }
+                        }
+                        None => format!("匹配度 {score:.0}%；文件无父目录，已保留原路径"),
+                    };
+                    (Some(name), detail)
+                };
                 out.push(AutonameDto {
                     file: p.clone(),
-                    status: "scored".into(),
-                    detail: format!("匹配度 {score:.0}%"),
-                    new_name: Some(new_name),
+                    status: if reused { "rescored".into() } else { "scored".into() },
+                    detail,
+                    new_name,
                     student: Some(format!("{} {}", s.student_no, s.name)),
                     content: Some(format!("{} {}", c.content_no, c.title)),
                     accuracy: Some(r.accuracy),
@@ -759,6 +936,20 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>) -> 
                 });
             }
             _ => {
+                if let Some(existing_id) = existing_submission_id {
+                    submissions::set_recognition(&conn, existing_id, Some(&asr.text), "ok", None, dur).map_err(e)?;
+                    out.push(AutonameDto {
+                        file: p.clone(),
+                        status: "unmatched".into(),
+                        detail: "重新识别后仍未能匹配学生/内容，既有记录未新增副本".into(),
+                        new_name: None,
+                        student: None,
+                        content: None,
+                        accuracy: None,
+                        pass: None,
+                    });
+                    continue;
+                }
                 let meta = serde_json::json!({ "asr": asr.text }).to_string();
                 let sub_id = submissions::insert(
                     &conn,

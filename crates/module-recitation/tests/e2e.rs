@@ -14,7 +14,12 @@ use suite_core::models::{ModuleKey, TaskKind, TaskStatus};
 const M: ModuleKey = ModuleKey::Recitation;
 
 fn imp<'a>(stem: &'a str, hash: &'a str) -> import::ImportItem<'a> {
-    import::ImportItem { file_path: stem, file_stem: stem, file_hash: hash, duration_ms: Some(5000) }
+    import::ImportItem {
+        file_path: stem,
+        file_stem: stem,
+        file_hash: hash,
+        duration_ms: Some(5000),
+    }
 }
 
 #[test]
@@ -24,15 +29,43 @@ fn full_recitation_flow() {
     run_migrations(&conn, module_recitation::recitation_migrations()).unwrap();
 
     // 学生 + 内容
-    let s1 = upsert_student(&conn, &StudentInput { student_no: "2023001", name: "张三", class_id: None, enabled: true }).unwrap();
-    let s2 = upsert_student(&conn, &StudentInput { student_no: "2023002", name: "李四", class_id: None, enabled: true }).unwrap();
+    let s1 = upsert_student(
+        &conn,
+        &StudentInput {
+            student_no: "2023001",
+            name: "张三",
+            class_id: None,
+            enabled: true,
+        },
+    )
+    .unwrap();
+    let s2 = upsert_student(
+        &conn,
+        &StudentInput {
+            student_no: "2023002",
+            name: "李四",
+            class_id: None,
+            enabled: true,
+        },
+    )
+    .unwrap();
     let answer = "床前明月光疑是地上霜";
-    let c1 = contents::upsert(&conn, &contents::ContentInput { content_no: "C012", title: "静夜思", answer_text: answer, subject_id: None, enabled: true }).unwrap();
+    let c1 = contents::upsert(
+        &conn,
+        &contents::ContentInput {
+            content_no: "C012",
+            title: "静夜思",
+            answer_text: answer,
+            subject_id: None,
+            enabled: true,
+        },
+    )
+    .unwrap();
 
     // 生成今日任务
     let due = "2026-06-25";
     let made = task_svc::generate_normal(&conn, due, &[(s1.id, c1.id), (s2.id, c1.id)]).unwrap();
-    assert_eq!(made.len(), 2);
+    assert_eq!(made.created, 2);
 
     // 批量导入
     let o1 = import::import_one(&conn, &imp("20260625_2023001_张三_C012", "hA")).unwrap();
@@ -41,11 +74,21 @@ fn full_recitation_flow() {
     let obad = import::import_one(&conn, &imp("garbage-name", "hC")).unwrap();
     let ounknown = import::import_one(&conn, &imp("20260625_9999999_王五_C012", "hD")).unwrap();
 
-    let sub1 = match o1 { import::ImportOutcome::Imported { submission_id, .. } => submission_id, o => panic!("{o:?}") };
-    let sub2 = match o2 { import::ImportOutcome::Imported { submission_id, .. } => submission_id, o => panic!("{o:?}") };
+    let sub1 = match o1 {
+        import::ImportOutcome::Imported { submission_id, .. } => submission_id,
+        o => panic!("{o:?}"),
+    };
+    let sub2 = match o2 {
+        import::ImportOutcome::Imported { submission_id, .. } => submission_id,
+        o => panic!("{o:?}"),
+    };
     assert!(matches!(odup, import::ImportOutcome::Duplicate { .. }));
-    assert!(matches!(obad, import::ImportOutcome::Anomaly { ref anomaly_type, .. } if anomaly_type == "parse_error"));
-    assert!(matches!(ounknown, import::ImportOutcome::Anomaly { ref anomaly_type, .. } if anomaly_type == "student_not_found"));
+    assert!(
+        matches!(obad, import::ImportOutcome::Anomaly { ref anomaly_type, .. } if anomaly_type == "parse_error")
+    );
+    assert!(
+        matches!(ounknown, import::ImportOutcome::Anomaly { ref anomaly_type, .. } if anomaly_type == "student_not_found")
+    );
     assert_eq!(submissions::list_anomalies(&conn, M).unwrap().len(), 2);
 
     let today = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
@@ -70,7 +113,9 @@ fn full_recitation_flow() {
     assert!(task_repo::exists_open_kind(&conn, M, s2.id, c1.id, TaskKind::Makeup).unwrap());
 
     // S1 记忆卡片已排程
-    let card = memory_cards::get(&conn, M, s1.id, "content", c1.id).unwrap().unwrap();
+    let card = memory_cards::get(&conn, M, s1.id, "content", c1.id)
+        .unwrap()
+        .unwrap();
     assert!(card.due_date.is_some());
 
     // 远期日切：S1 卡片到期 → 生成复习任务
@@ -82,7 +127,16 @@ fn full_recitation_flow() {
     assert_eq!(rt.status, TaskStatus::Open);
 
     // 人工把 S2 改判为通过 → 补背作废、卡片转复习
-    let confirmed = scoring::human_decide(&conn, sub2, "pass", Some("老师确认"), Some("teacher"), today, &cfg).unwrap();
+    let confirmed = scoring::human_decide(
+        &conn,
+        sub2,
+        "pass",
+        Some("老师确认"),
+        Some("teacher"),
+        today,
+        &cfg,
+    )
+    .unwrap();
     assert!(matches!(confirmed, scoring::NextAction::Scheduled { .. }));
     assert!(!task_repo::exists_open_kind(&conn, M, s2.id, c1.id, TaskKind::Makeup).unwrap());
 }

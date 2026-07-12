@@ -1,12 +1,5 @@
 import { call } from "./client";
 
-export interface ImportResult {
-  file: string;
-  status: string; // imported | duplicate | anomaly | error
-  detail: string;
-  submission_id: number | null;
-}
-
 export interface ScoreOutcome {
   verdict_id: number;
   accuracy: number;
@@ -17,13 +10,12 @@ export interface ScoreOutcome {
   next: string;
 }
 
-export const importPaths = (paths: string[]) => call<ImportResult[]>("import_paths", { paths });
 export const asrAndScore = (submission_id: number) =>
   call<ScoreOutcome>("asr_and_score", { submissionId: submission_id });
 
 export interface AutonameResult {
   file: string;
-  status: string; // scored | duplicate | unmatched | error
+  status: string; // scored | rescored | duplicate | unmatched | error
   detail: string;
   new_name: string | null;
   student: string | null;
@@ -32,15 +24,15 @@ export interface AutonameResult {
   pass: boolean | null;
 }
 
-export const importAutoname = (paths: string[]) =>
-  call<AutonameResult[]>("import_autoname", { paths });
+export const importAutoname = (paths: string[], force = false) =>
+  call<AutonameResult[]>("import_autoname", { paths, force });
 
 export interface StageResult {
   file: string;
-  status: string; // staged | duplicate | error
+  status: string; // staged | analyzing | done | duplicate | error
   detail: string;
 }
 
-// 第一步「导入」：只哈希去重、入待分析队列，不调 ASR
-export const importStage = (paths: string[]) =>
-  call<StageResult[]>("import_stage", { paths });
+// 第一步「导入」：只哈希去重、入待分析队列，不调 ASR。force=忽略重复强制导入
+export const importStage = (paths: string[], force = false) =>
+  call<StageResult[]>("import_stage", { paths, force });

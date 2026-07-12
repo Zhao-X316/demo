@@ -29,11 +29,17 @@ pub fn get(conn: &Connection, file_hash: &str) -> CoreResult<Option<LedgerHit>> 
     Ok(hit)
 }
 
-/// 首次登记一个 hash（导入成功后调用，关联 submission）。
-pub fn record(conn: &Connection, file_hash: &str, first_path: &str, submission_id: i64) -> CoreResult<()> {
+/// 登记一个 hash（导入成功后调用）。幂等：首见登记；再见（强制导入同一文件）则 seen_count+1，不撞唯一键。
+pub fn record(
+    conn: &Connection,
+    file_hash: &str,
+    first_path: &str,
+    submission_id: i64,
+) -> CoreResult<()> {
     conn.execute(
         "INSERT INTO file_ledger (file_hash, first_path, submission_id)
-         VALUES (?1, ?2, ?3)",
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(file_hash) DO UPDATE SET seen_count = seen_count + 1, updated_at = datetime('now')",
         (file_hash, first_path, submission_id),
     )?;
     Ok(())
