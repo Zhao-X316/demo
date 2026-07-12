@@ -168,7 +168,8 @@ pub struct Submission {
     pub duration_ms: Option<i64>,
     pub parsed_meta: Option<String>,
     pub recognized_text: Option<String>,
-    pub recognize_status: String, // pending|ok|failed
+    pub recognize_meta: Option<String>,
+    pub recognize_status: String, // pending|processing|ok|failed
     pub anomaly_type: Option<String>,
     pub status: String, // pending|scored|confirmed|anomaly|voided
 }

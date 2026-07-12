@@ -6,7 +6,7 @@ use tauri::State;
 
 use module_recitation::config::RecitationConfig;
 use module_recitation::db::contents::{self, ContentInput, RecContent};
-use module_recitation::service::{import, matching, scoring, tasks as task_svc};
+use module_recitation::service::{import, matching, recognition, scoring, tasks as task_svc};
 use suite_core::db::repo::students::{self, StudentInput};
 use suite_core::db::repo::{classes, file_ledger, submissions, tasks, verdicts};
 use suite_core::models::{Class, MediaType, ModuleKey, Student, TaskKind, TaskStatus};
@@ -724,7 +724,13 @@ pub fn import_history(state: State<'_, AppState>, limit: Option<i64>) -> R<Vec<I
             file_name,
             student,
             content,
-            status: history_status(&s.status),
+            status: if s.recognize_status == "failed" {
+                "识别失败·待处理".into()
+            } else if s.recognize_status == "processing" {
+                "正在识别".into()
+            } else {
+                history_status(&s.status)
+            },
             recognized: s.recognized_text,
         });
     }
@@ -806,7 +812,7 @@ const MATCH_MIN: f64 = 50.0;
 /// 录音内容约定为「姓名 + 日期 + 背诵内容」。日期暂用当天（后续可解析口述日期）。
 #[tauri::command]
 pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, force: Option<bool>) -> R<Vec<AutonameDto>> {
-    let creds = secrets::load(&state.data_dir).map_err(e)?;
+    let creds = secrets::load(&state.data_dir);
     let force = force.unwrap_or(false);
     let mut out = Vec::with_capacity(paths.len());
 
@@ -853,18 +859,68 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
             continue;
         }
 
+        // 先创建/抢占可追踪 submission，再释放锁调用外部 ASR。
+        let tracking_id = {
+            let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+            let id = match existing_submission_id {
+                Some(id) => id,
+                None => {
+                    let id = submissions::insert(
+                        &conn,
+                        &submissions::NewSubmission {
+                            module: MODULE,
+                            task_id: None,
+                            student_id: None,
+                            ref_id: None,
+                            media_type: MediaType::Audio,
+                            file_path: &p,
+                            file_hash: &hash,
+                            duration_ms: None,
+                            parsed_meta: None,
+                            anomaly_type: None,
+                            status: "pending",
+                        },
+                    )
+                    .map_err(e)?;
+                    file_ledger::record(&conn, &hash, &p, id).map_err(e)?;
+                    id
+                }
+            };
+            if let Err(err) = recognition::claim(&conn, id) {
+                out.push(fail(err.to_string()));
+                continue;
+            }
+            id
+        };
+
+        let creds = match &creds {
+            Ok(creds) => creds,
+            Err(err) => {
+                let message = format!("读取本机 ASR 凭据失败: {err}");
+                if let Ok(conn) = state.db.lock() {
+                    let _ = recognition::mark_failed(&conn, tracking_id, &message);
+                }
+                out.push(fail(message));
+                continue;
+            }
+        };
+
         // 转码 + ASR（异步段，不持锁）
         let tmp = std::env::temp_dir();
         let transcoded = crate::audio::transcode_to_wav16k(&p, &tmp);
         let asr_path = transcoded.as_ref().and_then(|x| x.to_str()).unwrap_or(&p).to_string();
-        let asr = crate::asr::recognize(&creds, &asr_path, &hash).await;
+        let asr = crate::asr::recognize(creds, &asr_path, &hash).await;
         if let Some(t) = transcoded {
             let _ = std::fs::remove_file(t);
         }
         let asr = match asr {
             Ok(a) => a,
             Err(err) => {
-                out.push(fail(format!("识别失败: {err}")));
+                let message = format!("识别失败: {err}");
+                if let Ok(conn) = state.db.lock() {
+                    let _ = recognition::mark_failed(&conn, tracking_id, &message);
+                }
+                out.push(fail(message));
                 continue;
             }
         };
@@ -873,6 +929,19 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
         } else {
             crate::audio::ffprobe_duration_ms(&p).map(|d| d as i64)
         };
+
+        {
+            let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+            submissions::set_recognition(
+                &conn,
+                tracking_id,
+                Some(&asr.text),
+                "ok",
+                None,
+                dur,
+            )
+            .map_err(e)?;
+        }
 
         // 匹配 + 落库 + 评分（同步段）
         let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
@@ -883,27 +952,24 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
 
         match (student, content) {
             (Some(s), Some((c, score))) if score >= MATCH_MIN => {
-                let (sub_id, reused) = if let Some(existing_id) = existing_submission_id {
-                    let existing = submissions::get(&conn, existing_id)
-                        .map_err(e)?
-                        .ok_or_else(|| "既有提交不存在".to_string())?;
-                    if existing.status == "anomaly" {
-                        import::reassign(&conn, existing_id, Some(s.id), Some(c.id)).map_err(e)?;
-                    } else {
-                        submissions::set_resolution_preserve_task(&conn, existing_id, s.id, c.id).map_err(e)?;
-                    }
-                    (existing_id, true)
+                let existing = submissions::get(&conn, tracking_id)
+                    .map_err(e)?
+                    .ok_or_else(|| "跟踪提交不存在".to_string())?;
+                let reused = existing_submission_id.is_some();
+                if existing.status == "anomaly" || existing.task_id.is_none() {
+                    import::reassign(&conn, tracking_id, Some(s.id), Some(c.id)).map_err(e)?;
                 } else {
-                    let (id, _t) = import::import_resolved(&conn, &p, &hash, s.id, c.id, dur).map_err(e)?;
-                    (id, false)
-                };
-                submissions::set_recognition(&conn, sub_id, Some(&asr.text), "ok", None, dur).map_err(e)?;
-                let has_verdict = verdicts::get_by_submission(&conn, sub_id).map_err(e)?.is_some();
+                    submissions::set_resolution_preserve_task(&conn, tracking_id, s.id, c.id)
+                        .map_err(e)?;
+                }
+                let has_verdict = verdicts::get_by_submission(&conn, tracking_id).map_err(e)?.is_some();
                 let r = if reused && has_verdict {
-                    scoring::rescore(&conn, sub_id, &asr.words, &scfg).map_err(e)?
+                    scoring::rescore(&conn, tracking_id, &asr.words, &scfg).map_err(e)?
                 } else {
-                    scoring::score_submission(&conn, sub_id, &asr.words, today_naive(), &scfg).map_err(e)?
+                    scoring::score_submission(&conn, tracking_id, &asr.words, today_naive(), &scfg)
+                        .map_err(e)?
                 };
+                submissions::clear_anomaly(&conn, tracking_id).map_err(e)?;
                 let (new_name, detail) = if reused {
                     (None, format!("重新分析既有记录 · 匹配度 {score:.0}%"))
                 } else {
@@ -922,7 +988,7 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
                             match std::fs::rename(&p, &np) {
                                 Ok(()) => {
                                     let final_path = np.to_string_lossy().to_string();
-                                    submissions::set_file_path(&conn, sub_id, &final_path).map_err(e)?;
+                                    submissions::set_file_path(&conn, tracking_id, &final_path).map_err(e)?;
                                     format!("匹配度 {score:.0}%")
                                 }
                                 Err(err) => format!("匹配度 {score:.0}%；文件重命名失败，已保留原路径：{err}"),
@@ -944,8 +1010,7 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
                 });
             }
             _ => {
-                if let Some(existing_id) = existing_submission_id {
-                    submissions::set_recognition(&conn, existing_id, Some(&asr.text), "ok", None, dur).map_err(e)?;
+                if existing_submission_id.is_some() {
                     out.push(AutonameDto {
                         file: p.clone(),
                         status: "unmatched".into(),
@@ -959,24 +1024,13 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
                     continue;
                 }
                 let meta = serde_json::json!({ "asr": asr.text }).to_string();
-                let sub_id = submissions::insert(
+                submissions::mark_anomaly(
                     &conn,
-                    &submissions::NewSubmission {
-                        module: MODULE,
-                        task_id: None,
-                        student_id: None,
-                        ref_id: None,
-                        media_type: MediaType::Audio,
-                        file_path: &p,
-                        file_hash: &hash,
-                        duration_ms: dur,
-                        parsed_meta: Some(&meta),
-                        anomaly_type: Some("autoname_unmatched"),
-                        status: "anomaly",
-                    },
+                    tracking_id,
+                    "autoname_unmatched",
+                    Some(&meta),
                 )
                 .map_err(e)?;
-                file_ledger::record(&conn, &hash, &p, sub_id).map_err(e)?;
                 out.push(AutonameDto {
                     file: p.clone(),
                     status: "unmatched".into(),
@@ -1022,6 +1076,66 @@ pub fn anomalies_list(state: State<'_, AppState>) -> R<Vec<AnomalyDto>> {
         .collect())
 }
 
+#[derive(Serialize)]
+pub struct RecognitionFailureDto {
+    submission_id: i64,
+    file_path: String,
+    error_code: String,
+    error_message: String,
+    retryable: bool,
+    failed_at: String,
+    attempts: u32,
+    has_task: bool,
+    file_missing: bool,
+}
+
+#[tauri::command]
+pub fn recognition_failures_list(state: State<'_, AppState>) -> R<Vec<RecognitionFailureDto>> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    let failures = submissions::list_recognition_failures(&conn, MODULE).map_err(e)?;
+    Ok(failures
+        .into_iter()
+        .map(|submission| {
+            let meta = recognition::parse_failure_meta(submission.recognize_meta.as_deref())
+                .unwrap_or_else(|| recognition::RecognitionFailureMeta {
+                    error_code: "unknown".into(),
+                    error_message: "识别失败，未找到结构化错误信息".into(),
+                    retryable: false,
+                    failed_at: "未知".into(),
+                    attempts: 0,
+                });
+            RecognitionFailureDto {
+                submission_id: submission.id,
+                file_missing: !std::path::Path::new(&submission.file_path).is_file(),
+                file_path: submission.file_path,
+                error_code: meta.error_code,
+                error_message: meta.error_message,
+                retryable: meta.retryable,
+                failed_at: meta.failed_at,
+                attempts: meta.attempts,
+                has_task: submission.task_id.is_some(),
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub fn recognition_relocate(
+    state: State<'_, AppState>,
+    submission_id: i64,
+    new_path: String,
+) -> R<()> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    recognition::relocate_same_hash(&conn, submission_id, std::path::Path::new(&new_path))
+        .map_err(e)
+}
+
+#[tauri::command]
+pub fn recognition_void(state: State<'_, AppState>, submission_id: i64) -> R<bool> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    recognition::void_unconfirmed(&conn, submission_id).map_err(e)
+}
+
 /// 人工改派：传正确学号/内容编号（任一可空，沿用原值）。返回挂到的任务 id。
 #[tauri::command]
 pub fn anomaly_reassign(
@@ -1063,18 +1177,30 @@ pub struct ScoreOutcomeDto {
     next: String,
 }
 
+fn persist_asr_failure(state: &State<'_, AppState>, submission_id: i64, message: &str) -> String {
+    match state.db.lock() {
+        Ok(conn) => match recognition::mark_failed(&conn, submission_id, message) {
+            Ok(_) => message.to_string(),
+            Err(err) => format!("{message}；失败状态写入异常: {err}"),
+        },
+        Err(_) => format!("{message}；数据库忙，失败状态未能写入"),
+    }
+}
+
 /// 对一条提交跑火山 ASR 并评分（异步）。识别文本与词级时间戳回写后入评分编排。
 #[tauri::command]
 pub async fn asr_and_score(state: State<'_, AppState>, submission_id: i64) -> R<ScoreOutcomeDto> {
-    // 同步段：取音频路径 + 凭据（不可跨 await 持锁）
-    let (audio_path, req_id, creds) = {
+    // 短事务抢占 processing；不可跨 await 持锁。
+    let (audio_path, req_id) = {
         let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
         let sub = submissions::get(&conn, submission_id)
             .map_err(e)?
             .ok_or_else(|| "提交不存在".to_string())?;
-        let creds = secrets::load(&state.data_dir).map_err(e)?;
-        (sub.file_path.clone(), sub.file_hash.clone(), creds)
+        recognition::claim(&conn, submission_id).map_err(e)?;
+        (sub.file_path.clone(), sub.file_hash.clone())
     };
+    let creds = secrets::load(&state.data_dir)
+        .map_err(|err| persist_asr_failure(&state, submission_id, &err.to_string()))?;
 
     // 可选 ffmpeg 转码（提升火山兼容性），失败则用原文件
     let tmp = std::env::temp_dir();
@@ -1086,21 +1212,23 @@ pub async fn asr_and_score(state: State<'_, AppState>, submission_id: i64) -> R<
         .to_string();
 
     // 异步段：调用火山
-    let mut out = crate::asr::recognize(&creds, &asr_path, &req_id).await?;
+    let recognized = crate::asr::recognize(&creds, &asr_path, &req_id).await;
+    if let Some(path) = transcoded.as_ref() {
+        let _ = std::fs::remove_file(path);
+    }
+    let mut out = recognized
+        .map_err(|err| persist_asr_failure(&state, submission_id, &err))?;
     if out.duration_ms == 0 {
         if let Some(d) = crate::audio::ffprobe_duration_ms(&audio_path) {
             out.duration_ms = d;
         }
     }
-    if let Some(p) = transcoded {
-        let _ = std::fs::remove_file(p);
-    }
-
     // 同步段：回写识别 + 评分
     let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     submissions::set_recognition(&conn, submission_id, Some(&out.text), "ok", None, Some(out.duration_ms as i64)).map_err(e)?;
     let cfg = RecitationConfig::load(&conn).map_err(e)?.to_score_cfg();
     let r = scoring::score_submission(&conn, submission_id, &out.words, today_naive(), &cfg).map_err(e)?;
+    submissions::clear_anomaly(&conn, submission_id).map_err(e)?;
     Ok(ScoreOutcomeDto {
         verdict_id: r.verdict_id,
         accuracy: r.accuracy,

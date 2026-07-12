@@ -22,6 +22,10 @@ pub fn init(app: &App) -> Result<AppState, Box<dyn std::error::Error>> {
     suite_core::db::run_migrations(&conn, suite_core::db::CORE_MIGRATIONS)?;
     suite_core::db::run_migrations(&conn, module_recitation::recitation_migrations())?;
     suite_core::db::run_migrations(&conn, module_exam::exam_migrations())?;
+    let recovered = module_recitation::service::recognition::recover_stale_processing(&conn)?;
+    if recovered > 0 {
+        eprintln!("[ASR恢复] {recovered} 条中断的 processing 已转为 failed");
+    }
 
     Ok(AppState { db: Mutex::new(conn), data_dir: dir })
 }

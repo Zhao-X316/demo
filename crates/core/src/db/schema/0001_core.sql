@@ -104,7 +104,7 @@ CREATE TABLE IF NOT EXISTS submissions (
     parsed_meta       TEXT,
     recognized_text   TEXT,
     recognize_meta    TEXT,
-    recognize_status  TEXT NOT NULL DEFAULT 'pending',-- pending|ok|failed
+    recognize_status  TEXT NOT NULL DEFAULT 'pending',-- pending|processing|ok|failed
     anomaly_type      TEXT,
     status            TEXT NOT NULL DEFAULT 'pending',-- pending|scored|confirmed|anomaly|voided
     created_at        TEXT NOT NULL DEFAULT (datetime('now')),

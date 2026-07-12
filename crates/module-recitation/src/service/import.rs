@@ -167,7 +167,8 @@ pub fn import_resolved(
     Ok((sub_id, task_id))
 }
 
-/// 改派异常提交：给定正确的 学生/内容 id（任一可沿用原值），重设关联、挂上开放任务、回到 pending。
+/// 改派异常提交：给定正确的 学生/内容 id（任一可沿用原值），重设关联并挂上开放任务。
+/// 异常状态保留到后续识别和评分成功，失败时仍能在待处理区继续操作。
 /// 返回关联到的 task_id（无开放任务则 None，仍可单独识别评分）。
 pub fn reassign(
     conn: &Connection,
@@ -230,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn reassign_attaches_task_and_clears_anomaly() {
+    fn reassign_attaches_task_but_preserves_anomaly_until_success() {
         let conn = setup();
         let (sid, _tid) = seed_full(&conn);
         let cid = contents::get_by_no(&conn, "C012").unwrap().unwrap().id;
@@ -249,10 +250,10 @@ mod tests {
         let task = reassign(&conn, subid, Some(sid), Some(cid)).unwrap();
         assert!(task.is_some(), "应挂上开放任务");
         let sub = submissions::get(&conn, subid).unwrap().unwrap();
-        assert_eq!(sub.status, "pending");
+        assert_eq!(sub.status, "anomaly");
         assert_eq!(sub.student_id, Some(sid));
         assert_eq!(sub.ref_id, Some(cid));
-        assert!(sub.anomaly_type.is_none());
+        assert_eq!(sub.anomaly_type.as_deref(), Some("student_not_found"));
     }
 
     #[test]

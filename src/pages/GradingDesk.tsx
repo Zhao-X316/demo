@@ -9,9 +9,13 @@ import {
 } from "../api/importing";
 import {
   Anomaly,
+  RecognitionFailure,
   Suggest,
   anomaliesList,
   anomalyReassign,
+  recognitionFailuresList,
+  recognitionRelocate,
+  recognitionVoid,
   suggestMatch,
 } from "../api/anomaly";
 import { RecContent, Student, contentsList, studentsList } from "../api/manage";
@@ -30,13 +34,18 @@ function asrText(meta: string | null): string {
   }
 }
 
-type Sel = { kind: "result"; i: number } | { kind: "anomaly"; id: number } | null;
+type Sel =
+  | { kind: "result"; i: number }
+  | { kind: "anomaly"; id: number }
+  | { kind: "failure"; id: number }
+  | null;
 
 export default function GradingDesk() {
   const [staged, setStaged] = useState<StageResult[]>([]);
   const [force, setForce] = useState(false);
   const [results, setResults] = useState<AutonameResult[]>([]);
   const [anomalies, setAnomalies] = useState<Anomaly[]>([]);
+  const [failures, setFailures] = useState<RecognitionFailure[]>([]);
   const [suggest, setSuggest] = useState<Record<number, Suggest>>({});
   const [students, setStudents] = useState<Student[]>([]);
   const [contents, setContents] = useState<RecContent[]>([]);
@@ -44,10 +53,11 @@ export default function GradingDesk() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
-  const loadAnomalies = async () => {
+  const loadPending = async () => {
     try {
-      const list = await anomaliesList();
+      const [list, failed] = await Promise.all([anomaliesList(), recognitionFailuresList()]);
       setAnomalies(list);
+      setFailures(failed);
       const sug: Record<number, Suggest> = {};
       for (const r of list) {
         const t = asrText(r.parsed_meta);
@@ -65,7 +75,7 @@ export default function GradingDesk() {
     }
   };
   useEffect(() => {
-    loadAnomalies();
+    loadPending();
     studentsList().then(setStudents).catch(() => undefined);
     contentsList().then(setContents).catch(() => undefined);
   }, []);
@@ -122,7 +132,7 @@ export default function GradingDesk() {
         }
       }
       setStaged((rows) => rows.filter((r) => r.status !== "done"));
-      await loadAnomalies(); // unmatched 会落进异常池
+      await loadPending(); // unmatched / failed 都会持久化进待处理区
       if (failed) setErr(`有 ${failed} 个文件分析失败，其余已继续处理`);
     } catch (e) {
       setErr(String(e));
@@ -132,6 +142,7 @@ export default function GradingDesk() {
 
   const cur = sel;
   const curAnomaly = cur?.kind === "anomaly" ? anomalies.find((a) => a.submission_id === cur.id) : null;
+  const curFailure = cur?.kind === "failure" ? failures.find((f) => f.submission_id === cur.id) : null;
   const curResult = cur?.kind === "result" ? results[cur.i] : null;
 
   return (
@@ -203,6 +214,22 @@ export default function GradingDesk() {
             </>
           )}
           <div className="sech">
+            识别失败 · 待处理<span className="n">{failures.length}</span>
+          </div>
+          {failures.length === 0 && <div className="qstat" style={{ padding: "4px 2px" }}>无</div>}
+          {failures.map((failure) => (
+            <div
+              className={"qitem" + (cur?.kind === "failure" && cur.id === failure.submission_id ? " on" : "")}
+              key={"f" + failure.submission_id}
+              onClick={() => setSel({ kind: "failure", id: failure.submission_id })}
+            >
+              <div className="qfile">{failure.file_path.split("/").pop()}</div>
+              <div className="qstat" style={{ color: "var(--bad)" }}>
+                ● {failure.file_missing ? "原文件丢失" : failure.retryable ? "可重试" : "需作废/换录音"} · 已试 {failure.attempts} 次
+              </div>
+            </div>
+          ))}
+          <div className="sech">
             异常池 · 待改派<span className="n">{anomalies.length}</span>
           </div>
           {anomalies.length === 0 && <div className="qstat" style={{ padding: "4px 2px" }}>无</div>}
@@ -221,6 +248,16 @@ export default function GradingDesk() {
         <div className="detail">
           {!cur && <div className="muted">选择左侧一条录音查看</div>}
           {curResult && <ResultDetail r={curResult} />}
+          {curFailure && (
+            <FailureDetail
+              failure={curFailure}
+              onResolved={() => {
+                setSel(null);
+                loadPending();
+              }}
+              onRefresh={loadPending}
+            />
+          )}
           {curAnomaly && (
             <AnomalyDetail
               a={curAnomaly}
@@ -229,8 +266,9 @@ export default function GradingDesk() {
               contents={contents}
               onDone={() => {
                 setSel(null);
-                loadAnomalies();
+                loadPending();
               }}
+              onRefresh={loadPending}
             />
           )}
         </div>
@@ -292,12 +330,14 @@ function AnomalyDetail({
   students,
   contents,
   onDone,
+  onRefresh,
 }: {
   a: Anomaly;
   sug?: Suggest;
   students: Student[];
   contents: RecContent[];
   onDone: () => void;
+  onRefresh: () => Promise<void>;
 }) {
   const [sno, setSno] = useState("");
   const [cno, setCno] = useState("");
@@ -310,10 +350,11 @@ function AnomalyDetail({
     setErr("");
     try {
       await anomalyReassign(a.submission_id, sno || undefined, cno || undefined);
-      await asrAndScore(a.submission_id).catch(() => undefined);
+      await asrAndScore(a.submission_id);
       onDone();
     } catch (e) {
       setErr(String(e));
+      await onRefresh();
       setBusy(false);
     }
   };
@@ -381,6 +422,97 @@ function AnomalyDetail({
       <button className="primary" disabled={busy} onClick={reassign}>
         {busy ? "处理中…" : "改派并识别"}
       </button>
+    </div>
+  );
+}
+
+function FailureDetail({
+  failure,
+  onResolved,
+  onRefresh,
+}: {
+  failure: RecognitionFailure;
+  onResolved: () => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const retry = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      await asrAndScore(failure.submission_id);
+      onResolved();
+    } catch (e) {
+      setErr(String(e));
+      await onRefresh();
+      setBusy(false);
+    }
+  };
+
+  const relocate = async () => {
+    setErr("");
+    const selected = await open({ multiple: false, filters: AUDIO_FILTER });
+    if (!selected || Array.isArray(selected)) return;
+    setBusy(true);
+    try {
+      await recognitionRelocate(failure.submission_id, selected);
+      await asrAndScore(failure.submission_id);
+      onResolved();
+    } catch (e) {
+      setErr(String(e));
+      await onRefresh();
+      setBusy(false);
+    }
+  };
+
+  const voidRecord = async () => {
+    if (!window.confirm("作废这条未终审提交？旧记录会保留；若它是任务唯一提交，任务将重开等待新录音。")) return;
+    setBusy(true);
+    setErr("");
+    try {
+      const reopened = await recognitionVoid(failure.submission_id);
+      if (reopened) {
+        setErr("旧提交已作废，原任务已重开；请用左上角“导入录音”提交新文件。");
+      }
+      onResolved();
+    } catch (e) {
+      setErr(String(e));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+        <Avatar name="!" q />
+        <div>
+          <div className="who" style={{ fontSize: 15 }}>ASR 识别失败</div>
+          <div className="meta">{failure.file_path.split("/").pop()}</div>
+        </div>
+        <div className="spacer" />
+        <span className="tag fail">第 {failure.attempts} 次</span>
+      </div>
+      {err && <div className="error">{err}</div>}
+      <div className="kv"><b>失败类型</b><span>{failure.error_code}</span></div>
+      <div className="kv"><b>失败时间</b><span>{failure.failed_at}</span></div>
+      <div className="asrbox" style={{ color: "var(--bad)" }}>{failure.error_message}</div>
+      <AudioPlayer path={failure.file_path} />
+      <div className="hint" style={{ marginTop: 14 }}>
+        {failure.file_missing
+          ? "原路径已不可用：请选择同一份录音重新定位；系统会校验 hash，不同录音必须新建提交。"
+          : failure.retryable
+            ? "修复网络或凭据后可重试；重试复用同一 submission 和 file hash，不会新增记录。"
+            : "该错误不建议直接重试。可作废旧记录，再从左上角导入一份新录音。"}
+      </div>
+      <div className="divln" style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+        <button className="danger" disabled={busy} onClick={voidRecord}>作废旧记录</button>
+        {failure.file_missing && <button disabled={busy} onClick={relocate}>重新定位并重试</button>}
+        {!failure.file_missing && failure.retryable && (
+          <button className="primary" disabled={busy} onClick={retry}>重试识别</button>
+        )}
+      </div>
     </div>
   );
 }

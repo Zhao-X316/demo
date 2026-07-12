@@ -18,6 +18,27 @@ export const anomalyReassign = (submission_id: number, student_no?: string, cont
     contentNo: content_no ?? null,
   });
 
+export interface RecognitionFailure {
+  submission_id: number;
+  file_path: string;
+  error_code: string;
+  error_message: string;
+  retryable: boolean;
+  failed_at: string;
+  attempts: number;
+  has_task: boolean;
+  file_missing: boolean;
+}
+
+export const recognitionFailuresList = () =>
+  call<RecognitionFailure[]>("recognition_failures_list");
+
+export const recognitionRelocate = (submission_id: number, new_path: string) =>
+  call<void>("recognition_relocate", { submissionId: submission_id, newPath: new_path });
+
+export const recognitionVoid = (submission_id: number) =>
+  call<boolean>("recognition_void", { submissionId: submission_id });
+
 export interface ContentCandidate {
   content_no: string;
   title: string;
