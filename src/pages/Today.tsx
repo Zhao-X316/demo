@@ -142,6 +142,10 @@ export default function Today() {
             setToast(`已布置：${taskResultText(result)}`);
             load();
           }}
+          onTasksChanged={(message) => {
+            setToast(message);
+            load();
+          }}
         />
       )}
     </div>

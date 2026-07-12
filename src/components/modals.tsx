@@ -13,13 +13,15 @@ export function AssignModal({
   presetContentIds,
   onClose,
   onDone,
+  onTasksChanged,
 }: {
   students: Student[];
   contents: RecContent[];
   classList?: Class[];
   presetContentIds?: number[];
   onClose: () => void;
-    onDone: (result: TaskGenerateResult) => void;
+  onDone: (result: TaskGenerateResult) => void;
+  onTasksChanged?: (message: string) => void;
 }) {
   const enabledStudents = students.filter((s) => s.enabled);
   const clsName = (id: number | null) =>
@@ -160,9 +162,10 @@ export function AssignModal({
       const ids = delCon
         .map((no) => contents.find((c) => c.content_no === no)?.id)
         .filter((x): x is number => x != null);
-      await tasksRemove(manageStudents, ids);
+      const removed = await tasksRemove(manageStudents, ids);
       setDelCon([]);
       loadAssigned();
+      onTasksChanged?.(`已撤销 ${removed} 条任务`);
     } catch (e) {
       setErr(String(e));
     }
