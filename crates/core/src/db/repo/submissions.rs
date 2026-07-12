@@ -19,7 +19,7 @@ pub struct NewSubmission<'a> {
     pub status: &'a str,
 }
 
-const COLS: &str = "id, module, task_id, student_id, ref_id, media_type, file_path, file_hash, \
+const COLS: &str = "id, module, task_id, student_id, ref_id, media_type, file_path, archived_path, file_hash, \
     duration_ms, parsed_meta, recognized_text, recognize_meta, recognize_status, anomaly_type, status";
 
 fn row_to_submission(r: &rusqlite::Row<'_>) -> rusqlite::Result<Submission> {
@@ -31,6 +31,7 @@ fn row_to_submission(r: &rusqlite::Row<'_>) -> rusqlite::Result<Submission> {
         ref_id: r.get("ref_id")?,
         media_type: MediaType::from_db(&r.get::<_, String>("media_type")?),
         file_path: r.get("file_path")?,
+        archived_path: r.get("archived_path")?,
         file_hash: r.get("file_hash")?,
         duration_ms: r.get("duration_ms")?,
         parsed_meta: r.get("parsed_meta")?,
@@ -81,6 +82,14 @@ pub fn set_file_path(conn: &Connection, id: i64, file_path: &str) -> CoreResult<
     conn.execute(
         "UPDATE submissions SET file_path=?2, updated_at=datetime('now') WHERE id=?1",
         (id, file_path),
+    )?;
+    Ok(())
+}
+
+pub fn set_archived_path(conn: &Connection, id: i64, archived_path: &str) -> CoreResult<()> {
+    conn.execute(
+        "UPDATE submissions SET archived_path=?2, updated_at=datetime('now') WHERE id=?1",
+        (id, archived_path),
     )?;
     Ok(())
 }

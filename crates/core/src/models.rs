@@ -164,6 +164,7 @@ pub struct Submission {
     pub ref_id: Option<i64>,
     pub media_type: MediaType,
     pub file_path: String,
+    pub archived_path: Option<String>,
     pub file_hash: String,
     pub duration_ms: Option<i64>,
     pub parsed_meta: Option<String>,

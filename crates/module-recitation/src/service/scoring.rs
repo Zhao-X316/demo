@@ -296,7 +296,12 @@ fn validate_review_evidence(
             "ASR 原文为空，不能只凭机器分数终审".into(),
         ));
     }
-    std::fs::File::open(&submission.file_path).map_err(|err| {
+    let evidence_path = submission
+        .archived_path
+        .as_deref()
+        .filter(|path| std::path::Path::new(path).is_file())
+        .unwrap_or(&submission.file_path);
+    std::fs::File::open(evidence_path).map_err(|err| {
         CoreError::Invalid(format!(
             "录音文件不可读，不能终审；请重新定位或重开任务: {err}"
         ))

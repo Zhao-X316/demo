@@ -240,6 +240,7 @@ pub fn prepare_tracking_submission(
     existing_submission_id: Option<i64>,
     file_path: &str,
     file_hash: &str,
+    archived_path: Option<&str>,
 ) -> CoreResult<i64> {
     let tx = conn.unchecked_transaction()?;
     let submission_id = match existing_submission_id {
@@ -265,6 +266,9 @@ pub fn prepare_tracking_submission(
             id
         }
     };
+    if let Some(path) = archived_path {
+        submissions::set_archived_path(&tx, submission_id, path)?;
+    }
     submissions::claim_recognition(&tx, submission_id)?;
     tx.commit()?;
     Ok(submission_id)
@@ -607,6 +611,7 @@ mod tests {
             None,
             "/x/recording.m4a",
             "finish-rollback",
+            Some("/archive/finish-rollback.m4a"),
         )
         .unwrap();
         conn.execute_batch(
@@ -635,6 +640,10 @@ mod tests {
         assert_eq!(submission.student_id, None);
         assert_eq!(submission.ref_id, None);
         assert_eq!(submission.task_id, None);
+        assert_eq!(
+            submission.archived_path.as_deref(),
+            Some("/archive/finish-rollback.m4a")
+        );
         assert_eq!(
             tasks::get(&conn, task_id).unwrap().unwrap().status,
             TaskStatus::Open

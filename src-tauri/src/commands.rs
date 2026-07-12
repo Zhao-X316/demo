@@ -9,7 +9,7 @@ use module_recitation::db::contents::{self, ContentInput, RecContent};
 use module_recitation::service::{import, matching, recognition, scoring, tasks as task_svc};
 use suite_core::db::repo::students::{self, StudentInput};
 use suite_core::db::repo::{classes, file_ledger, submissions, tasks, verdicts};
-use suite_core::models::{Class, ModuleKey, Student, TaskKind, TaskStatus, Verdict};
+use suite_core::models::{Class, ModuleKey, Student, Submission, TaskKind, TaskStatus, Verdict};
 
 use crate::backup::{self, BackupCatalog, BackupInfo, BackupKind};
 use crate::secrets::{self, VolcanoCreds};
@@ -52,6 +52,17 @@ fn status_str(s: TaskStatus) -> &'static str {
 /// 待老师确认的唯一口径：最新机器判定已存在，但老师还没有落最终结论。
 fn is_pending_teacher_review(verdict: Option<&Verdict>) -> bool {
     verdict.is_some_and(|value| value.human_result.is_none())
+}
+
+fn preferred_playback_path(file_path: &str, archived_path: Option<&str>) -> String {
+    archived_path
+        .filter(|path| std::path::Path::new(path).is_file())
+        .unwrap_or(file_path)
+        .to_string()
+}
+
+fn playback_path(submission: &Submission) -> String {
+    preferred_playback_path(&submission.file_path, submission.archived_path.as_deref())
 }
 
 // ───────────────────────── DTO ─────────────────────────
@@ -142,12 +153,13 @@ pub fn dashboard_today(state: State<'_, AppState>) -> R<TodayView> {
         let submission = match sub {
             Some(s) => {
                 let v = verdicts::get_by_submission(&conn, s.id).map_err(e)?;
+                let audio_path = playback_path(&s);
                 Some(SubmissionCard {
                     submission_id: s.id,
                     status: s.status,
                     recognize_status: s.recognize_status,
                     pending_review: is_pending_teacher_review(v.as_ref()),
-                    file_path: s.file_path,
+                    file_path: audio_path,
                     recognized_text: s.recognized_text,
                     answer_text: content.as_ref().map(|x| x.answer_text.clone()),
                     answer_version: content.as_ref().map(|x| x.answer_version),
@@ -907,6 +919,26 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
             continue;
         }
 
+        let archived = match crate::archive::archive_audio(
+            path,
+            &hash,
+            &state.data_dir.join("archive"),
+        ) {
+            Ok(archived) => archived,
+            Err(err) => {
+                out.push(fail(format!("录音归档失败: {err}")));
+                continue;
+            }
+        };
+        let archived_path = match archived.path.to_str() {
+            Some(path) => path.to_string(),
+            None => {
+                archived.rollback_new_file();
+                out.push(fail("录音归档路径不是有效 UTF-8".into()));
+                continue;
+            }
+        };
+
         // 先创建/抢占可追踪 submission，再释放锁调用外部 ASR。
         let tracking_id = {
             let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
@@ -915,9 +947,11 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
                 existing_submission_id,
                 &p,
                 &hash,
+                Some(&archived_path),
             ) {
                 Ok(id) => id,
                 Err(err) => {
+                    archived.rollback_new_file();
                     out.push(fail(err.to_string()));
                     continue;
                 }
@@ -938,8 +972,12 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
 
         // 转码 + ASR（异步段，不持锁）
         let tmp = std::env::temp_dir();
-        let transcoded = crate::audio::transcode_to_wav16k(&p, &tmp);
-        let asr_path = transcoded.as_ref().and_then(|x| x.to_str()).unwrap_or(&p).to_string();
+        let transcoded = crate::audio::transcode_to_wav16k(&archived_path, &tmp);
+        let asr_path = transcoded
+            .as_ref()
+            .and_then(|x| x.to_str())
+            .unwrap_or(&archived_path)
+            .to_string();
         let asr = crate::asr::recognize(creds, &asr_path, &hash).await;
         if let Some(t) = transcoded {
             let _ = std::fs::remove_file(t);
@@ -958,7 +996,7 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
         let dur = if asr.duration_ms > 0 {
             Some(asr.duration_ms as i64)
         } else {
-            crate::audio::ffprobe_duration_ms(&p).map(|d| d as i64)
+            crate::audio::ffprobe_duration_ms(&archived_path).map(|d| d as i64)
         };
 
         // 匹配 + 落库 + 评分（同步段）
@@ -1090,13 +1128,16 @@ pub fn anomalies_list(state: State<'_, AppState>) -> R<Vec<AnomalyDto>> {
     let subs = submissions::list_anomalies(&conn, MODULE).map_err(e)?;
     Ok(subs
         .into_iter()
-        .map(|s| AnomalyDto {
-            submission_id: s.id,
-            file_path: s.file_path,
-            anomaly_type: anomaly_label(&s.anomaly_type.unwrap_or_default()),
-            parsed_meta: s.parsed_meta,
-            student_id: s.student_id,
-            ref_id: s.ref_id,
+        .map(|s| {
+            let audio_path = playback_path(&s);
+            AnomalyDto {
+                submission_id: s.id,
+                file_path: audio_path,
+                anomaly_type: anomaly_label(&s.anomaly_type.unwrap_or_default()),
+                parsed_meta: s.parsed_meta,
+                student_id: s.student_id,
+                ref_id: s.ref_id,
+            }
         })
         .collect())
 }
@@ -1121,6 +1162,7 @@ pub fn recognition_failures_list(state: State<'_, AppState>) -> R<Vec<Recognitio
     Ok(failures
         .into_iter()
         .map(|submission| {
+            let audio_path = playback_path(&submission);
             let meta = recognition::parse_failure_meta(submission.recognize_meta.as_deref())
                 .unwrap_or_else(|| recognition::RecognitionFailureMeta {
                     error_code: "unknown".into(),
@@ -1131,8 +1173,8 @@ pub fn recognition_failures_list(state: State<'_, AppState>) -> R<Vec<Recognitio
                 });
             RecognitionFailureDto {
                 submission_id: submission.id,
-                file_missing: !std::path::Path::new(&submission.file_path).is_file(),
-                file_path: submission.file_path,
+                file_missing: !std::path::Path::new(&audio_path).is_file(),
+                file_path: audio_path,
                 error_code: meta.error_code,
                 error_message: meta.error_message,
                 retryable: meta.retryable,
@@ -1222,7 +1264,7 @@ pub async fn asr_and_score(state: State<'_, AppState>, submission_id: i64) -> R<
             .map_err(e)?
             .ok_or_else(|| "提交不存在".to_string())?;
         recognition::claim(&conn, submission_id).map_err(e)?;
-        (sub.file_path.clone(), sub.file_hash.clone())
+        (playback_path(&sub), sub.file_hash.clone())
     };
     let creds = secrets::load(&state.data_dir)
         .map_err(|err| persist_asr_failure(&state, submission_id, &err.to_string()))?;
@@ -1323,5 +1365,32 @@ mod tests {
         for (label, verdict, expected) in cases {
             assert_eq!(is_pending_teacher_review(verdict), expected, "{label}");
         }
+    }
+
+    #[test]
+    fn playback_prefers_archive_and_falls_back_to_original() {
+        let root = std::env::temp_dir().join(format!("jiaofu-playback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let original = root.join("original.m4a");
+        let archived = root.join("archived.m4a");
+        std::fs::write(&original, b"original").unwrap();
+        std::fs::write(&archived, b"archived").unwrap();
+
+        assert_eq!(
+            preferred_playback_path(
+                original.to_str().unwrap(),
+                Some(archived.to_str().unwrap())
+            ),
+            archived.to_string_lossy()
+        );
+        std::fs::remove_file(&archived).unwrap();
+        assert_eq!(
+            preferred_playback_path(
+                original.to_str().unwrap(),
+                Some(archived.to_str().unwrap())
+            ),
+            original.to_string_lossy()
+        );
     }
 }
