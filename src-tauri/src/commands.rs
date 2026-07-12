@@ -227,7 +227,7 @@ pub struct RolloverDto {
     reviews: usize, // 推上看板的到期复习数
 }
 
-/// 跑一次"日切"：① 把昨天仍 open 的任务标过期并结转次日补背；② 把到期的复习卡生成今日复习任务。
+/// 跑一次"日切"：① 把昨天仍 open 的非补背任务标过期并结转为今日补背；② 把到期的复习卡生成今日复习任务。
 /// 两个子步骤内部都幂等（去重），可安全重复调用。
 pub fn run_day_rollover(conn: &rusqlite::Connection) -> R<(usize, usize)> {
     let rolled = task_svc::rollover(conn, today_naive()).map_err(e)?;

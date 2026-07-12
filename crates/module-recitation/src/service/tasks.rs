@@ -1,6 +1,6 @@
 //! 任务生成：补背、到期复习、日切结转（见 背诵批改系统 §9）。
 
-use chrono::{Duration, NaiveDate};
+use chrono::NaiveDate;
 use rusqlite::Connection;
 use serde::Serialize;
 use suite_core::db::repo::{memory_cards, tasks};
@@ -9,9 +9,6 @@ use suite_core::models::{ModuleKey, TaskKind, TaskStatus};
 
 const MODULE: ModuleKey = ModuleKey::Recitation;
 const REF_TYPE: &str = "content";
-
-/// 默认补背在次日。
-pub const DEFAULT_MAKEUP_OFFSET_DAYS: i64 = 1;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct GenerateNormalReport {
@@ -146,16 +143,17 @@ pub fn generate_due_reviews(conn: &Connection, today: &str) -> CoreResult<Vec<i6
     Ok(out)
 }
 
-/// 日切：早于今天仍 open 的任务 → expired，并结转补背（次日）。返回过期数量。
+/// 日切：早于今天仍 open 的非补背任务 → expired，并结转为今天到期的补背。
+/// 已有补背（包括更早已逾期的补背）保持原日期与 open 状态，不重复滚动。
 pub fn rollover(conn: &Connection, today: NaiveDate) -> CoreResult<usize> {
     let today_str = today.format("%Y-%m-%d").to_string();
-    let stale = tasks::list_open_before(conn, MODULE, &today_str)?;
-    let makeup_due = (today + Duration::days(DEFAULT_MAKEUP_OFFSET_DAYS))
-        .format("%Y-%m-%d")
-        .to_string();
+    let stale: Vec<_> = tasks::list_open_before(conn, MODULE, &today_str)?
+        .into_iter()
+        .filter(|task| task.kind != TaskKind::Makeup)
+        .collect();
     for t in &stale {
         tasks::set_status(conn, t.id, TaskStatus::Expired)?;
-        ensure_makeup(conn, t.student_id, t.ref_id, t.id, &makeup_due)?;
+        ensure_makeup(conn, t.student_id, t.ref_id, t.id, &today_str)?;
     }
     Ok(stale.len())
 }
@@ -235,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn rollover_expires_and_makes_up() {
+    fn rollover_expires_and_makes_up_today_without_duplication() {
         let (conn, sid) = setup();
         let tid = tasks::insert(
             &conn,
@@ -258,6 +256,70 @@ mod tests {
             tasks::get(&conn, tid).unwrap().unwrap().status,
             TaskStatus::Expired
         );
-        assert!(tasks::exists_open_kind(&conn, MODULE, sid, 9, TaskKind::Makeup).unwrap());
+        let scope = tasks::list_for_scope(&conn, MODULE, sid, REF_TYPE, 9).unwrap();
+        let makeups: Vec<_> = scope
+            .iter()
+            .filter(|task| task.kind == TaskKind::Makeup)
+            .collect();
+        assert_eq!(makeups.len(), 1);
+        assert_eq!(makeups[0].due_date, "2026-06-25");
+        assert_eq!(makeups[0].status, TaskStatus::Open);
+        assert_eq!(makeups[0].source_task_id, Some(tid));
+        assert!(tasks::list_by_date(&conn, MODULE, "2026-06-25")
+            .unwrap()
+            .iter()
+            .any(|task| task.id == makeups[0].id));
+
+        let repeated = rollover(&conn, NaiveDate::from_ymd_opt(2026, 6, 25).unwrap()).unwrap();
+        assert_eq!(repeated, 0);
+        let scope_after = tasks::list_for_scope(&conn, MODULE, sid, REF_TYPE, 9).unwrap();
+        assert_eq!(
+            scope_after
+                .iter()
+                .filter(|task| task.kind == TaskKind::Makeup)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn rollover_preserves_existing_earlier_makeup() {
+        let (conn, sid) = setup();
+        let source_id = tasks::insert(
+            &conn,
+            &tasks::NewTask {
+                module: MODULE,
+                student_id: sid,
+                subject_id: None,
+                ref_type: REF_TYPE,
+                ref_id: 10,
+                kind: TaskKind::Normal,
+                due_date: "2026-06-20",
+                source_task_id: None,
+                card_id: None,
+            },
+        )
+        .unwrap();
+        let earlier_makeup = ensure_makeup(&conn, sid, 10, source_id, "2026-06-23")
+            .unwrap()
+            .unwrap();
+
+        let rolled = rollover(&conn, NaiveDate::from_ymd_opt(2026, 6, 25).unwrap()).unwrap();
+        assert_eq!(rolled, 1);
+        assert_eq!(
+            tasks::get(&conn, source_id).unwrap().unwrap().status,
+            TaskStatus::Expired
+        );
+        let preserved = tasks::get(&conn, earlier_makeup).unwrap().unwrap();
+        assert_eq!(preserved.status, TaskStatus::Open);
+        assert_eq!(preserved.due_date, "2026-06-23");
+        let scope = tasks::list_for_scope(&conn, MODULE, sid, REF_TYPE, 10).unwrap();
+        assert_eq!(
+            scope
+                .iter()
+                .filter(|task| task.kind == TaskKind::Makeup)
+                .count(),
+            1
+        );
     }
 }
