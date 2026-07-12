@@ -85,7 +85,18 @@ pub fn score_submission(
     cfg: &ScoreCfg,
 ) -> CoreResult<ScoreOutcome> {
     let tx = conn.unchecked_transaction()?;
-    let sub = submissions::get(&tx, submission_id)?
+    let outcome = score_submission_inner(&tx, submission_id, words, cfg)?;
+    tx.commit()?;
+    Ok(outcome)
+}
+
+pub(crate) fn score_submission_inner(
+    conn: &Connection,
+    submission_id: i64,
+    words: &[RecognizedWord],
+    cfg: &ScoreCfg,
+) -> CoreResult<ScoreOutcome> {
+    let sub = submissions::get(conn, submission_id)?
         .ok_or_else(|| CoreError::NotFound(format!("submission {submission_id}")))?;
     let content_id = sub
         .ref_id
@@ -93,11 +104,11 @@ pub fn score_submission(
     let asr_text = sub.recognized_text.clone().unwrap_or_default();
     let duration = sub.duration_ms.unwrap_or(0).max(0) as u64;
 
-    let content = contents::get_by_id(&tx, content_id)?
+    let content = contents::get_by_id(conn, content_id)?
         .ok_or_else(|| CoreError::NotFound(format!("content {content_id}")))?;
 
     let g = grade_and_record(
-        &tx,
+        conn,
         submission_id,
         &content,
         &asr_text,
@@ -106,16 +117,14 @@ pub fn score_submission(
         cfg,
     )?;
 
-    let outcome = ScoreOutcome {
+    Ok(ScoreOutcome {
         verdict_id: g.verdict_id,
         accuracy: g.grade.primary_score,
         pass: g.grade.pass,
         fluency: g.grade.secondary_score.unwrap_or(0.0),
         quality: g.quality,
         next: NextAction::AwaitingHumanReview,
-    };
-    tx.commit()?;
-    Ok(outcome)
+    })
 }
 
 struct Graded {
@@ -232,33 +241,31 @@ pub fn rescore(
     cfg: &ScoreCfg,
 ) -> CoreResult<ScoreOutcome> {
     let tx = conn.unchecked_transaction()?;
-    let sub = submissions::get(&tx, submission_id)?
-        .ok_or_else(|| CoreError::NotFound(format!("submission {submission_id}")))?;
-    let content_id = sub
-        .ref_id
-        .ok_or_else(|| CoreError::Invalid("提交缺少内容".into()))?;
-    let asr_text = sub.recognized_text.clone().unwrap_or_default();
-    let duration = sub.duration_ms.unwrap_or(0).max(0) as u64;
-    let content = contents::get_by_id(&tx, content_id)?
-        .ok_or_else(|| CoreError::NotFound(format!("content {content_id}")))?;
+    let outcome = score_submission_inner(&tx, submission_id, words, cfg)?;
+    tx.commit()?;
+    Ok(outcome)
+}
 
-    let g = grade_and_record(
+/// ASR 成功收尾：识别文本、机器判定、提交状态与异常清理一次提交。
+pub fn finish_recognition_and_score(
+    conn: &Connection,
+    submission_id: i64,
+    recognized_text: &str,
+    duration_ms: Option<i64>,
+    words: &[RecognizedWord],
+    cfg: &ScoreCfg,
+) -> CoreResult<ScoreOutcome> {
+    let tx = conn.unchecked_transaction()?;
+    submissions::set_recognition(
         &tx,
         submission_id,
-        &content,
-        &asr_text,
-        words,
-        duration,
-        cfg,
+        Some(recognized_text),
+        "ok",
+        None,
+        duration_ms,
     )?;
-    let outcome = ScoreOutcome {
-        verdict_id: g.verdict_id,
-        accuracy: g.grade.primary_score,
-        pass: g.grade.pass,
-        fluency: g.grade.secondary_score.unwrap_or(0.0),
-        quality: g.quality,
-        next: NextAction::AwaitingHumanReview,
-    };
+    let outcome = score_submission_inner(&tx, submission_id, words, cfg)?;
+    submissions::clear_anomaly(&tx, submission_id)?;
     tx.commit()?;
     Ok(outcome)
 }
@@ -1125,6 +1132,41 @@ mod tests {
             .unwrap();
         assert_eq!(verdicts_count, 0);
         assert_eq!(submissions::get(&conn, sub).unwrap().unwrap().status, "pending");
+    }
+
+    #[test]
+    fn recognition_finish_rolls_back_text_when_verdict_write_fails() {
+        let answer = "床前明月光";
+        let (conn, _sid, _cid, sub) = setup_imported(answer);
+        submissions::claim_recognition(&conn, sub).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_finish_verdict
+             BEFORE INSERT ON verdicts
+             BEGIN SELECT RAISE(ABORT, 'injected verdict failure'); END;",
+        )
+        .unwrap();
+
+        assert!(finish_recognition_and_score(
+            &conn,
+            sub,
+            answer,
+            Some(5000),
+            &[],
+            &ScoreCfg::default(),
+        )
+        .is_err());
+        let submission = submissions::get(&conn, sub).unwrap().unwrap();
+        assert_eq!(submission.recognize_status, "processing");
+        assert_eq!(submission.recognized_text, None);
+        assert_eq!(submission.status, "pending");
+        let verdicts_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM verdicts WHERE submission_id=?1",
+                [sub],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(verdicts_count, 0);
     }
 
     #[test]

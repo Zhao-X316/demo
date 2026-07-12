@@ -9,7 +9,7 @@ use module_recitation::db::contents::{self, ContentInput, RecContent};
 use module_recitation::service::{import, matching, recognition, scoring, tasks as task_svc};
 use suite_core::db::repo::students::{self, StudentInput};
 use suite_core::db::repo::{classes, file_ledger, submissions, tasks, verdicts};
-use suite_core::models::{Class, MediaType, ModuleKey, Student, TaskKind, TaskStatus, Verdict};
+use suite_core::models::{Class, ModuleKey, Student, TaskKind, TaskStatus, Verdict};
 
 use crate::secrets::{self, VolcanoCreds};
 use crate::state::AppState;
@@ -242,8 +242,7 @@ pub struct RolloverDto {
 /// 跑一次"日切"：① 把昨天仍 open 的非补背任务标过期并结转为今日补背；② 把到期的复习卡生成今日复习任务。
 /// 两个子步骤内部都幂等（去重），可安全重复调用。
 pub fn run_day_rollover(conn: &rusqlite::Connection) -> R<(usize, usize)> {
-    let rolled = task_svc::rollover(conn, today_naive()).map_err(e)?;
-    let reviews = task_svc::generate_due_reviews(conn, &today_str()).map_err(e)?;
+    let (rolled, reviews) = task_svc::run_day_rollover(conn, today_naive()).map_err(e)?;
     Ok((rolled, reviews.len()))
 }
 
@@ -338,7 +337,6 @@ pub fn seed_demo(state: State<'_, AppState>) -> R<String> {
 
     task_svc::generate_normal(&conn, &date, &[(s1.id, c.id), (s2.id, c.id)]).map_err(e)?;
 
-    let t = today_naive();
     let cfg = RecitationConfig::load(&conn).map_err(e)?.to_score_cfg();
     // 张三完美背诵 → 通过；李四只背前两句 → 未通过(补背)
     let rows = [
@@ -349,8 +347,15 @@ pub fn seed_demo(state: State<'_, AppState>) -> R<String> {
         let stem = format!("{ymd}_{no}_{name}_C012");
         let item = import::ImportItem { file_path: &stem, file_stem: &stem, file_hash: hash, duration_ms: Some(8000) };
         if let import::ImportOutcome::Imported { submission_id, .. } = import::import_one(&conn, &item).map_err(e)? {
-            submissions::set_recognition(&conn, submission_id, Some(text), "ok", None, Some(8000)).map_err(e)?;
-            scoring::score_submission(&conn, submission_id, &[], t, &cfg).map_err(e)?;
+            scoring::finish_recognition_and_score(
+                &conn,
+                submission_id,
+                text,
+                Some(8000),
+                &[],
+                &cfg,
+            )
+            .map_err(e)?;
         }
     }
     Ok("已生成示例数据：2 名学生 + 静夜思，张三通过、李四待补背".to_string())
@@ -874,35 +879,18 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
         // 先创建/抢占可追踪 submission，再释放锁调用外部 ASR。
         let tracking_id = {
             let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
-            let id = match existing_submission_id {
-                Some(id) => id,
-                None => {
-                    let id = submissions::insert(
-                        &conn,
-                        &submissions::NewSubmission {
-                            module: MODULE,
-                            task_id: None,
-                            student_id: None,
-                            ref_id: None,
-                            media_type: MediaType::Audio,
-                            file_path: &p,
-                            file_hash: &hash,
-                            duration_ms: None,
-                            parsed_meta: None,
-                            anomaly_type: None,
-                            status: "pending",
-                        },
-                    )
-                    .map_err(e)?;
-                    file_ledger::record(&conn, &hash, &p, id).map_err(e)?;
-                    id
+            match import::prepare_tracking_submission(
+                &conn,
+                existing_submission_id,
+                &p,
+                &hash,
+            ) {
+                Ok(id) => id,
+                Err(err) => {
+                    out.push(fail(err.to_string()));
+                    continue;
                 }
-            };
-            if let Err(err) = recognition::claim(&conn, id) {
-                out.push(fail(err.to_string()));
-                continue;
             }
-            id
         };
 
         let creds = match &creds {
@@ -942,19 +930,6 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
             crate::audio::ffprobe_duration_ms(&p).map(|d| d as i64)
         };
 
-        {
-            let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
-            submissions::set_recognition(
-                &conn,
-                tracking_id,
-                Some(&asr.text),
-                "ok",
-                None,
-                dur,
-            )
-            .map_err(e)?;
-        }
-
         // 匹配 + 落库 + 评分（同步段）
         let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
         let rcfg = RecitationConfig::load(&conn).map_err(e)?;
@@ -964,24 +939,27 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
 
         match (student, content) {
             (Some(s), Some((c, score))) if score >= MATCH_MIN => {
-                let existing = submissions::get(&conn, tracking_id)
-                    .map_err(e)?
-                    .ok_or_else(|| "跟踪提交不存在".to_string())?;
                 let reused = existing_submission_id.is_some();
-                if existing.status == "anomaly" || existing.task_id.is_none() {
-                    import::reassign(&conn, tracking_id, Some(s.id), Some(c.id)).map_err(e)?;
-                } else {
-                    submissions::set_resolution_preserve_task(&conn, tracking_id, s.id, c.id)
-                        .map_err(e)?;
-                }
-                let has_verdict = verdicts::get_by_submission(&conn, tracking_id).map_err(e)?.is_some();
-                let r = if reused && has_verdict {
-                    scoring::rescore(&conn, tracking_id, &asr.words, &scfg).map_err(e)?
-                } else {
-                    scoring::score_submission(&conn, tracking_id, &asr.words, today_naive(), &scfg)
-                        .map_err(e)?
+                let r = match import::finish_resolved_recognition(
+                    &conn,
+                    &import::ResolvedRecognition {
+                        submission_id: tracking_id,
+                        student_id: s.id,
+                        content_id: c.id,
+                        recognized_text: &asr.text,
+                        duration_ms: dur,
+                        words: &asr.words,
+                        cfg: &scfg,
+                    },
+                ) {
+                    Ok(result) => result,
+                    Err(err) => {
+                        let message = format!("识别结果入库失败: {err}");
+                        let _ = recognition::mark_failed(&conn, tracking_id, &message);
+                        out.push(fail(message));
+                        continue;
+                    }
                 };
-                submissions::clear_anomaly(&conn, tracking_id).map_err(e)?;
                 let (new_name, detail) = if reused {
                     (None, format!("重新分析既有记录 · 匹配度 {score:.0}%"))
                 } else {
@@ -1022,6 +1000,18 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
                 });
             }
             _ => {
+                if let Err(err) = import::finish_unmatched_recognition(
+                    &conn,
+                    tracking_id,
+                    &asr.text,
+                    dur,
+                    existing_submission_id.is_none(),
+                ) {
+                    let message = format!("识别结果入库失败: {err}");
+                    let _ = recognition::mark_failed(&conn, tracking_id, &message);
+                    out.push(fail(message));
+                    continue;
+                }
                 if existing_submission_id.is_some() {
                     out.push(AutonameDto {
                         file: p.clone(),
@@ -1035,14 +1025,6 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
                     });
                     continue;
                 }
-                let meta = serde_json::json!({ "asr": asr.text }).to_string();
-                submissions::mark_anomaly(
-                    &conn,
-                    tracking_id,
-                    "autoname_unmatched",
-                    Some(&meta),
-                )
-                .map_err(e)?;
                 out.push(AutonameDto {
                     file: p.clone(),
                     status: "unmatched".into(),
@@ -1237,10 +1219,22 @@ pub async fn asr_and_score(state: State<'_, AppState>, submission_id: i64) -> R<
     }
     // 同步段：回写识别 + 评分
     let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
-    submissions::set_recognition(&conn, submission_id, Some(&out.text), "ok", None, Some(out.duration_ms as i64)).map_err(e)?;
     let cfg = RecitationConfig::load(&conn).map_err(e)?.to_score_cfg();
-    let r = scoring::score_submission(&conn, submission_id, &out.words, today_naive(), &cfg).map_err(e)?;
-    submissions::clear_anomaly(&conn, submission_id).map_err(e)?;
+    let r = match scoring::finish_recognition_and_score(
+        &conn,
+        submission_id,
+        &out.text,
+        Some(out.duration_ms as i64),
+        &out.words,
+        &cfg,
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            let message = format!("识别结果入库失败: {err}");
+            let _ = recognition::mark_failed(&conn, submission_id, &message);
+            return Err(message);
+        }
+    };
     Ok(ScoreOutcomeDto {
         verdict_id: r.verdict_id,
         accuracy: r.accuracy,

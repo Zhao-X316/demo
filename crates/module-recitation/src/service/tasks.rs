@@ -118,6 +118,13 @@ pub fn generate_normal(
 
 /// 到期复习生成：扫描到期记忆卡片，为每张生成一条复习任务（去重）。
 pub fn generate_due_reviews(conn: &Connection, today: &str) -> CoreResult<Vec<i64>> {
+    let tx = conn.unchecked_transaction()?;
+    let task_ids = generate_due_reviews_inner(&tx, today)?;
+    tx.commit()?;
+    Ok(task_ids)
+}
+
+fn generate_due_reviews_inner(conn: &Connection, today: &str) -> CoreResult<Vec<i64>> {
     let cards = memory_cards::due(conn, MODULE, today)?;
     let mut out = Vec::new();
     for c in cards {
@@ -146,6 +153,13 @@ pub fn generate_due_reviews(conn: &Connection, today: &str) -> CoreResult<Vec<i6
 /// 日切：早于今天仍 open 的非补背任务 → expired，并结转为今天到期的补背。
 /// 已有补背（包括更早已逾期的补背）保持原日期与 open 状态，不重复滚动。
 pub fn rollover(conn: &Connection, today: NaiveDate) -> CoreResult<usize> {
+    let tx = conn.unchecked_transaction()?;
+    let rolled = rollover_inner(&tx, today)?;
+    tx.commit()?;
+    Ok(rolled)
+}
+
+fn rollover_inner(conn: &Connection, today: NaiveDate) -> CoreResult<usize> {
     let today_str = today.format("%Y-%m-%d").to_string();
     let stale: Vec<_> = tasks::list_open_before(conn, MODULE, &today_str)?
         .into_iter()
@@ -156,6 +170,19 @@ pub fn rollover(conn: &Connection, today: NaiveDate) -> CoreResult<usize> {
         ensure_makeup(conn, t.student_id, t.ref_id, t.id, &today_str)?;
     }
     Ok(stale.len())
+}
+
+/// 一次日切同时完成逾期补背和到期复习；任一步失败则全部回滚。
+pub fn run_day_rollover(
+    conn: &Connection,
+    today: NaiveDate,
+) -> CoreResult<(usize, Vec<i64>)> {
+    let tx = conn.unchecked_transaction()?;
+    let rolled = rollover_inner(&tx, today)?;
+    let today_str = today.format("%Y-%m-%d").to_string();
+    let reviews = generate_due_reviews_inner(&tx, &today_str)?;
+    tx.commit()?;
+    Ok((rolled, reviews))
 }
 
 #[cfg(test)]
@@ -321,5 +348,63 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn day_rollover_rolls_back_expiry_and_makeup_when_review_insert_fails() {
+        let (conn, sid) = setup();
+        let stale_id = tasks::insert(
+            &conn,
+            &tasks::NewTask {
+                module: MODULE,
+                student_id: sid,
+                subject_id: None,
+                ref_type: REF_TYPE,
+                ref_id: 20,
+                kind: TaskKind::Normal,
+                due_date: "2026-06-20",
+                source_task_id: None,
+                card_id: None,
+            },
+        )
+        .unwrap();
+        upsert_after_pass(
+            &conn,
+            &CardUpdate {
+                module: MODULE,
+                student_id: sid,
+                ref_type: REF_TYPE,
+                ref_id: 21,
+                state: CardState::Review,
+                stage: 1,
+                interval_days: 2,
+                quality: "A",
+                due_date: "2026-06-20",
+            },
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_review_task
+             BEFORE INSERT ON tasks
+             WHEN NEW.kind='review'
+             BEGIN SELECT RAISE(ABORT, 'injected review failure'); END;",
+        )
+        .unwrap();
+
+        assert!(run_day_rollover(
+            &conn,
+            NaiveDate::from_ymd_opt(2026, 6, 25).unwrap()
+        )
+        .is_err());
+        assert_eq!(
+            tasks::get(&conn, stale_id).unwrap().unwrap().status,
+            TaskStatus::Open
+        );
+        let created: i64 = conn
+            .query_row("SELECT count(*) FROM tasks WHERE id<>?1", [stale_id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(created, 0, "补背和复习都必须回滚");
     }
 }

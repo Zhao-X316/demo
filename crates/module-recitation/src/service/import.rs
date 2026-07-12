@@ -9,9 +9,11 @@ use rusqlite::Connection;
 use suite_core::db::repo::{file_ledger, submissions, tasks};
 use suite_core::error::{CoreError, CoreResult};
 use suite_core::models::{MediaType, ModuleKey, TaskStatus};
+use suite_core::ports::RecognizedWord;
 
 use crate::db::contents;
 use crate::domain::filename;
+use crate::service::scoring::{self, ScoreCfg, ScoreOutcome};
 
 const MODULE: ModuleKey = ModuleKey::Recitation;
 
@@ -61,6 +63,13 @@ fn insert_anomaly(
 }
 
 pub fn import_one(conn: &Connection, item: &ImportItem<'_>) -> CoreResult<ImportOutcome> {
+    let tx = conn.unchecked_transaction()?;
+    let outcome = import_one_inner(&tx, item)?;
+    tx.commit()?;
+    Ok(outcome)
+}
+
+fn import_one_inner(conn: &Connection, item: &ImportItem<'_>) -> CoreResult<ImportOutcome> {
     // 1. 去重
     if let Some(hit) = file_ledger::get(conn, item.file_hash)? {
         file_ledger::bump(conn, item.file_hash)?;
@@ -142,6 +151,27 @@ pub fn import_resolved(
     content_id: i64,
     duration_ms: Option<i64>,
 ) -> CoreResult<(i64, Option<i64>)> {
+    let tx = conn.unchecked_transaction()?;
+    let outcome = import_resolved_inner(
+        &tx,
+        file_path,
+        file_hash,
+        student_id,
+        content_id,
+        duration_ms,
+    )?;
+    tx.commit()?;
+    Ok(outcome)
+}
+
+fn import_resolved_inner(
+    conn: &Connection,
+    file_path: &str,
+    file_hash: &str,
+    student_id: i64,
+    content_id: i64,
+    duration_ms: Option<i64>,
+) -> CoreResult<(i64, Option<i64>)> {
     let task = tasks::find_latest_open(conn, MODULE, student_id, content_id)?;
     let task_id = task.as_ref().map(|t| t.id);
     let sub_id = submissions::insert(
@@ -176,6 +206,18 @@ pub fn reassign(
     student_id: Option<i64>,
     ref_id: Option<i64>,
 ) -> CoreResult<Option<i64>> {
+    let tx = conn.unchecked_transaction()?;
+    let task_id = reassign_inner(&tx, submission_id, student_id, ref_id)?;
+    tx.commit()?;
+    Ok(task_id)
+}
+
+fn reassign_inner(
+    conn: &Connection,
+    submission_id: i64,
+    student_id: Option<i64>,
+    ref_id: Option<i64>,
+) -> CoreResult<Option<i64>> {
     let sub = submissions::get(conn, submission_id)?
         .ok_or_else(|| CoreError::NotFound(format!("submission {submission_id}")))?;
     let sid = student_id
@@ -190,6 +232,124 @@ pub fn reassign(
         tasks::set_status(conn, tid, TaskStatus::Submitted)?;
     }
     Ok(task_id)
+}
+
+/// 智能导入在网络调用前的短事务：新记录同时写 submission + ledger，并抢占 processing。
+pub fn prepare_tracking_submission(
+    conn: &Connection,
+    existing_submission_id: Option<i64>,
+    file_path: &str,
+    file_hash: &str,
+) -> CoreResult<i64> {
+    let tx = conn.unchecked_transaction()?;
+    let submission_id = match existing_submission_id {
+        Some(id) => id,
+        None => {
+            let id = submissions::insert(
+                &tx,
+                &submissions::NewSubmission {
+                    module: MODULE,
+                    task_id: None,
+                    student_id: None,
+                    ref_id: None,
+                    media_type: MediaType::Audio,
+                    file_path,
+                    file_hash,
+                    duration_ms: None,
+                    parsed_meta: None,
+                    anomaly_type: None,
+                    status: "pending",
+                },
+            )?;
+            file_ledger::record(&tx, file_hash, file_path, id)?;
+            id
+        }
+    };
+    submissions::claim_recognition(&tx, submission_id)?;
+    tx.commit()?;
+    Ok(submission_id)
+}
+
+/// 智能导入匹配成功后的收尾事务：识别、关联任务、机器判定与异常清理要么全成，要么全退。
+pub struct ResolvedRecognition<'a> {
+    pub submission_id: i64,
+    pub student_id: i64,
+    pub content_id: i64,
+    pub recognized_text: &'a str,
+    pub duration_ms: Option<i64>,
+    pub words: &'a [RecognizedWord],
+    pub cfg: &'a ScoreCfg,
+}
+
+pub fn finish_resolved_recognition(
+    conn: &Connection,
+    input: &ResolvedRecognition<'_>,
+) -> CoreResult<ScoreOutcome> {
+    let tx = conn.unchecked_transaction()?;
+    let existing = submissions::get(&tx, input.submission_id)?
+        .ok_or_else(|| CoreError::NotFound(format!("submission {}", input.submission_id)))?;
+    submissions::set_recognition(
+        &tx,
+        input.submission_id,
+        Some(input.recognized_text),
+        "ok",
+        None,
+        input.duration_ms,
+    )?;
+    if existing.status == "anomaly" || existing.task_id.is_none() {
+        reassign_inner(
+            &tx,
+            input.submission_id,
+            Some(input.student_id),
+            Some(input.content_id),
+        )?;
+    } else {
+        submissions::set_resolution_preserve_task(
+            &tx,
+            input.submission_id,
+            input.student_id,
+            input.content_id,
+        )?;
+    }
+    let outcome = scoring::score_submission_inner(
+        &tx,
+        input.submission_id,
+        input.words,
+        input.cfg,
+    )?;
+    submissions::clear_anomaly(&tx, input.submission_id)?;
+    tx.commit()?;
+    Ok(outcome)
+}
+
+/// 未匹配收尾：识别结果与异常状态同一事务提交。
+pub fn finish_unmatched_recognition(
+    conn: &Connection,
+    submission_id: i64,
+    recognized_text: &str,
+    duration_ms: Option<i64>,
+    mark_anomaly: bool,
+) -> CoreResult<()> {
+    let tx = conn.unchecked_transaction()?;
+    submissions::set_recognition(
+        &tx,
+        submission_id,
+        Some(recognized_text),
+        "ok",
+        None,
+        duration_ms,
+    )?;
+    if mark_anomaly {
+        let meta = serde_json::json!({ "asr": recognized_text }).to_string();
+        submissions::mark_anomaly(
+            &tx,
+            submission_id,
+            "autoname_unmatched",
+            Some(&meta),
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -332,5 +492,152 @@ mod tests {
             ImportOutcome::Imported { warning, .. } => assert!(warning.is_some()),
             other => panic!("expected Imported with warning, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn import_rolls_back_submission_when_ledger_write_fails() {
+        let conn = setup();
+        let (_sid, task_id) = seed_full(&conn);
+        conn.execute_batch(
+            "CREATE TRIGGER fail_import_ledger
+             BEFORE INSERT ON file_ledger
+             BEGIN SELECT RAISE(ABORT, 'injected ledger failure'); END;",
+        )
+        .unwrap();
+
+        let result = import_one(
+            &conn,
+            &ImportItem {
+                file_path: "/x/20260625_2023001_张三_C012_1.m4a",
+                file_stem: "20260625_2023001_张三_C012_1",
+                file_hash: "rollback-hash",
+                duration_ms: None,
+            },
+        );
+        assert!(result.is_err());
+        let submissions_count: i64 = conn
+            .query_row("SELECT count(*) FROM submissions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(submissions_count, 0);
+        assert_eq!(
+            tasks::get(&conn, task_id).unwrap().unwrap().status,
+            TaskStatus::Open
+        );
+    }
+
+    #[test]
+    fn resolved_import_rolls_back_submission_when_ledger_write_fails() {
+        let conn = setup();
+        let (student_id, task_id) = seed_full(&conn);
+        let content_id = contents::get_by_no(&conn, "C012").unwrap().unwrap().id;
+        conn.execute_batch(
+            "CREATE TRIGGER fail_resolved_ledger
+             BEFORE INSERT ON file_ledger
+             BEGIN SELECT RAISE(ABORT, 'injected ledger failure'); END;",
+        )
+        .unwrap();
+
+        assert!(import_resolved(
+            &conn,
+            "/x/resolved.m4a",
+            "resolved-rollback",
+            student_id,
+            content_id,
+            None,
+        )
+        .is_err());
+        let submissions_count: i64 = conn
+            .query_row("SELECT count(*) FROM submissions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(submissions_count, 0);
+        assert_eq!(
+            tasks::get(&conn, task_id).unwrap().unwrap().status,
+            TaskStatus::Open
+        );
+    }
+
+    #[test]
+    fn reassign_rolls_back_submission_when_task_update_fails() {
+        let conn = setup();
+        let (student_id, _task_id) = seed_full(&conn);
+        let content_id = contents::get_by_no(&conn, "C012").unwrap().unwrap().id;
+        let anomaly_id = match import_one(
+            &conn,
+            &ImportItem {
+                file_path: "/x/bad.m4a",
+                file_stem: "bad-name",
+                file_hash: "reassign-rollback",
+                duration_ms: None,
+            },
+        )
+        .unwrap()
+        {
+            ImportOutcome::Anomaly { submission_id, .. } => submission_id,
+            other => panic!("expected anomaly, got {other:?}"),
+        };
+        conn.execute_batch(
+            "CREATE TRIGGER fail_reassign_task
+             BEFORE UPDATE OF status ON tasks
+             WHEN NEW.status='submitted'
+             BEGIN SELECT RAISE(ABORT, 'injected task failure'); END;",
+        )
+        .unwrap();
+
+        assert!(reassign(
+            &conn,
+            anomaly_id,
+            Some(student_id),
+            Some(content_id)
+        )
+        .is_err());
+        let submission = submissions::get(&conn, anomaly_id).unwrap().unwrap();
+        assert_eq!(submission.student_id, None);
+        assert_eq!(submission.ref_id, None);
+        assert_eq!(submission.task_id, None);
+        assert_eq!(submission.status, "anomaly");
+    }
+
+    #[test]
+    fn resolved_recognition_rolls_back_resolution_when_scoring_fails() {
+        let conn = setup();
+        let (student_id, task_id) = seed_full(&conn);
+        let content_id = contents::get_by_no(&conn, "C012").unwrap().unwrap().id;
+        let submission_id = prepare_tracking_submission(
+            &conn,
+            None,
+            "/x/recording.m4a",
+            "finish-rollback",
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_resolved_verdict
+             BEFORE INSERT ON verdicts
+             BEGIN SELECT RAISE(ABORT, 'injected verdict failure'); END;",
+        )
+        .unwrap();
+
+        assert!(finish_resolved_recognition(
+            &conn,
+            &ResolvedRecognition {
+                submission_id,
+                student_id,
+                content_id,
+                recognized_text: "床前明月光",
+                duration_ms: Some(5000),
+                words: &[],
+                cfg: &ScoreCfg::default(),
+            },
+        )
+        .is_err());
+        let submission = submissions::get(&conn, submission_id).unwrap().unwrap();
+        assert_eq!(submission.recognize_status, "processing");
+        assert_eq!(submission.recognized_text, None);
+        assert_eq!(submission.student_id, None);
+        assert_eq!(submission.ref_id, None);
+        assert_eq!(submission.task_id, None);
+        assert_eq!(
+            tasks::get(&conn, task_id).unwrap().unwrap().status,
+            TaskStatus::Open
+        );
     }
 }
