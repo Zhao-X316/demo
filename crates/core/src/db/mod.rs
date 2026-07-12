@@ -25,6 +25,10 @@ pub static CORE_MIGRATIONS: &[Migration] = &[
         id: "core_0003",
         sql: include_str!("schema/0003_decision_effects.sql"),
     },
+    Migration {
+        id: "core_0004",
+        sql: include_str!("schema/0004_memory_card_counters.sql"),
+    },
 ];
 
 /// 打开磁盘数据库并开启外键。
@@ -78,7 +82,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT count(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 3);
+        assert_eq!(n, 4);
         // 关键表存在
         let t: i64 = conn
             .query_row(
@@ -96,5 +100,84 @@ mod tests {
             )
             .unwrap();
         assert_eq!(effects, 1);
+    }
+
+    #[test]
+    fn counter_migration_repairs_one_provable_legacy_lapse() {
+        let conn = open_in_memory().unwrap();
+        run_migrations(&conn, &CORE_MIGRATIONS[..3]).unwrap();
+        conn.execute(
+            "INSERT INTO students (student_no, name) VALUES ('legacy', '旧数据')",
+            [],
+        )
+        .unwrap();
+        let student_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO memory_cards
+                (module, student_id, ref_type, ref_id, state, stage, interval_days, reps, lapses)
+             VALUES ('recitation', ?1, 'content', 7, 'lapsed', 0, 0, 3, 0)",
+            [student_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_cards
+                (module, student_id, ref_type, ref_id, state, stage, interval_days, reps, lapses)
+             VALUES ('recitation', ?1, 'content', 8, 'lapsed', 0, 0, 1, 0)",
+            [student_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO submissions
+                (module, student_id, ref_id, media_type, file_path, file_hash)
+             VALUES ('recitation', ?1, 8, 'audio', '/legacy.m4a', 'legacy-hash')",
+            [student_id],
+        )
+        .unwrap();
+        let submission_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO verdicts (submission_id, module, pass, answer_version)
+             VALUES (?1, 'recitation', 0, 1)",
+            [submission_id],
+        )
+        .unwrap();
+        let verdict_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO decision_effects
+                (verdict_id, revision, module, student_id, ref_type, ref_id, result,
+                 card_before_json, task_before_json, card_after_json, task_after_json,
+                 created_makeup_task_ids_json)
+             VALUES (?1, 1, 'recitation', ?2, 'content', 8, 'fail',
+                     'null', '[]', '{}', '[]', '[]')",
+            (verdict_id, student_id),
+        )
+        .unwrap();
+
+        run_migrations(&conn, CORE_MIGRATIONS).unwrap();
+        let counters: (i64, i64) = conn
+            .query_row(
+                "SELECT reps, lapses FROM memory_cards WHERE student_id=?1 AND ref_id=7",
+                [student_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(counters, (2, 1));
+        let ledger_protected: (i64, i64) = conn
+            .query_row(
+                "SELECT reps, lapses FROM memory_cards WHERE student_id=?1 AND ref_id=8",
+                [student_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(ledger_protected, (1, 0));
+
+        run_migrations(&conn, CORE_MIGRATIONS).unwrap();
+        let counters_again: (i64, i64) = conn
+            .query_row(
+                "SELECT reps, lapses FROM memory_cards WHERE student_id=?1 AND ref_id=7",
+                [student_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(counters_again, counters);
     }
 }

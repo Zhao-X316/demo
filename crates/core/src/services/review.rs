@@ -30,13 +30,16 @@ pub fn record_pass(
     scheduler: &dyn Scheduler,
 ) -> CoreResult<ScheduleOutcome> {
     let existing = memory_cards::get(conn, r.module, r.student_id, r.ref_type, r.ref_id)?;
-    let first = existing.is_none();
-    let prev_stage = existing.map(|c| c.stage).unwrap_or(0);
+    let first = existing
+        .as_ref()
+        .map(|card| card.state == CardState::Lapsed)
+        .unwrap_or(true);
+    let prev_stage = existing.as_ref().map(|card| card.stage).unwrap_or(0);
 
     let out = scheduler.next(prev_stage, quality, first);
     let due = today + Duration::days(out.interval_days as i64);
 
-    memory_cards::upsert_after_review(
+    memory_cards::upsert_after_pass(
         conn,
         &CardUpdate {
             module: r.module,
@@ -55,7 +58,7 @@ pub fn record_pass(
 
 /// 未达标一次：脱档回到起点（state=lapsed, stage=0），due 置当日，等待补背。
 pub fn record_lapse(conn: &Connection, r: &ReviewRef<'_>, today: NaiveDate) -> CoreResult<()> {
-    memory_cards::upsert_after_review(
+    memory_cards::upsert_after_lapse(
         conn,
         &CardUpdate {
             module: r.module,
@@ -145,5 +148,31 @@ mod tests {
             .unwrap();
         assert_eq!(card.stage, 0);
         assert_eq!(card.due_date.as_deref(), Some("2026-06-25"));
+        assert_eq!(card.reps, 0);
+        assert_eq!(card.lapses, 1);
+    }
+
+    #[test]
+    fn good_pass_after_lapse_restarts_from_first_stage_and_keeps_lapse_count() {
+        let (conn, sid) = setup();
+        let sched = LadderScheduler::default();
+        let r = ReviewRef { module: ModuleKey::Recitation, student_id: sid, ref_type: "content", ref_id: 7 };
+        let failed_on = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        record_lapse(&conn, &r, failed_on).unwrap();
+
+        let passed_on = NaiveDate::from_ymd_opt(2026, 6, 26).unwrap();
+        let out = record_pass(&conn, &r, ReviewQuality::Good, passed_on, &sched).unwrap();
+        assert_eq!(out.stage, 1);
+        assert_eq!(out.interval_days, 2);
+
+        let card = memory_cards::get(&conn, ModuleKey::Recitation, sid, "content", 7)
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.state, CardState::Review);
+        assert_eq!(card.stage, 1);
+        assert_eq!(card.interval_days, 2);
+        assert_eq!(card.due_date.as_deref(), Some("2026-06-28"));
+        assert_eq!(card.reps, 1);
+        assert_eq!(card.lapses, 1);
     }
 }

@@ -163,7 +163,7 @@ pub fn rollover(conn: &Connection, today: NaiveDate) -> CoreResult<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use suite_core::db::repo::memory_cards::{upsert_after_review, CardUpdate};
+    use suite_core::db::repo::memory_cards::{upsert_after_pass, CardUpdate};
     use suite_core::db::repo::students::{upsert as upsert_student, StudentInput};
     use suite_core::db::{open_in_memory, run_migrations, CORE_MIGRATIONS};
     use suite_core::models::CardState;
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn due_reviews_generated_once() {
         let (conn, sid) = setup();
-        upsert_after_review(
+        upsert_after_pass(
             &conn,
             &CardUpdate {
                 module: MODULE,

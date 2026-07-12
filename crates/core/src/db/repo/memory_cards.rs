@@ -61,7 +61,7 @@ pub fn get(
     Ok(c)
 }
 
-/// 一次通过后的排程结果落库（新卡插入、老卡更新，reps+1）。
+/// 一次复习后的卡片业务状态。
 pub struct CardUpdate<'a> {
     pub module: ModuleKey,
     pub student_id: i64,
@@ -74,7 +74,8 @@ pub struct CardUpdate<'a> {
     pub due_date: &'a str,
 }
 
-pub fn upsert_after_review(conn: &Connection, u: &CardUpdate<'_>) -> CoreResult<()> {
+/// 通过后的排程结果落库：只增加 reps，保留 lapses。
+pub fn upsert_after_pass(conn: &Connection, u: &CardUpdate<'_>) -> CoreResult<()> {
     conn.execute(
         "INSERT INTO memory_cards
             (module, student_id, ref_type, ref_id, state, stage, interval_days,
@@ -88,6 +89,37 @@ pub fn upsert_after_review(conn: &Connection, u: &CardUpdate<'_>) -> CoreResult<
             last_reviewed_at = datetime('now'),
             due_date = excluded.due_date,
             reps = memory_cards.reps + 1,
+            updated_at = datetime('now')",
+        (
+            u.module.as_str(),
+            u.student_id,
+            u.ref_type,
+            u.ref_id,
+            state_str(u.state),
+            u.stage,
+            u.interval_days,
+            u.quality,
+            u.due_date,
+        ),
+    )?;
+    Ok(())
+}
+
+/// 未达标后的脱档结果落库：只增加 lapses，保留 reps。
+pub fn upsert_after_lapse(conn: &Connection, u: &CardUpdate<'_>) -> CoreResult<()> {
+    conn.execute(
+        "INSERT INTO memory_cards
+            (module, student_id, ref_type, ref_id, state, stage, interval_days,
+             last_quality, last_reviewed_at, due_date, lapses, updated_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8, datetime('now'), ?9, 1, datetime('now'))
+         ON CONFLICT(module, student_id, ref_type, ref_id) DO UPDATE SET
+            state = excluded.state,
+            stage = excluded.stage,
+            interval_days = excluded.interval_days,
+            last_quality = excluded.last_quality,
+            last_reviewed_at = datetime('now'),
+            due_date = excluded.due_date,
+            lapses = memory_cards.lapses + 1,
             updated_at = datetime('now')",
         (
             u.module.as_str(),
@@ -189,7 +221,7 @@ mod tests {
         )
         .unwrap();
 
-        upsert_after_review(
+        upsert_after_pass(
             &conn,
             &CardUpdate {
                 module: ModuleKey::Recitation,
@@ -216,7 +248,7 @@ mod tests {
         assert!(none.is_empty());
 
         // 再次复习 → reps 自增、stage 推进
-        upsert_after_review(
+        upsert_after_pass(
             &conn,
             &CardUpdate {
                 module: ModuleKey::Recitation,

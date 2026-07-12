@@ -806,6 +806,112 @@ mod tests {
             other => panic!("expected Makeup, got {other:?}"),
         }
         assert!(tasks::exists_open_kind(&conn, MODULE, sid, cid, TaskKind::Makeup).unwrap());
+        let card = memory_cards::get(&conn, MODULE, sid, REF_TYPE, cid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.state, suite_core::models::CardState::Lapsed);
+        assert_eq!(card.stage, 0);
+        assert_eq!(card.reps, 0);
+        assert_eq!(card.lapses, 1);
+    }
+
+    #[test]
+    fn makeup_good_pass_restarts_schedule_without_erasing_lapse() {
+        let answer = "字".repeat(20);
+        let (conn, sid, cid, first_sub) = setup_imported(&answer);
+        let day1 = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        submissions::set_recognition(
+            &conn,
+            first_sub,
+            Some(&"字".repeat(10)),
+            "ok",
+            None,
+            Some(2500),
+        )
+        .unwrap();
+        score_submission(&conn, first_sub, &[], day1, &ScoreCfg::default()).unwrap();
+        human_decide(
+            &conn,
+            first_sub,
+            "fail",
+            None,
+            Some("teacher"),
+            day1,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+
+        let audio_path = std::env::temp_dir().join("jiaofu-suite-makeup-pass-test.m4a");
+        std::fs::write(&audio_path, b"makeup test audio evidence").unwrap();
+        let audio_path = audio_path.to_string_lossy().to_string();
+        let imported = import_one(
+            &conn,
+            &ImportItem {
+                file_path: &audio_path,
+                file_stem: "20260626_2023001_张三_C012",
+                file_hash: "h2",
+                duration_ms: Some(5000),
+            },
+        )
+        .unwrap();
+        let makeup_sub = match imported {
+            ImportOutcome::Imported { submission_id, .. } => submission_id,
+            other => panic!("makeup import failed: {other:?}"),
+        };
+        submissions::set_recognition(&conn, makeup_sub, Some(&answer), "ok", None, Some(5000))
+            .unwrap();
+        let words: Vec<_> = (0..20)
+            .map(|index| RecognizedWord {
+                text: "字".into(),
+                start_ms: index * 250,
+                end_ms: index * 250 + 250,
+            })
+            .collect();
+        let day2 = NaiveDate::from_ymd_opt(2026, 6, 26).unwrap();
+        let scored = score_submission(
+            &conn,
+            makeup_sub,
+            &words,
+            day2,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        assert!(scored.pass);
+        assert_eq!(scored.quality, "A");
+        let next = human_decide(
+            &conn,
+            makeup_sub,
+            "pass",
+            None,
+            Some("teacher"),
+            day2,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            next,
+            NextAction::Scheduled {
+                due_date: "2026-06-28".into(),
+                stage: 1,
+            }
+        );
+
+        let card = memory_cards::get(&conn, MODULE, sid, REF_TYPE, cid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.state, suite_core::models::CardState::Review);
+        assert_eq!(card.stage, 1);
+        assert_eq!(card.interval_days, 2);
+        assert_eq!(card.reps, 1);
+        assert_eq!(card.lapses, 1);
+        assert_eq!(card.due_date.as_deref(), Some("2026-06-28"));
+        assert_eq!(
+            tasks::get(&conn, score_task_id(&conn, makeup_sub))
+                .unwrap()
+                .unwrap()
+                .status,
+            TaskStatus::Passed
+        );
     }
 
     #[test]
@@ -888,6 +994,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(card.state, suite_core::models::CardState::Lapsed);
+        assert_eq!(card.stage, 0);
+        assert_eq!(card.reps, 0);
+        assert_eq!(card.lapses, 1);
         assert_eq!(
             tasks::get(&conn, score_task_id(&conn, sub))
                 .unwrap()
@@ -937,13 +1046,14 @@ mod tests {
         .unwrap();
         assert!(matches!(changed, NextAction::Scheduled { .. }));
         assert!(!tasks::exists_open_kind(&conn, MODULE, sid, cid, TaskKind::Makeup).unwrap());
-        assert_eq!(
-            memory_cards::get(&conn, MODULE, sid, REF_TYPE, cid)
-                .unwrap()
-                .unwrap()
-                .state,
-            suite_core::models::CardState::Review
-        );
+        let card = memory_cards::get(&conn, MODULE, sid, REF_TYPE, cid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.state, suite_core::models::CardState::Review);
+        assert_eq!(card.stage, 0);
+        assert_eq!(card.interval_days, 1);
+        assert_eq!(card.reps, 1);
+        assert_eq!(card.lapses, 0);
     }
 
     #[test]
