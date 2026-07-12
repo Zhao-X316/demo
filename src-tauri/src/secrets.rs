@@ -39,7 +39,7 @@ pub fn load(dir: &Path) -> std::io::Result<VolcanoCreds> {
 pub fn save(dir: &Path, creds: &VolcanoCreds) -> std::io::Result<()> {
     let p = secrets_path(dir);
     let s = serde_json::to_string_pretty(creds)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
     std::fs::write(&p, s)?;
     #[cfg(unix)]
     {

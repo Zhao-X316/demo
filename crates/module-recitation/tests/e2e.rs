@@ -15,7 +15,7 @@ const M: ModuleKey = ModuleKey::Recitation;
 
 fn imp<'a>(stem: &'a str, hash: &'a str) -> import::ImportItem<'a> {
     import::ImportItem {
-        file_path: stem,
+        file_path: "/tmp/jiaofu-suite-e2e.m4a",
         file_stem: stem,
         file_hash: hash,
         duration_ms: Some(5000),
@@ -24,6 +24,7 @@ fn imp<'a>(stem: &'a str, hash: &'a str) -> import::ImportItem<'a> {
 
 #[test]
 fn full_recitation_flow() {
+    std::fs::write("/tmp/jiaofu-suite-e2e.m4a", b"test audio evidence").unwrap();
     let conn = open_in_memory().unwrap();
     run_migrations(&conn, CORE_MIGRATIONS).unwrap();
     run_migrations(&conn, module_recitation::recitation_migrations()).unwrap();

@@ -56,11 +56,15 @@ pub struct SubmissionCard {
     status: String,
     file_path: String,
     recognized_text: Option<String>,
+    answer_text: Option<String>,
+    answer_version: Option<i64>,
+    scored_answer_version: Option<i64>,
     accuracy: Option<f64>,
     pass: Option<bool>,
     fluency: Option<f64>,
     quality: Option<String>,
     human_result: Option<String>,
+    human_note: Option<String>,
     machine_note: Option<String>,
 }
 
@@ -135,11 +139,15 @@ pub fn dashboard_today(state: State<'_, AppState>) -> R<TodayView> {
                     status: s.status,
                     file_path: s.file_path,
                     recognized_text: s.recognized_text,
+                    answer_text: content.as_ref().map(|x| x.answer_text.clone()),
+                    answer_version: content.as_ref().map(|x| x.answer_version),
+                    scored_answer_version: v.as_ref().map(|x| x.answer_version),
                     accuracy: v.as_ref().and_then(|x| x.primary_score),
                     pass: v.as_ref().and_then(|x| x.pass),
                     fluency: v.as_ref().and_then(|x| x.secondary_score),
                     quality: v.as_ref().and_then(|x| x.quality.clone()),
                     human_result: v.as_ref().and_then(|x| x.human_result.clone()),
+                    human_note: v.as_ref().and_then(|x| x.human_note.clone()),
                     machine_note: v.as_ref().and_then(|x| x.machine_note.clone()),
                 })
             }

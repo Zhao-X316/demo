@@ -273,6 +273,39 @@ fn json_decode<T: serde::de::DeserializeOwned>(raw: &str, label: &str) -> CoreRe
         .map_err(|err| CoreError::Invalid(format!("{label} 解析失败: {err}")))
 }
 
+fn validate_review_evidence(
+    submission: &suite_core::models::Submission,
+    content: &contents::RecContent,
+    verdict: &suite_core::models::Verdict,
+) -> CoreResult<()> {
+    if submission
+        .recognized_text
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Err(CoreError::Invalid(
+            "ASR 原文为空，不能只凭机器分数终审".into(),
+        ));
+    }
+    std::fs::File::open(&submission.file_path).map_err(|err| {
+        CoreError::Invalid(format!(
+            "录音文件不可读，不能终审；请重新定位或重开任务: {err}"
+        ))
+    })?;
+    if content.answer_text.trim().is_empty() {
+        return Err(CoreError::Invalid("标准答案为空，不能终审".into()));
+    }
+    if content.answer_version != verdict.answer_version {
+        return Err(CoreError::Invalid(format!(
+            "答案版本已变化（当前 v{}，评分 v{}），请先重新评分再终审",
+            content.answer_version, verdict.answer_version
+        )));
+    }
+    Ok(())
+}
+
 fn restore_effect(conn: &Connection, effect: &decision_effects::DecisionEffect) -> CoreResult<()> {
     let current_card = memory_cards::get(
         conn,
@@ -438,6 +471,8 @@ pub fn human_decide(
 
     let verdict = verdicts::get_by_submission(&tx, submission_id)?
         .ok_or_else(|| CoreError::NotFound("尚无判定，无法人工确认".into()))?;
+    let content = contents::get_by_id(&tx, content_id)?
+        .ok_or_else(|| CoreError::NotFound(format!("content {content_id}")))?;
     let existing_result = verdict.human_result.as_deref();
     let prior_submission_effect =
         decision_effects::latest_active_for_submission(&tx, submission_id)?;
@@ -497,6 +532,10 @@ pub fn human_decide(
         return Err(CoreError::Invalid(
             "已重开的旧提交不能再次终审，请对新提交进行判定".into(),
         ));
+    }
+
+    if existing_result != Some(result) {
+        validate_review_evidence(&sub, &content, &verdict)?;
     }
 
     let effect_to_replace = active_effect.or_else(|| {
@@ -606,10 +645,13 @@ mod tests {
             },
         )
         .unwrap();
+        let audio_path = std::env::temp_dir().join("jiaofu-suite-scoring-test.m4a");
+        std::fs::write(&audio_path, b"test audio evidence").unwrap();
+        let audio_path = audio_path.to_string_lossy().to_string();
         let out = import_one(
             &conn,
             &ImportItem {
-                file_path: "/x.m4a",
+                file_path: &audio_path,
                 file_stem: "20260625_2023001_张三_C012",
                 file_hash: "h1",
                 duration_ms: Some(5000),
@@ -661,6 +703,76 @@ mod tests {
         assert!(card.due_date.is_some());
         let t = tasks::get(&conn, task_id).unwrap().unwrap();
         assert_eq!(t.status, TaskStatus::Passed);
+    }
+
+    #[test]
+    fn human_decision_requires_asr_text_and_readable_audio() {
+        let answer = "床前明月光";
+        let (conn, _sid, _cid, sub) = setup_imported(answer);
+        let today = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        submissions::set_recognition(&conn, sub, Some(""), "ok", None, Some(5000)).unwrap();
+        score_submission(&conn, sub, &[], today, &ScoreCfg::default()).unwrap();
+        let empty_asr = human_decide(
+            &conn,
+            sub,
+            "pass",
+            None,
+            Some("teacher"),
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(empty_asr.contains("ASR 原文为空"));
+
+        submissions::set_recognition(&conn, sub, Some(answer), "ok", None, Some(5000)).unwrap();
+        submissions::set_file_path(&conn, sub, "/path/does/not/exist.m4a").unwrap();
+        let missing_audio = human_decide(
+            &conn,
+            sub,
+            "pass",
+            None,
+            Some("teacher"),
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(missing_audio.contains("录音文件不可读"));
+    }
+
+    #[test]
+    fn human_decision_rejects_changed_answer_version() {
+        let answer = "床前明月光";
+        let (conn, _sid, _cid, sub) = setup_imported(answer);
+        let today = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        submissions::set_recognition(&conn, sub, Some(answer), "ok", None, Some(5000)).unwrap();
+        score_submission(&conn, sub, &[], today, &ScoreCfg::default()).unwrap();
+
+        contents::upsert(
+            &conn,
+            &contents::ContentInput {
+                content_no: "C012",
+                title: "静夜思",
+                answer_text: "床前明月光疑是地上霜",
+                subject_id: None,
+                enabled: true,
+            },
+        )
+        .unwrap();
+
+        let err = human_decide(
+            &conn,
+            sub,
+            "pass",
+            None,
+            Some("teacher"),
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("答案版本已变化"));
     }
 
     #[test]
@@ -939,10 +1051,13 @@ mod tests {
             },
         )
         .unwrap();
+        let second_audio = std::env::temp_dir().join("jiaofu-suite-scoring-test-2.m4a");
+        std::fs::write(&second_audio, b"second test audio evidence").unwrap();
+        let second_audio = second_audio.to_string_lossy().to_string();
         let imported = import_one(
             &conn,
             &ImportItem {
-                file_path: "/y.m4a",
+                file_path: &second_audio,
                 file_stem: "20260626_2023001_张三_C012",
                 file_hash: "h2",
                 duration_ms: Some(5000),

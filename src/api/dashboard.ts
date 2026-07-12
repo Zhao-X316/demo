@@ -5,11 +5,15 @@ export interface SubmissionCard {
   status: string;
   file_path: string;
   recognized_text: string | null;
+  answer_text: string | null;
+  answer_version: number | null;
+  scored_answer_version: number | null;
   accuracy: number | null;
   pass: boolean | null;
   fluency: number | null;
   quality: string | null;
   human_result: string | null;
+  human_note: string | null;
   machine_note: string | null;
 }
 
