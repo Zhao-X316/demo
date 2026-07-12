@@ -139,6 +139,7 @@ pub struct MemoryCard {
     pub interval_days: i32,
     pub ease: f64,
     pub last_quality: Option<String>,
+    pub last_reviewed_at: Option<String>,
     pub due_date: Option<String>,
     pub reps: i32,
     pub lapses: i32,

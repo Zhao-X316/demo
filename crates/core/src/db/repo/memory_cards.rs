@@ -34,6 +34,7 @@ fn row_to_card(r: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryCard> {
         interval_days: r.get("interval_days")?,
         ease: r.get("ease")?,
         last_quality: r.get("last_quality")?,
+        last_reviewed_at: r.get("last_reviewed_at")?,
         due_date: r.get("due_date")?,
         reps: r.get("reps")?,
         lapses: r.get("lapses")?,
@@ -41,7 +42,7 @@ fn row_to_card(r: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryCard> {
 }
 
 const SELECT_COLS: &str = "id, module, student_id, ref_type, ref_id, state, stage, \
-    interval_days, ease, last_quality, due_date, reps, lapses";
+    interval_days, ease, last_quality, last_reviewed_at, due_date, reps, lapses";
 
 pub fn get(
     conn: &Connection,
@@ -100,6 +101,59 @@ pub fn upsert_after_review(conn: &Connection, u: &CardUpdate<'_>) -> CoreResult<
             u.due_date,
         ),
     )?;
+    Ok(())
+}
+
+/// 恢复一次人工判定应用前的完整卡片业务状态。
+pub fn restore(
+    conn: &Connection,
+    module: ModuleKey,
+    student_id: i64,
+    ref_type: &str,
+    ref_id: i64,
+    snapshot: Option<&MemoryCard>,
+) -> CoreResult<()> {
+    if let Some(card) = snapshot {
+        conn.execute(
+            "INSERT INTO memory_cards
+                (id, module, student_id, ref_type, ref_id, state, stage, interval_days,
+                 ease, last_quality, last_reviewed_at, due_date, reps, lapses, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,datetime('now'))
+             ON CONFLICT(module, student_id, ref_type, ref_id) DO UPDATE SET
+                state=excluded.state,
+                stage=excluded.stage,
+                interval_days=excluded.interval_days,
+                ease=excluded.ease,
+                last_quality=excluded.last_quality,
+                last_reviewed_at=excluded.last_reviewed_at,
+                due_date=excluded.due_date,
+                reps=excluded.reps,
+                lapses=excluded.lapses,
+                updated_at=datetime('now')",
+            (
+                card.id,
+                card.module.as_str(),
+                card.student_id,
+                card.ref_type.as_str(),
+                card.ref_id,
+                state_str(card.state),
+                card.stage,
+                card.interval_days,
+                card.ease,
+                card.last_quality.as_deref(),
+                card.last_reviewed_at.as_deref(),
+                card.due_date.as_deref(),
+                card.reps,
+                card.lapses,
+            ),
+        )?;
+    } else {
+        conn.execute(
+            "DELETE FROM memory_cards
+             WHERE module=?1 AND student_id=?2 AND ref_type=?3 AND ref_id=?4",
+            (module.as_str(), student_id, ref_type, ref_id),
+        )?;
+    }
     Ok(())
 }
 

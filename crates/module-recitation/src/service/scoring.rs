@@ -1,17 +1,18 @@
 //! 评分编排（见 背诵批改系统 §8.4）。
 //!
-//! 串起：取内容答案 → 评分(正确率+熟练度) → 写判定 →
-//! 通过则推进梯度复习；未通过则脱档 + 生成次日补背。
+//! 串起：取内容答案 → 评分(正确率+熟练度) → 写机器建议；
+//! 老师人工终审后才推进复习或生成补背。
 //! 词级时间戳由调用方从 ASR 结果解析后传入。
 
 use chrono::{Duration, NaiveDate};
 use rusqlite::Connection;
-use suite_core::db::repo::{submissions, tasks, verdicts};
+use std::collections::HashSet;
+use suite_core::db::repo::{decision_effects, memory_cards, submissions, tasks, verdicts};
 use suite_core::domain::accuracy::AccuracyCfg;
 use suite_core::domain::normalize::NormalizeCfg;
 use suite_core::domain::scheduler::{LadderScheduler, ReviewQuality};
 use suite_core::error::{CoreError, CoreResult};
-use suite_core::models::{ModuleKey, TaskStatus};
+use suite_core::models::{MemoryCard, ModuleKey, Task, TaskStatus};
 use suite_core::ports::{GradeResult, Grader, RecognizedWord};
 use suite_core::services::review::{self, ReviewRef};
 
@@ -43,6 +44,12 @@ impl Default for ScoreCfg {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NextAction {
+    /// 机器评分完成，等待老师终审；无排程副作用。
+    AwaitingHumanReview,
+    /// 重复提交相同人工结论；仅更新备注，不重复应用副作用。
+    Unchanged,
+    /// 未终审提交被老师重开，等待新录音。
+    Reopened,
     /// 通过 → 排入下次复习。
     Scheduled { due_date: String, stage: i32 },
     /// 未通过 → 生成补背（task_id 为 None 表示去重命中未新建）。
@@ -74,25 +81,23 @@ pub fn score_submission(
     conn: &Connection,
     submission_id: i64,
     words: &[RecognizedWord],
-    today: NaiveDate,
+    _today: NaiveDate,
     cfg: &ScoreCfg,
 ) -> CoreResult<ScoreOutcome> {
-    let sub = submissions::get(conn, submission_id)?
+    let tx = conn.unchecked_transaction()?;
+    let sub = submissions::get(&tx, submission_id)?
         .ok_or_else(|| CoreError::NotFound(format!("submission {submission_id}")))?;
-    let student_id = sub
-        .student_id
-        .ok_or_else(|| CoreError::Invalid("提交缺少学生".into()))?;
     let content_id = sub
         .ref_id
         .ok_or_else(|| CoreError::Invalid("提交缺少内容".into()))?;
     let asr_text = sub.recognized_text.clone().unwrap_or_default();
     let duration = sub.duration_ms.unwrap_or(0).max(0) as u64;
 
-    let content = contents::get_by_id(conn, content_id)?
+    let content = contents::get_by_id(&tx, content_id)?
         .ok_or_else(|| CoreError::NotFound(format!("content {content_id}")))?;
 
     let g = grade_and_record(
-        conn,
+        &tx,
         submission_id,
         &content,
         &asr_text,
@@ -101,30 +106,16 @@ pub fn score_submission(
         cfg,
     )?;
 
-    let review_ref = ReviewRef {
-        module: MODULE,
-        student_id,
-        ref_type: REF_TYPE,
-        ref_id: content_id,
-    };
-    let next = apply_outcome(
-        conn,
-        &review_ref,
-        sub.task_id,
-        g.grade.pass,
-        &g.quality,
-        today,
-        cfg,
-    )?;
-
-    Ok(ScoreOutcome {
+    let outcome = ScoreOutcome {
         verdict_id: g.verdict_id,
         accuracy: g.grade.primary_score,
         pass: g.grade.pass,
         fluency: g.grade.secondary_score.unwrap_or(0.0),
         quality: g.quality,
-        next,
-    })
+        next: NextAction::AwaitingHumanReview,
+    };
+    tx.commit()?;
+    Ok(outcome)
 }
 
 struct Graded {
@@ -240,18 +231,19 @@ pub fn rescore(
     words: &[RecognizedWord],
     cfg: &ScoreCfg,
 ) -> CoreResult<ScoreOutcome> {
-    let sub = submissions::get(conn, submission_id)?
+    let tx = conn.unchecked_transaction()?;
+    let sub = submissions::get(&tx, submission_id)?
         .ok_or_else(|| CoreError::NotFound(format!("submission {submission_id}")))?;
     let content_id = sub
         .ref_id
         .ok_or_else(|| CoreError::Invalid("提交缺少内容".into()))?;
     let asr_text = sub.recognized_text.clone().unwrap_or_default();
     let duration = sub.duration_ms.unwrap_or(0).max(0) as u64;
-    let content = contents::get_by_id(conn, content_id)?
+    let content = contents::get_by_id(&tx, content_id)?
         .ok_or_else(|| CoreError::NotFound(format!("content {content_id}")))?;
 
     let g = grade_and_record(
-        conn,
+        &tx,
         submission_id,
         &content,
         &asr_text,
@@ -259,20 +251,168 @@ pub fn rescore(
         duration,
         cfg,
     )?;
-    Ok(ScoreOutcome {
+    let outcome = ScoreOutcome {
         verdict_id: g.verdict_id,
         accuracy: g.grade.primary_score,
         pass: g.grade.pass,
         fluency: g.grade.secondary_score.unwrap_or(0.0),
         quality: g.quality,
-        next: NextAction::Scheduled {
-            due_date: String::new(),
-            stage: -1,
-        }, // 占位：rescore 不改排程
-    })
+        next: NextAction::AwaitingHumanReview,
+    };
+    tx.commit()?;
+    Ok(outcome)
 }
 
-/// 人工最终判定（pass|fail|reopen）。写入 human_result 并据此驱动复习/补背。
+fn json_encode<T: serde::Serialize>(value: &T, label: &str) -> CoreResult<String> {
+    serde_json::to_string(value)
+        .map_err(|err| CoreError::Invalid(format!("{label} 序列化失败: {err}")))
+}
+
+fn json_decode<T: serde::de::DeserializeOwned>(raw: &str, label: &str) -> CoreResult<T> {
+    serde_json::from_str(raw)
+        .map_err(|err| CoreError::Invalid(format!("{label} 解析失败: {err}")))
+}
+
+fn restore_effect(conn: &Connection, effect: &decision_effects::DecisionEffect) -> CoreResult<()> {
+    let current_card = memory_cards::get(
+        conn,
+        effect.module,
+        effect.student_id,
+        &effect.ref_type,
+        effect.ref_id,
+    )?;
+    let current_tasks = tasks::list_for_scope(
+        conn,
+        effect.module,
+        effect.student_id,
+        &effect.ref_type,
+        effect.ref_id,
+    )?;
+    if json_encode(&current_card, "当前卡片状态")? != effect.card_after_json
+        || json_encode(&current_tasks, "当前任务状态")? != effect.task_after_json
+    {
+        return Err(CoreError::Invalid(
+            "终审后任务或复习卡已被其他操作修改，拒绝自动覆盖；请先人工核对".into(),
+        ));
+    }
+
+    let card_before: Option<MemoryCard> = json_decode(&effect.card_before_json, "卡片前态")?;
+    let tasks_before: Vec<Task> = json_decode(&effect.task_before_json, "任务前态")?;
+    let created_makeup_ids: Vec<i64> =
+        json_decode(&effect.created_makeup_task_ids_json, "补背任务账本")?;
+
+    memory_cards::restore(
+        conn,
+        effect.module,
+        effect.student_id,
+        &effect.ref_type,
+        effect.ref_id,
+        card_before.as_ref(),
+    )?;
+    tasks::restore_statuses(conn, &tasks_before)?;
+    for task_id in created_makeup_ids {
+        tasks::set_status(conn, task_id, TaskStatus::Closed)?;
+    }
+    Ok(())
+}
+
+struct EffectApplication<'a, 'r> {
+    verdict_id: i64,
+    review_ref: &'a ReviewRef<'r>,
+    task_id: Option<i64>,
+    result: &'a str,
+    quality: &'a str,
+    today: NaiveDate,
+    cfg: &'a ScoreCfg,
+}
+
+fn apply_and_record_effect(
+    conn: &Connection,
+    application: &EffectApplication<'_, '_>,
+) -> CoreResult<NextAction> {
+    let EffectApplication {
+        verdict_id,
+        review_ref,
+        task_id,
+        result,
+        quality,
+        today,
+        cfg,
+    } = application;
+    let card_before = memory_cards::get(
+        conn,
+        review_ref.module,
+        review_ref.student_id,
+        review_ref.ref_type,
+        review_ref.ref_id,
+    )?;
+    let tasks_before = tasks::list_for_scope(
+        conn,
+        review_ref.module,
+        review_ref.student_id,
+        review_ref.ref_type,
+        review_ref.ref_id,
+    )?;
+    let before_ids: HashSet<i64> = tasks_before.iter().map(|task| task.id).collect();
+
+    let next = apply_outcome(
+        conn,
+        review_ref,
+        *task_id,
+        *result == "pass",
+        quality,
+        *today,
+        cfg,
+    )?;
+    let created_makeup_ids = match &next {
+        NextAction::Makeup {
+            task_id: Some(id),
+            ..
+        } if !before_ids.contains(id) => vec![*id],
+        _ => Vec::new(),
+    };
+
+    let card_after = memory_cards::get(
+        conn,
+        review_ref.module,
+        review_ref.student_id,
+        review_ref.ref_type,
+        review_ref.ref_id,
+    )?;
+    let tasks_after = tasks::list_for_scope(
+        conn,
+        review_ref.module,
+        review_ref.student_id,
+        review_ref.ref_type,
+        review_ref.ref_id,
+    )?;
+
+    let card_before_json = json_encode(&card_before, "卡片前态")?;
+    let task_before_json = json_encode(&tasks_before, "任务前态")?;
+    let card_after_json = json_encode(&card_after, "卡片后态")?;
+    let task_after_json = json_encode(&tasks_after, "任务后态")?;
+    let created_makeup_task_ids_json = json_encode(&created_makeup_ids, "补背任务账本")?;
+    decision_effects::insert(
+        conn,
+        &decision_effects::NewDecisionEffect {
+            verdict_id: *verdict_id,
+            revision: decision_effects::next_revision(conn, *verdict_id)?,
+            module: review_ref.module,
+            student_id: review_ref.student_id,
+            ref_type: review_ref.ref_type,
+            ref_id: review_ref.ref_id,
+            result,
+            card_before_json: &card_before_json,
+            task_before_json: &task_before_json,
+            card_after_json: &card_after_json,
+            task_after_json: &task_after_json,
+            created_makeup_task_ids_json: &created_makeup_task_ids_json,
+        },
+    )?;
+    Ok(next)
+}
+
+/// 人工最终判定（pass|fail|reopen）。所有多表副作用与效果账本在一个事务内提交。
 pub fn human_decide(
     conn: &Connection,
     submission_id: i64,
@@ -282,7 +422,12 @@ pub fn human_decide(
     today: NaiveDate,
     cfg: &ScoreCfg,
 ) -> CoreResult<NextAction> {
-    let sub = submissions::get(conn, submission_id)?
+    if !matches!(result, "pass" | "fail" | "reopen") {
+        return Err(CoreError::Invalid(format!("未知人工结论: {result}")));
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let sub = submissions::get(&tx, submission_id)?
         .ok_or_else(|| CoreError::NotFound(format!("submission {submission_id}")))?;
     let student_id = sub
         .student_id
@@ -291,45 +436,124 @@ pub fn human_decide(
         .ref_id
         .ok_or_else(|| CoreError::Invalid("提交缺少内容".into()))?;
 
-    let verdict = verdicts::get_by_submission(conn, submission_id)?
+    let verdict = verdicts::get_by_submission(&tx, submission_id)?
         .ok_or_else(|| CoreError::NotFound("尚无判定，无法人工确认".into()))?;
-    verdicts::set_human_result(conn, verdict.id, result, note, decided_by)?;
-    submissions::set_status(conn, submission_id, "confirmed")?;
+    let existing_result = verdict.human_result.as_deref();
+    let prior_submission_effect =
+        decision_effects::latest_active_for_submission(&tx, submission_id)?;
 
-    let quality = verdict.quality.clone().unwrap_or_else(|| "C".to_string());
+    if result == "reopen" {
+        if matches!(existing_result, Some("pass" | "fail")) || prior_submission_effect.is_some() {
+            return Err(CoreError::Invalid(
+                "已终审记录不能直接重开，请使用改判".into(),
+            ));
+        }
+        if existing_result.is_none() {
+            if let Some(task_id) = sub.task_id {
+                let task = tasks::get(&tx, task_id)?
+                    .ok_or_else(|| CoreError::NotFound(format!("task {task_id}")))?;
+                if matches!(task.status, TaskStatus::Passed | TaskStatus::Failed) {
+                    return Err(CoreError::Invalid(
+                        "检测到旧版机器评分已产生副作用，请先执行旧数据修复后再重开"
+                            .into(),
+                    ));
+                }
+            }
+        }
+        if let Some(task_id) = sub.task_id {
+            tasks::set_status(&tx, task_id, TaskStatus::Reopened)?;
+        }
+        verdicts::set_human_result(&tx, verdict.id, result, note, decided_by)?;
+        submissions::set_status(&tx, submission_id, "confirmed")?;
+        tx.commit()?;
+        return Ok(if existing_result == Some("reopen") {
+            NextAction::Unchanged
+        } else {
+            NextAction::Reopened
+        });
+    }
+
     let review_ref = ReviewRef {
         module: MODULE,
         student_id,
         ref_type: REF_TYPE,
         ref_id: content_id,
     };
-    let current_task_status = match sub.task_id {
-        Some(tid) => tasks::get(conn, tid)?.map(|t| t.status),
-        None => None,
-    };
+    let active_effect = decision_effects::active_for_verdict(&tx, verdict.id)?;
 
-    match result {
-        "pass" if current_task_status == Some(TaskStatus::Passed) => Ok(NextAction::Scheduled {
-            due_date: String::new(),
-            stage: -1,
-        }),
-        "fail" if current_task_status == Some(TaskStatus::Failed) => Ok(NextAction::Makeup {
-            task_id: None,
-            due_date: String::new(),
-        }),
-        "pass" => apply_outcome(conn, &review_ref, sub.task_id, true, &quality, today, cfg),
-        "fail" => apply_outcome(conn, &review_ref, sub.task_id, false, &quality, today, cfg),
-        "reopen" => {
-            if let Some(tid) = sub.task_id {
-                tasks::set_status(conn, tid, TaskStatus::Reopened)?;
-            }
-            Ok(NextAction::Makeup {
-                task_id: None,
-                due_date: String::new(),
-            })
+    if existing_result == Some(result) {
+        if active_effect.is_none() {
+            return Err(CoreError::Invalid(
+                "终审结果缺少效果账本，拒绝猜测历史状态；请先执行旧数据修复".into(),
+            ));
         }
-        other => Err(CoreError::Invalid(format!("未知人工结论: {other}"))),
+        verdicts::set_human_result(&tx, verdict.id, result, note, decided_by)?;
+        submissions::set_status(&tx, submission_id, "confirmed")?;
+        tx.commit()?;
+        return Ok(NextAction::Unchanged);
     }
+
+    if existing_result == Some("reopen") {
+        return Err(CoreError::Invalid(
+            "已重开的旧提交不能再次终审，请对新提交进行判定".into(),
+        ));
+    }
+
+    let effect_to_replace = active_effect.or_else(|| {
+        if existing_result.is_none() {
+            prior_submission_effect
+        } else {
+            None
+        }
+    });
+
+    if let Some(effect) = effect_to_replace {
+        let latest = decision_effects::latest_active_for_scope(
+            &tx,
+            MODULE,
+            student_id,
+            REF_TYPE,
+            content_id,
+        )?
+        .ok_or_else(|| CoreError::Invalid("效果账本状态不完整".into()))?;
+        if latest.id != effect.id {
+            return Err(CoreError::Invalid(
+                "该记录之后已有终审，请先逆序改判较新的记录".into(),
+            ));
+        }
+        restore_effect(&tx, &effect)?;
+        decision_effects::mark_reverted(&tx, effect.id)?;
+    } else if existing_result.is_some() {
+        return Err(CoreError::Invalid(
+            "历史终审缺少效果账本，拒绝猜测并覆盖聚合状态".into(),
+        ));
+    } else if let Some(task_id) = sub.task_id {
+        let task = tasks::get(&tx, task_id)?
+            .ok_or_else(|| CoreError::NotFound(format!("task {task_id}")))?;
+        if matches!(task.status, TaskStatus::Passed | TaskStatus::Failed) {
+            return Err(CoreError::Invalid(
+                "检测到旧版机器评分已产生副作用，请先执行旧数据修复后再终审".into(),
+            ));
+        }
+    }
+
+    let quality = verdict.quality.clone().unwrap_or_else(|| "C".to_string());
+    let next = apply_and_record_effect(
+        &tx,
+        &EffectApplication {
+            verdict_id: verdict.id,
+            review_ref: &review_ref,
+            task_id: sub.task_id,
+            result,
+            quality: &quality,
+            today,
+            cfg,
+        },
+    )?;
+    verdicts::set_human_result(&tx, verdict.id, result, note, decided_by)?;
+    submissions::set_status(&tx, submission_id, "confirmed")?;
+    tx.commit()?;
+    Ok(next)
 }
 
 #[cfg(test)]
@@ -400,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn pass_schedules_review_and_marks_task_passed() {
+    fn machine_pass_waits_for_human_then_schedules_review() {
         let answer = "床前明月光";
         let (conn, sid, cid, sub) = setup_imported(answer);
         // ASR 完美识别
@@ -410,21 +634,37 @@ mod tests {
 
         assert!(out.pass);
         assert_eq!(out.accuracy, 100.0);
-        assert!(matches!(out.next, NextAction::Scheduled { .. }));
-        // 卡片已建立、due 已写
+        assert_eq!(out.next, NextAction::AwaitingHumanReview);
+        assert!(memory_cards::get(&conn, MODULE, sid, REF_TYPE, cid)
+            .unwrap()
+            .is_none());
+        let task_id = score_task_id(&conn, sub);
+        assert_eq!(
+            tasks::get(&conn, task_id).unwrap().unwrap().status,
+            TaskStatus::Submitted
+        );
+
+        let next = human_decide(
+            &conn,
+            sub,
+            "pass",
+            Some("确认通过"),
+            Some("teacher"),
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        assert!(matches!(next, NextAction::Scheduled { .. }));
         let card = memory_cards::get(&conn, MODULE, sid, REF_TYPE, cid)
             .unwrap()
             .unwrap();
         assert!(card.due_date.is_some());
-        // 任务标记通过
-        let t = tasks::get(&conn, score_task_id(&conn, sub))
-            .unwrap()
-            .unwrap();
+        let t = tasks::get(&conn, task_id).unwrap().unwrap();
         assert_eq!(t.status, TaskStatus::Passed);
     }
 
     #[test]
-    fn fail_generates_makeup_and_marks_task_failed() {
+    fn machine_fail_waits_for_human_then_generates_makeup() {
         // 答案两句，只背一句 → < 95%
         let (conn, sid, cid, sub) = setup_imported("床前明月光疑是地上霜");
         submissions::set_recognition(&conn, sub, Some("床前明月光"), "ok", None, Some(3000))
@@ -433,7 +673,20 @@ mod tests {
         let out = score_submission(&conn, sub, &[], today, &ScoreCfg::default()).unwrap();
 
         assert!(!out.pass);
-        match out.next {
+        assert_eq!(out.next, NextAction::AwaitingHumanReview);
+        assert!(!tasks::exists_open_kind(&conn, MODULE, sid, cid, TaskKind::Makeup).unwrap());
+
+        let next = human_decide(
+            &conn,
+            sub,
+            "fail",
+            Some("确认未通过"),
+            Some("teacher"),
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        match next {
             NextAction::Makeup { task_id, due_date } => {
                 assert!(task_id.is_some());
                 assert_eq!(due_date, "2026-06-26"); // 次日
@@ -441,6 +694,398 @@ mod tests {
             other => panic!("expected Makeup, got {other:?}"),
         }
         assert!(tasks::exists_open_kind(&conn, MODULE, sid, cid, TaskKind::Makeup).unwrap());
+    }
+
+    #[test]
+    fn repeated_human_decision_is_idempotent() {
+        let answer = "床前明月光";
+        let (conn, sid, cid, sub) = setup_imported(answer);
+        submissions::set_recognition(&conn, sub, Some(answer), "ok", None, Some(5000)).unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        score_submission(&conn, sub, &[], today, &ScoreCfg::default()).unwrap();
+        human_decide(
+            &conn,
+            sub,
+            "pass",
+            None,
+            Some("teacher"),
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        let first = memory_cards::get(&conn, MODULE, sid, REF_TYPE, cid)
+            .unwrap()
+            .unwrap();
+
+        let next = human_decide(
+            &conn,
+            sub,
+            "pass",
+            Some("补充备注"),
+            Some("teacher"),
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        assert_eq!(next, NextAction::Unchanged);
+        let second = memory_cards::get(&conn, MODULE, sid, REF_TYPE, cid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.reps, first.reps);
+        assert_eq!(second.stage, first.stage);
+        let effects: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM decision_effects WHERE state='active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(effects, 1);
+    }
+
+    #[test]
+    fn pass_to_fail_restores_before_state_then_applies_new_effect() {
+        let answer = "床前明月光";
+        let (conn, sid, cid, sub) = setup_imported(answer);
+        submissions::set_recognition(&conn, sub, Some(answer), "ok", None, Some(5000)).unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        score_submission(&conn, sub, &[], today, &ScoreCfg::default()).unwrap();
+        human_decide(
+            &conn,
+            sub,
+            "pass",
+            None,
+            Some("teacher"),
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+
+        let changed = human_decide(
+            &conn,
+            sub,
+            "fail",
+            Some("改判未通过"),
+            Some("teacher"),
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        assert!(matches!(changed, NextAction::Makeup { .. }));
+        let card = memory_cards::get(&conn, MODULE, sid, REF_TYPE, cid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.state, suite_core::models::CardState::Lapsed);
+        assert_eq!(
+            tasks::get(&conn, score_task_id(&conn, sub))
+                .unwrap()
+                .unwrap()
+                .status,
+            TaskStatus::Failed
+        );
+        assert!(tasks::exists_open_kind(&conn, MODULE, sid, cid, TaskKind::Makeup).unwrap());
+        let (active, reverted): (i64, i64) = conn
+            .query_row(
+                "SELECT sum(state='active'), sum(state='reverted') FROM decision_effects",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((active, reverted), (1, 1));
+    }
+
+    #[test]
+    fn fail_to_pass_closes_effect_created_makeup() {
+        let (conn, sid, cid, sub) = setup_imported("床前明月光疑是地上霜");
+        submissions::set_recognition(&conn, sub, Some("床前明月光"), "ok", None, Some(3000))
+            .unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        score_submission(&conn, sub, &[], today, &ScoreCfg::default()).unwrap();
+        human_decide(
+            &conn,
+            sub,
+            "fail",
+            None,
+            Some("teacher"),
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        assert!(tasks::exists_open_kind(&conn, MODULE, sid, cid, TaskKind::Makeup).unwrap());
+
+        let changed = human_decide(
+            &conn,
+            sub,
+            "pass",
+            Some("改判通过"),
+            Some("teacher"),
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        assert!(matches!(changed, NextAction::Scheduled { .. }));
+        assert!(!tasks::exists_open_kind(&conn, MODULE, sid, cid, TaskKind::Makeup).unwrap());
+        assert_eq!(
+            memory_cards::get(&conn, MODULE, sid, REF_TYPE, cid)
+                .unwrap()
+                .unwrap()
+                .state,
+            suite_core::models::CardState::Review
+        );
+    }
+
+    #[test]
+    fn human_decision_rolls_back_when_effect_write_fails() {
+        let answer = "床前明月光";
+        let (conn, sid, cid, sub) = setup_imported(answer);
+        submissions::set_recognition(&conn, sub, Some(answer), "ok", None, Some(5000)).unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        score_submission(&conn, sub, &[], today, &ScoreCfg::default()).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_decision_effect_insert
+             BEFORE INSERT ON decision_effects
+             BEGIN
+               SELECT RAISE(ABORT, 'forced decision effect failure');
+             END;",
+        )
+        .unwrap();
+
+        assert!(human_decide(
+            &conn,
+            sub,
+            "pass",
+            None,
+            Some("teacher"),
+            today,
+            &ScoreCfg::default(),
+        )
+        .is_err());
+        assert!(memory_cards::get(&conn, MODULE, sid, REF_TYPE, cid)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            tasks::get(&conn, score_task_id(&conn, sub))
+                .unwrap()
+                .unwrap()
+                .status,
+            TaskStatus::Submitted
+        );
+        assert!(verdicts::get_by_submission(&conn, sub)
+            .unwrap()
+            .unwrap()
+            .human_result
+            .is_none());
+    }
+
+    #[test]
+    fn machine_scoring_rolls_back_verdict_when_status_write_fails() {
+        let answer = "床前明月光";
+        let (conn, _sid, _cid, sub) = setup_imported(answer);
+        submissions::set_recognition(&conn, sub, Some(answer), "ok", None, Some(5000)).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_scored_status
+             BEFORE UPDATE OF status ON submissions
+             WHEN NEW.status='scored'
+             BEGIN
+               SELECT RAISE(ABORT, 'forced scored status failure');
+             END;",
+        )
+        .unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+
+        assert!(score_submission(&conn, sub, &[], today, &ScoreCfg::default()).is_err());
+        let verdicts_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM verdicts WHERE submission_id=?1",
+                [sub],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(verdicts_count, 0);
+        assert_eq!(submissions::get(&conn, sub).unwrap().unwrap().status, "pending");
+    }
+
+    #[test]
+    fn older_decision_cannot_change_after_newer_scope_effect() {
+        let answer = "床前明月光";
+        let (conn, sid, cid, first_sub) = setup_imported(answer);
+        let day1 = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        submissions::set_recognition(&conn, first_sub, Some(answer), "ok", None, Some(5000))
+            .unwrap();
+        score_submission(&conn, first_sub, &[], day1, &ScoreCfg::default()).unwrap();
+        human_decide(
+            &conn,
+            first_sub,
+            "pass",
+            None,
+            Some("teacher"),
+            day1,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+
+        tasks::insert(
+            &conn,
+            &NewTask {
+                module: MODULE,
+                student_id: sid,
+                subject_id: None,
+                ref_type: REF_TYPE,
+                ref_id: cid,
+                kind: TaskKind::Normal,
+                due_date: "2026-06-26",
+                source_task_id: None,
+                card_id: None,
+            },
+        )
+        .unwrap();
+        let imported = import_one(
+            &conn,
+            &ImportItem {
+                file_path: "/y.m4a",
+                file_stem: "20260626_2023001_张三_C012",
+                file_hash: "h2",
+                duration_ms: Some(5000),
+            },
+        )
+        .unwrap();
+        let second_sub = match imported {
+            ImportOutcome::Imported { submission_id, .. } => submission_id,
+            other => panic!("second import failed: {other:?}"),
+        };
+        let day2 = NaiveDate::from_ymd_opt(2026, 6, 26).unwrap();
+        submissions::set_recognition(&conn, second_sub, Some(answer), "ok", None, Some(5000))
+            .unwrap();
+        score_submission(&conn, second_sub, &[], day2, &ScoreCfg::default()).unwrap();
+        human_decide(
+            &conn,
+            second_sub,
+            "pass",
+            None,
+            Some("teacher"),
+            day2,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        let before = memory_cards::get(&conn, MODULE, sid, REF_TYPE, cid)
+            .unwrap()
+            .unwrap();
+
+        let err = human_decide(
+            &conn,
+            first_sub,
+            "fail",
+            None,
+            Some("teacher"),
+            day2,
+            &ScoreCfg::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("先逆序改判较新的记录"));
+        let after = memory_cards::get(&conn, MODULE, sid, REF_TYPE, cid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.reps, before.reps);
+        assert_eq!(after.stage, before.stage);
+    }
+
+    #[test]
+    fn rescored_submission_replaces_its_prior_effect_instead_of_double_applying() {
+        let answer = "床前明月光";
+        let (conn, sid, cid, sub) = setup_imported(answer);
+        submissions::set_recognition(&conn, sub, Some(answer), "ok", None, Some(5000)).unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        score_submission(&conn, sub, &[], today, &ScoreCfg::default()).unwrap();
+        human_decide(
+            &conn,
+            sub,
+            "pass",
+            None,
+            Some("teacher"),
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+
+        // 同一 submission 重评分会产生新的 machine verdict，但不能叠加旧终审效果。
+        rescore(&conn, sub, &[], &ScoreCfg::default()).unwrap();
+        human_decide(
+            &conn,
+            sub,
+            "fail",
+            Some("按新答案改判"),
+            Some("teacher"),
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+
+        let card = memory_cards::get(&conn, MODULE, sid, REF_TYPE, cid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.state, suite_core::models::CardState::Lapsed);
+        let (active, reverted): (i64, i64) = conn
+            .query_row(
+                "SELECT sum(state='active'), sum(state='reverted') FROM decision_effects",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((active, reverted), (1, 1));
+    }
+
+    #[test]
+    fn changed_scope_after_confirmation_blocks_automatic_reversal() {
+        let answer = "床前明月光";
+        let (conn, sid, cid, sub) = setup_imported(answer);
+        submissions::set_recognition(&conn, sub, Some(answer), "ok", None, Some(5000)).unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        score_submission(&conn, sub, &[], today, &ScoreCfg::default()).unwrap();
+        human_decide(
+            &conn,
+            sub,
+            "pass",
+            None,
+            Some("teacher"),
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+
+        let task_id = score_task_id(&conn, sub);
+        tasks::set_status(&conn, task_id, TaskStatus::Closed).unwrap();
+        let before = memory_cards::get(&conn, MODULE, sid, REF_TYPE, cid)
+            .unwrap()
+            .unwrap();
+        let err = human_decide(
+            &conn,
+            sub,
+            "fail",
+            None,
+            Some("teacher"),
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("拒绝自动覆盖"));
+        assert_eq!(
+            tasks::get(&conn, task_id).unwrap().unwrap().status,
+            TaskStatus::Closed
+        );
+        let after = memory_cards::get(&conn, MODULE, sid, REF_TYPE, cid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.reps, before.reps);
+        assert_eq!(
+            verdicts::get_by_submission(&conn, sub)
+                .unwrap()
+                .unwrap()
+                .human_result
+                .as_deref(),
+            Some("pass")
+        );
     }
 
     fn score_task_id(conn: &Connection, sub: i64) -> i64 {

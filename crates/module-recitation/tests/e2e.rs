@@ -99,13 +99,35 @@ fn full_recitation_flow() {
     let r1 = scoring::score_submission(&conn, sub1, &[], today, &cfg).unwrap();
     assert!(r1.pass);
     assert_eq!(r1.accuracy, 100.0);
-    assert!(matches!(r1.next, scoring::NextAction::Scheduled { .. }));
+    assert_eq!(r1.next, scoring::NextAction::AwaitingHumanReview);
 
     // S2 只背一半 → 未通过 → 补背
     submissions::set_recognition(&conn, sub2, Some("床前明月光"), "ok", None, Some(3000)).unwrap();
     let r2 = scoring::score_submission(&conn, sub2, &[], today, &cfg).unwrap();
     assert!(!r2.pass);
-    assert!(matches!(r2.next, scoring::NextAction::Makeup { .. }));
+    assert_eq!(r2.next, scoring::NextAction::AwaitingHumanReview);
+
+    // 机器评分只给建议；老师确认后才产生任务/复习副作用。
+    scoring::human_decide(
+        &conn,
+        sub1,
+        "pass",
+        Some("老师确认"),
+        Some("teacher"),
+        today,
+        &cfg,
+    )
+    .unwrap();
+    scoring::human_decide(
+        &conn,
+        sub2,
+        "fail",
+        Some("老师确认"),
+        Some("teacher"),
+        today,
+        &cfg,
+    )
+    .unwrap();
 
     // 任务状态
     let t_s1 = task_repo::find_open_match(&conn, M, s1.id, c1.id, due).unwrap();
@@ -126,7 +148,7 @@ fn full_recitation_flow() {
     assert_eq!(rt.kind, TaskKind::Review);
     assert_eq!(rt.status, TaskStatus::Open);
 
-    // 人工把 S2 改判为通过 → 补背作废、卡片转复习
+    // 人工把 S2 从 fail 改判为 pass → 按效果账本回滚补背，再排复习
     let confirmed = scoring::human_decide(
         &conn,
         sub2,

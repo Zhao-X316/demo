@@ -48,14 +48,14 @@ export default function Today() {
     (t) =>
       t.submission &&
       !t.submission.human_result &&
-      (t.status === "passed" || t.status === "failed"),
+      t.submission.pass !== null,
   );
   const confirmOne = async (t: TaskCard, result?: "pass" | "fail" | "reopen") => {
     if (!t.submission) return;
     setReviewBusy(true);
     setErr("");
     try {
-      const r = result ?? (t.status === "passed" ? "pass" : "fail");
+      const r = result ?? (t.submission.pass ? "pass" : "fail");
       await humanDecide(t.submission.submission_id, r);
       setToast(r === "pass" ? "已确认通过" : r === "fail" ? "已确认不通过" : "已重开任务");
       await load();
@@ -71,7 +71,7 @@ export default function Today() {
     try {
       for (const t of confirmable) {
         if (!t.submission) continue;
-        await humanDecide(t.submission.submission_id, t.status === "passed" ? "pass" : "fail");
+        await humanDecide(t.submission.submission_id, t.submission.pass ? "pass" : "fail");
         ok += 1;
       }
       setToast(`已一键确认 ${ok} 条系统判定`);
@@ -213,19 +213,27 @@ function TaskRow({
         </>
       )}
       {t.status === "submitted" && sub && <span className="tag wait">待确认</span>}
+      {t.status === "submitted" && sub && sub.pass !== null && (
+        <>
+          <span className={"acc " + (sub.pass ? "p" : "f") + " num"}>{sub.accuracy ?? ""}</span>
+          <span className={"tag " + (sub.pass ? "pass" : "fail")}>
+            系统建议{sub.pass ? "通过" : "不通过"}{sub.quality ? ` · ${sub.quality}` : ""}
+          </span>
+        </>
+      )}
       {!sub && <span className="tag">未交</span>}
       {sub?.human_result && (
         <span className="tag">
           老师{sub.human_result === "pass" ? "确认通过" : sub.human_result === "fail" ? "确认不通过" : "已重开"}
         </span>
       )}
-      {sub && !sub.human_result && (t.status === "passed" || t.status === "failed") && (
+      {sub && !sub.human_result && sub.pass !== null && (
         <div style={{ display: "flex", gap: 6 }}>
           <button className="sm" disabled={busy} onClick={() => onDecide(t)}>
-            确认
+            确认系统建议
           </button>
-          <button className="sm" disabled={busy} onClick={() => onDecide(t, t.status === "passed" ? "fail" : "pass")}>
-            改判{t.status === "passed" ? "不通过" : "通过"}
+          <button className="sm" disabled={busy} onClick={() => onDecide(t, sub.pass ? "fail" : "pass")}>
+            判为{sub.pass ? "不通过" : "通过"}
           </button>
           <button className="sm" disabled={busy} onClick={() => onDecide(t, "reopen")}>
             重开

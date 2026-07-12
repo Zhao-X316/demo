@@ -21,6 +21,10 @@ pub static CORE_MIGRATIONS: &[Migration] = &[
         id: "core_0002",
         sql: include_str!("schema/0002_class_textbook.sql"),
     },
+    Migration {
+        id: "core_0003",
+        sql: include_str!("schema/0003_decision_effects.sql"),
+    },
 ];
 
 /// 打开磁盘数据库并开启外键。
@@ -74,7 +78,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT count(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 2);
+        assert_eq!(n, 3);
         // 关键表存在
         let t: i64 = conn
             .query_row(
@@ -84,5 +88,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(t, 1);
+        let effects: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='decision_effects'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(effects, 1);
     }
 }

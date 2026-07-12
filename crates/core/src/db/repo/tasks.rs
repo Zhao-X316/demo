@@ -233,6 +233,38 @@ pub fn close_open_kind(
     Ok(n)
 }
 
+/// 同一学生+内容的全部任务，用于人工终审前态快照。
+pub fn list_for_scope(
+    conn: &Connection,
+    module: ModuleKey,
+    student_id: i64,
+    ref_type: &str,
+    ref_id: i64,
+) -> CoreResult<Vec<Task>> {
+    let sql = format!(
+        "SELECT {COLS} FROM tasks
+         WHERE module=?1 AND student_id=?2 AND ref_type=?3 AND ref_id=?4 ORDER BY id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        (module.as_str(), student_id, ref_type, ref_id),
+        row_to_task,
+    )?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// 恢复前态任务的状态；效果中新建的任务由调用方单独软关闭。
+pub fn restore_statuses(conn: &Connection, snapshots: &[Task]) -> CoreResult<()> {
+    for task in snapshots {
+        set_status(conn, task.id, task.status)?;
+    }
+    Ok(())
+}
+
 /// 今日任务列表。
 pub fn list_by_date(conn: &Connection, module: ModuleKey, date: &str) -> CoreResult<Vec<Task>> {
     let sql = format!("SELECT {COLS} FROM tasks WHERE module=?1 AND due_date=?2 ORDER BY kind, id");
