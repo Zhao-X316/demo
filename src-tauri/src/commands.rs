@@ -11,8 +11,9 @@ use suite_core::db::repo::students::{self, StudentInput};
 use suite_core::db::repo::{classes, file_ledger, submissions, tasks, verdicts};
 use suite_core::models::{Class, ModuleKey, Student, TaskKind, TaskStatus, Verdict};
 
+use crate::backup::{self, BackupCatalog, BackupInfo, BackupKind};
 use crate::secrets::{self, VolcanoCreds};
-use crate::state::AppState;
+use crate::state::{self, AppState};
 
 const MODULE: ModuleKey = ModuleKey::Recitation;
 
@@ -373,6 +374,36 @@ pub fn config_get(state: State<'_, AppState>) -> R<RecitationConfig> {
 pub fn config_set(state: State<'_, AppState>, cfg: RecitationConfig) -> R<()> {
     let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     cfg.save(&conn).map_err(e)
+}
+
+// ───────────────────────── 本地数据库备份/恢复 ─────────────────────────
+
+#[tauri::command]
+pub fn backups_list(state: State<'_, AppState>) -> R<BackupCatalog> {
+    backup::list_backups(&state.data_dir.join("backups")).map_err(e)
+}
+
+#[tauri::command]
+pub fn backup_create(state: State<'_, AppState>) -> R<BackupInfo> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    backup::create_backup(
+        &conn,
+        &state.data_dir.join("backups"),
+        BackupKind::Manual,
+    )
+    .map_err(e)
+}
+
+#[tauri::command]
+pub fn backup_restore(state: State<'_, AppState>, file_name: String) -> R<BackupInfo> {
+    let mut conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    backup::restore_with(
+        &mut conn,
+        &state.data_dir.join("backups"),
+        &file_name,
+        state::run_all_migrations,
+    )
+    .map_err(e)
 }
 
 // ───────────────────────── 设置：火山凭据（本地文件） ─────────────────────────

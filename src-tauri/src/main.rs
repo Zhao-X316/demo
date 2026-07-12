@@ -3,6 +3,7 @@
 
 mod asr;
 mod audio;
+mod backup;
 mod commands;
 mod exam_commands;
 mod secrets;
@@ -37,6 +38,9 @@ fn main() {
             commands::seed_demo,
             commands::config_get,
             commands::config_set,
+            commands::backups_list,
+            commands::backup_create,
+            commands::backup_restore,
             commands::secrets_get,
             commands::secrets_set,
             commands::students_upsert,
