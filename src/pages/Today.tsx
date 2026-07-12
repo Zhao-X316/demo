@@ -70,7 +70,7 @@ export default function Today() {
     if (filter === "all") return true;
     if (filter === "sub") return t.submission != null;
     if (filter === "pass") return t.status === "passed";
-    if (filter === "wait") return t.submission != null && t.status === "submitted";
+    if (filter === "wait") return t.submission?.pending_review === true;
     if (filter === "makeup") return t.kind === "makeup";
     return true;
   };
@@ -178,7 +178,7 @@ function TaskRow({
   );
   const canDecide = audioState === "ready" && hasAsr && hasAnswer && versionMatches;
   const machineResult = sub?.pass ? "通过" : "不通过";
-  const canReview = Boolean(sub && (sub.pass !== null || sub.human_result));
+  const canReview = Boolean(sub && (sub.pending_review || sub.human_result));
   return (
     <div className="task-block">
       <div className="row">
@@ -206,8 +206,14 @@ function TaskRow({
             <span className="tag makeup">排补背</span>
           </>
         )}
-        {t.status === "submitted" && sub && <span className="tag wait">待确认</span>}
-        {t.status === "submitted" && sub && sub.pass !== null && (
+        {sub?.pending_review && <span className="tag wait">待确认</span>}
+        {sub && !sub.pending_review && !sub.human_result && sub.recognize_status === "failed" && (
+          <span className="tag fail">识别失败 · 请到批改台处理</span>
+        )}
+        {sub && !sub.pending_review && !sub.human_result && sub.recognize_status !== "failed" && (
+          <span className="tag">{sub.recognize_status === "processing" ? "识别中" : "待评分"}</span>
+        )}
+        {sub?.pending_review && sub.pass !== null && (
           <>
             <span className={"acc " + (sub.pass ? "p" : "f") + " num"}>{sub.accuracy ?? ""}</span>
             <span className={"tag " + (sub.pass ? "pass" : "fail")}>

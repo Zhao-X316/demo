@@ -9,7 +9,7 @@ use module_recitation::db::contents::{self, ContentInput, RecContent};
 use module_recitation::service::{import, matching, recognition, scoring, tasks as task_svc};
 use suite_core::db::repo::students::{self, StudentInput};
 use suite_core::db::repo::{classes, file_ledger, submissions, tasks, verdicts};
-use suite_core::models::{Class, MediaType, ModuleKey, Student, TaskKind, TaskStatus};
+use suite_core::models::{Class, MediaType, ModuleKey, Student, TaskKind, TaskStatus, Verdict};
 
 use crate::secrets::{self, VolcanoCreds};
 use crate::state::AppState;
@@ -48,12 +48,19 @@ fn status_str(s: TaskStatus) -> &'static str {
     }
 }
 
+/// 待老师确认的唯一口径：最新机器判定已存在，但老师还没有落最终结论。
+fn is_pending_teacher_review(verdict: Option<&Verdict>) -> bool {
+    verdict.is_some_and(|value| value.human_result.is_none())
+}
+
 // ───────────────────────── DTO ─────────────────────────
 
 #[derive(Serialize)]
 pub struct SubmissionCard {
     submission_id: i64,
     status: String,
+    recognize_status: String,
+    pending_review: bool,
     file_path: String,
     recognized_text: Option<String>,
     answer_text: Option<String>,
@@ -98,7 +105,7 @@ pub struct TodaySummary {
     submitted: i64,  // 实背人数 = 有提交的任务数
     passed: i64,     // 通过人数
     failed: i64,     // 不通过人数
-    pending: i64,    // 待确认 = 已交未判
+    pending: i64,    // 待确认 = 最新判定存在且未终审
     makeup: i64,     // 补背人数 = 今日补背任务数
     contents: Vec<TodayContentStat>,
 }
@@ -137,6 +144,8 @@ pub fn dashboard_today(state: State<'_, AppState>) -> R<TodayView> {
                 Some(SubmissionCard {
                     submission_id: s.id,
                     status: s.status,
+                    recognize_status: s.recognize_status,
+                    pending_review: is_pending_teacher_review(v.as_ref()),
                     file_path: s.file_path,
                     recognized_text: s.recognized_text,
                     answer_text: content.as_ref().map(|x| x.answer_text.clone()),
@@ -157,6 +166,7 @@ pub fn dashboard_today(state: State<'_, AppState>) -> R<TodayView> {
         // —— 顶部汇总统计（不额外查库，顺手 tally）——
         let st = status_str(t.status);
         let has_sub = submission.is_some();
+        let pending_review = submission.as_ref().is_some_and(|item| item.pending_review);
         let is_pass = st == "passed";
         let is_fail = st == "failed";
         let c_no = content.as_ref().map(|c| c.content_no.clone()).unwrap_or_default();
@@ -172,7 +182,9 @@ pub fn dashboard_today(state: State<'_, AppState>) -> R<TodayView> {
             view.summary.passed += 1;
         } else if is_fail {
             view.summary.failed += 1;
-        } else if has_sub {
+        }
+        // 独立按 verdict 派生，不能被历史 task 状态或 ASR/submission 状态替代。
+        if pending_review {
             view.summary.pending += 1;
         }
         let idx = view.summary.contents.iter().position(|x| x.content_no == c_no);
@@ -1238,4 +1250,53 @@ pub async fn asr_and_score(state: State<'_, AppState>, submission_id: i64) -> R<
         text: out.text,
         next: format!("{:?}", r.next),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn machine_verdict(pass: bool, human_result: Option<&str>) -> Verdict {
+        Verdict {
+            id: 1,
+            submission_id: 1,
+            module: MODULE,
+            primary_score: Some(if pass { 95.0 } else { 60.0 }),
+            pass: Some(pass),
+            secondary_score: None,
+            quality: None,
+            confidence: None,
+            answer_version: 1,
+            metrics_json: None,
+            machine_note: None,
+            human_result: human_result.map(str::to_string),
+            human_note: None,
+        }
+    }
+
+    #[test]
+    fn pending_review_only_counts_unconfirmed_machine_verdicts() {
+        let machine_pass = machine_verdict(true, None);
+        let machine_fail = machine_verdict(false, None);
+        let confirmed = machine_verdict(true, Some("pass"));
+
+        let cases = [
+            ("机器 pass 未确认", Some(&machine_pass), true),
+            ("机器 fail 未确认", Some(&machine_fail), true),
+            ("人工已确认", Some(&confirmed), false),
+            ("ASR failed 无 verdict", None, false),
+            ("待评分无 verdict", None, false),
+        ];
+
+        assert_eq!(
+            cases
+                .iter()
+                .filter(|(_, verdict, _)| is_pending_teacher_review(*verdict))
+                .count(),
+            2
+        );
+        for (label, verdict, expected) in cases {
+            assert_eq!(is_pending_teacher_review(verdict), expected, "{label}");
+        }
+    }
 }

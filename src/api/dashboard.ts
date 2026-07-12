@@ -3,6 +3,8 @@ import { call } from "./client";
 export interface SubmissionCard {
   submission_id: number;
   status: string;
+  recognize_status: string;
+  pending_review: boolean;
   file_path: string;
   recognized_text: string | null;
   answer_text: string | null;
