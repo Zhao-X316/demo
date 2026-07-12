@@ -23,6 +23,40 @@ pub fn run_all_migrations(conn: &Connection) -> CoreResult<()> {
     Ok(())
 }
 
+/// 将数据库中已经登记过的媒体文件按“精确路径”加入 asset 协议白名单。
+///
+/// 新导入的录音会进入 `$APPDATA/archive`，由静态 scope 覆盖；这里主要兼容
+/// A10 归档能力上线前只保存原始路径的历史数据。只放行数据库中真实存在的
+/// 单个文件，不恢复过去的全盘通配符权限。
+pub fn allow_existing_media<R: tauri::Runtime, M: Manager<R>>(
+    manager: &M,
+    conn: &Connection,
+) -> Result<usize, String> {
+    let mut stmt = conn
+        .prepare("SELECT file_path, archived_path FROM submissions")
+        .map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .map_err(|err| err.to_string())?;
+    let scope = manager.asset_protocol_scope();
+    let mut allowed = 0;
+
+    for row in rows {
+        let (file_path, archived_path) = row.map_err(|err| err.to_string())?;
+        for path in archived_path.as_deref().into_iter().chain([file_path.as_str()]) {
+            let path = std::path::Path::new(path);
+            if path.is_file() {
+                scope.allow_file(path).map_err(|err| err.to_string())?;
+                allowed += 1;
+            }
+        }
+    }
+
+    Ok(allowed)
+}
+
 fn group_has_pending(conn: &Connection, migrations: &[Migration]) -> CoreResult<bool> {
     let has_table: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations')",
@@ -75,6 +109,10 @@ pub fn init(app: &App) -> Result<AppState, Box<dyn std::error::Error>> {
     let recovered = module_recitation::service::recognition::recover_stale_processing(&conn)?;
     if recovered > 0 {
         eprintln!("[ASR恢复] {recovered} 条中断的 processing 已转为 failed");
+    }
+    let allowed = allow_existing_media(app, &conn).map_err(std::io::Error::other)?;
+    if allowed > 0 {
+        eprintln!("[媒体白名单] 已按精确路径放行 {allowed} 个历史媒体文件");
     }
 
     Ok(AppState { db: Mutex::new(conn), data_dir: dir })

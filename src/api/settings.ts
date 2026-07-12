@@ -18,9 +18,18 @@ export interface VolcanoCreds {
   cluster: string;
 }
 
+export interface MaskedVolcanoCreds {
+  app_id: string;
+  access_token_mask: string | null;
+  secret_mask: string | null;
+  cluster: string;
+  ark_api_key_mask: string | null;
+  ark_model: string;
+}
+
 export const configGet = () => call<RecitationConfig>("config_get");
 export const configSet = (cfg: RecitationConfig) => call<void>("config_set", { cfg });
-export const secretsGet = () => call<VolcanoCreds>("secrets_get");
+export const secretsGet = () => call<MaskedVolcanoCreds>("secrets_get");
 export const secretsSet = (creds: VolcanoCreds) => call<void>("secrets_set", { creds });
 
 export interface BackupInfo {

@@ -54,6 +54,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache cargo (src-tauri)
         uses: Swatinem/rust-cache@v2
@@ -71,3 +73,9 @@ jobs:
 
       - name: Build Tauri app (compile, no bundle)
         run: cargo build --manifest-path src-tauri/Cargo.toml
+
+      - name: Test Tauri app
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Clippy Tauri app
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings

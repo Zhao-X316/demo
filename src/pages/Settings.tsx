@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   RecitationConfig,
   VolcanoCreds,
+  MaskedVolcanoCreds,
   BackupCatalog,
   BackupInfo,
   backupCreate,
@@ -16,6 +17,7 @@ import {
 export default function Settings() {
   const [cfg, setCfg] = useState<RecitationConfig | null>(null);
   const [creds, setCreds] = useState<VolcanoCreds | null>(null);
+  const [credentialStatus, setCredentialStatus] = useState<MaskedVolcanoCreds | null>(null);
   const [toast, setToast] = useState("");
   const [err, setErr] = useState("");
   const [backups, setBackups] = useState<BackupCatalog | null>(null);
@@ -23,7 +25,12 @@ export default function Settings() {
 
   useEffect(() => {
     configGet().then(setCfg).catch((e) => setErr(String(e)));
-    secretsGet().then(setCreds).catch(() => setCreds({ app_id: "", access_token: "", secret: "", cluster: "" }));
+    secretsGet()
+      .then((view) => {
+        setCredentialStatus(view);
+        setCreds({ app_id: view.app_id, access_token: "", secret: "", cluster: view.cluster });
+      })
+      .catch(() => setCreds({ app_id: "", access_token: "", secret: "", cluster: "" }));
     backupsList().then(setBackups).catch((e) => setErr(String(e)));
   }, []);
 
@@ -40,7 +47,10 @@ export default function Settings() {
     if (!creds) return;
     try {
       await secretsSet(creds);
-      setToast("凭据已保存（仅本机）");
+      const view = await secretsGet();
+      setCredentialStatus(view);
+      setCreds({ app_id: view.app_id, access_token: "", secret: "", cluster: view.cluster });
+      setToast("凭据已保存（仅本机；敏感值不会回传页面）");
     } catch (e) {
       setErr(String(e));
     }
@@ -191,8 +201,12 @@ export default function Settings() {
             <input
               type="password"
               value={creds.access_token}
+              placeholder={credentialStatus?.access_token_mask ?? "尚未配置"}
               onChange={(e) => setCreds({ ...creds, access_token: e.target.value })}
             />
+            {credentialStatus?.access_token_mask && (
+              <div className="meta">已配置 {credentialStatus.access_token_mask}；留空保存表示不修改</div>
+            )}
           </div>
           <div className="field">
             <div className="fl">Cluster</div>

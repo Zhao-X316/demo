@@ -2,7 +2,7 @@
 
 use chrono::{Duration, NaiveDate, Utc};
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use module_recitation::config::RecitationConfig;
 use module_recitation::db::contents::{self, ContentInput, RecContent};
@@ -12,7 +12,7 @@ use suite_core::db::repo::{classes, file_ledger, submissions, tasks, verdicts};
 use suite_core::models::{Class, ModuleKey, Student, Submission, TaskKind, TaskStatus, Verdict};
 
 use crate::backup::{self, BackupCatalog, BackupInfo, BackupKind};
-use crate::secrets::{self, VolcanoCreds};
+use crate::secrets::{self, MaskedVolcanoCreds, VolcanoCreds};
 use crate::state::{self, AppState};
 
 const MODULE: ModuleKey = ModuleKey::Recitation;
@@ -407,27 +407,39 @@ pub fn backup_create(state: State<'_, AppState>) -> R<BackupInfo> {
 }
 
 #[tauri::command]
-pub fn backup_restore(state: State<'_, AppState>, file_name: String) -> R<BackupInfo> {
+pub fn backup_restore(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    file_name: String,
+) -> R<BackupInfo> {
     let mut conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
-    backup::restore_with(
+    let protective = backup::restore_with(
         &mut conn,
         &state.data_dir.join("backups"),
         &file_name,
         state::run_all_migrations,
     )
-    .map_err(e)
+    .map_err(e)?;
+    if let Err(err) = state::allow_existing_media(&app, &conn) {
+        // 数据库已经成功恢复，不能把白名单刷新失败伪装成“恢复失败”。
+        // 下次启动还会重新按数据库精确放行，先保留可审计日志。
+        eprintln!("[媒体白名单] 恢复后刷新失败，重启后将重试：{err}");
+    }
+    Ok(protective)
 }
 
 // ───────────────────────── 设置：火山凭据（本地文件） ─────────────────────────
 
 #[tauri::command]
-pub fn secrets_get(state: State<'_, AppState>) -> R<VolcanoCreds> {
-    secrets::load(&state.data_dir).map_err(e)
+pub fn secrets_get(state: State<'_, AppState>) -> R<MaskedVolcanoCreds> {
+    secrets::load(&state.data_dir)
+        .map(|creds| secrets::masked(&creds))
+        .map_err(e)
 }
 
 #[tauri::command]
 pub fn secrets_set(state: State<'_, AppState>, creds: VolcanoCreds) -> R<()> {
-    secrets::save(&state.data_dir, &creds).map_err(e)
+    secrets::merge_and_save(&state.data_dir, &creds).map_err(e)
 }
 
 // ───────────────────────── 管理：学生 / 内容 / 任务 ─────────────────────────
