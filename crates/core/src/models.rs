@@ -273,6 +273,127 @@ pub struct Artifact {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiRunStatus {
+    Pending,
+    Processing,
+    Succeeded,
+    Failed,
+    Voided,
+}
+
+impl AiRunStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AiRunStatus::Pending => "pending",
+            AiRunStatus::Processing => "processing",
+            AiRunStatus::Succeeded => "succeeded",
+            AiRunStatus::Failed => "failed",
+            AiRunStatus::Voided => "voided",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "pending" => Some(AiRunStatus::Pending),
+            "processing" => Some(AiRunStatus::Processing),
+            "succeeded" => Some(AiRunStatus::Succeeded),
+            "failed" => Some(AiRunStatus::Failed),
+            "voided" => Some(AiRunStatus::Voided),
+            _ => None,
+        }
+    }
+}
+
+/// 一次不可覆盖的 AI 运行记录。重试通过 `retry_of_ai_run_id` 追加新行。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AiRun {
+    pub id: i64,
+    pub public_id: String,
+    pub idempotency_key: String,
+    pub run_type: String,
+    pub source_module: String,
+    pub business_ref_type: String,
+    pub business_ref_id: String,
+    pub input_artifact_id: Option<i64>,
+    pub provider: String,
+    pub model_name: String,
+    pub model_version: String,
+    pub config_version: String,
+    pub prompt_or_rule_version: String,
+    pub input_hash: String,
+    pub output_hash: Option<String>,
+    pub status: AiRunStatus,
+    pub retry_of_ai_run_id: Option<i64>,
+    pub remote_run_id: Option<String>,
+    pub confidence: Option<f64>,
+    pub output_json: Option<String>,
+    pub error_meta_json: Option<String>,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundJobStatus {
+    Queued,
+    Claimed,
+    Processing,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl BackgroundJobStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BackgroundJobStatus::Queued => "queued",
+            BackgroundJobStatus::Claimed => "claimed",
+            BackgroundJobStatus::Processing => "processing",
+            BackgroundJobStatus::Succeeded => "succeeded",
+            BackgroundJobStatus::Failed => "failed",
+            BackgroundJobStatus::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "queued" => Some(BackgroundJobStatus::Queued),
+            "claimed" => Some(BackgroundJobStatus::Claimed),
+            "processing" => Some(BackgroundJobStatus::Processing),
+            "succeeded" => Some(BackgroundJobStatus::Succeeded),
+            "failed" => Some(BackgroundJobStatus::Failed),
+            "cancelled" => Some(BackgroundJobStatus::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundJob {
+    pub id: i64,
+    pub public_id: String,
+    pub job_type: String,
+    pub business_key: String,
+    pub source_module: String,
+    pub business_ref_type: String,
+    pub business_ref_id: String,
+    pub ai_run_id: Option<i64>,
+    pub stage: String,
+    pub status: BackgroundJobStatus,
+    pub attempts: i64,
+    pub max_attempts: i64,
+    pub lease_token: Option<String>,
+    pub lease_expires_at: Option<String>,
+    pub next_retry_at: Option<String>,
+    pub progress_json: Option<String>,
+    pub error_meta_json: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// 通用提交（音频/图片/文本）。状态用字符串以便模块灵活扩展。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Submission {

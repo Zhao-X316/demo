@@ -2,6 +2,8 @@
 //! 业务规则在 services 层（外壳/模块）。
 
 pub mod artifacts;
+pub mod ai_runs;
+pub mod background_jobs;
 pub mod classes;
 pub mod decision_effects;
 pub mod file_ledger;

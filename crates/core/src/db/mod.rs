@@ -33,6 +33,10 @@ pub static CORE_MIGRATIONS: &[Migration] = &[
         id: "core_0005",
         sql: include_str!("schema/0005_artifacts.sql"),
     },
+    Migration {
+        id: "core_0006",
+        sql: include_str!("schema/0006_ai_runs_and_jobs.sql"),
+    },
 ];
 
 /// 打开磁盘数据库并开启外键。
@@ -88,7 +92,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT count(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 5);
+        assert_eq!(n, 6);
         // 关键表存在
         let t: i64 = conn
             .query_row(
@@ -114,6 +118,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(artifacts, 1);
+        let shared_runtime_tables: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master
+                 WHERE type='table' AND name IN ('ai_runs', 'background_jobs')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(shared_runtime_tables, 2);
     }
 
     #[test]

@@ -1,0 +1,9 @@
+{
+  "code": "CORE_INVALID_INPUT",
+  "message": "示例错误",
+  "retryable": false,
+  "actionHint": "请检查输入后重试",
+  "details": {
+    "field": "example"
+  }
+}
