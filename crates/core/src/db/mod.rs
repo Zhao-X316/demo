@@ -62,8 +62,10 @@ pub fn run_migrations(conn: &Connection, migrations: &[Migration]) -> CoreResult
             )
             .optional()?;
         if applied.is_none() {
-            conn.execute_batch(m.sql)?;
-            conn.execute("INSERT INTO schema_migrations (id) VALUES (?1)", [m.id])?;
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(m.sql)?;
+            tx.execute("INSERT INTO schema_migrations (id) VALUES (?1)", [m.id])?;
+            tx.commit()?;
         }
     }
     Ok(())
@@ -100,6 +102,48 @@ mod tests {
             )
             .unwrap();
         assert_eq!(effects, 1);
+    }
+
+    #[test]
+    fn failed_migration_rolls_back_schema_and_registration() {
+        static BROKEN: &[Migration] = &[Migration {
+            id: "atomic_probe",
+            sql: "CREATE TABLE atomic_probe (id INTEGER PRIMARY KEY);
+                  INSERT INTO definitely_missing_table VALUES (1);",
+        }];
+        static FIXED: &[Migration] = &[Migration {
+            id: "atomic_probe",
+            sql: "CREATE TABLE atomic_probe (id INTEGER PRIMARY KEY);",
+        }];
+
+        let conn = open_in_memory().unwrap();
+        assert!(run_migrations(&conn, BROKEN).is_err());
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='atomic_probe')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let registered: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE id='atomic_probe')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!table_exists);
+        assert!(!registered);
+
+        run_migrations(&conn, FIXED).unwrap();
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='atomic_probe')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(table_exists);
     }
 
     #[test]

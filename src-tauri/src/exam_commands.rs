@@ -5,6 +5,7 @@ use tauri::State;
 
 use module_exam::db::knowledge_points::{self as kp, KnowledgePoint, KpInput};
 use module_exam::db::questions::{self, NewOption, NewQuestion, Question, QuestionOption};
+use module_exam::service::grading::{self, AnswerDetail};
 use module_exam::vlm::{self as exam_vlm, AnalyzedQuestion};
 
 use crate::secrets;
@@ -38,7 +39,12 @@ pub fn kp_create(
     let conn = lock(&state)?;
     kp::create(
         &conn,
-        &KpInput { subject_id, parent_id, code: code.as_deref(), name: &name },
+        &KpInput {
+            subject_id,
+            parent_id,
+            code: code.as_deref(),
+            name: &name,
+        },
     )
     .map_err(e)
 }
@@ -78,8 +84,14 @@ pub struct QuestionInput {
     pub knowledge_point_id: Option<i64>,
     pub difficulty: Option<i64>,
     pub analysis: Option<String>,
+    #[serde(default = "default_max_score")]
+    pub max_score: f64,
     pub enabled: bool,
     pub options: Vec<OptionInput>,
+}
+
+fn default_max_score() -> f64 {
+    1.0
 }
 
 #[derive(Serialize)]
@@ -106,7 +118,7 @@ fn map_options(input: &[OptionInput]) -> Vec<NewOption<'_>> {
 #[tauri::command]
 pub fn question_create(state: State<'_, AppState>, q: QuestionInput) -> R<i64> {
     let conn = lock(&state)?;
-    let id = questions::create_question(
+    questions::create_with_options(
         &conn,
         &NewQuestion {
             subject_id: q.subject_id,
@@ -118,12 +130,12 @@ pub fn question_create(state: State<'_, AppState>, q: QuestionInput) -> R<i64> {
             knowledge_point_id: q.knowledge_point_id,
             difficulty: q.difficulty,
             analysis: q.analysis.as_deref(),
+            max_score: q.max_score,
             enabled: q.enabled,
         },
+        &map_options(&q.options),
     )
-    .map_err(e)?;
-    questions::set_options(&conn, id, &map_options(&q.options)).map_err(e)?;
-    Ok(id)
+    .map_err(e)
 }
 
 /// 重设某题选项（教师审核 VLM 结果后保存）。
@@ -155,6 +167,38 @@ pub fn question_get(state: State<'_, AppState>, id: i64) -> R<Option<QuestionDet
 pub fn question_delete(state: State<'_, AppState>, id: i64) -> R<()> {
     let conn = lock(&state)?;
     questions::delete(&conn, id).map_err(e)
+}
+
+// ───────────────────────── 客观题批改 ─────────────────────────
+
+/// 生成机器建议，不产生错题/掌握度副作用。
+#[tauri::command]
+pub fn exam_answer_suggest(
+    state: State<'_, AppState>,
+    student_id: i64,
+    question_id: i64,
+    picked: String,
+) -> R<AnswerDetail> {
+    let conn = lock(&state)?;
+    grading::suggest_answer(&conn, student_id, question_id, &picked).map_err(e)
+}
+
+/// 老师确认或改判；确认后才更新最终得分、错题本和掌握度。
+#[tauri::command]
+pub fn exam_answer_human_decide(
+    state: State<'_, AppState>,
+    answer_id: i64,
+    is_correct: bool,
+    note: Option<String>,
+) -> R<AnswerDetail> {
+    let conn = lock(&state)?;
+    grading::human_decide(&conn, answer_id, is_correct, note.as_deref()).map_err(e)
+}
+
+#[tauri::command]
+pub fn exam_answers_list(state: State<'_, AppState>, limit: Option<i64>) -> R<Vec<AnswerDetail>> {
+    let conn = lock(&state)?;
+    grading::list_answers(&conn, limit.unwrap_or(50)).map_err(e)
 }
 
 // ───────────────────────── 豆包视觉：题目预分析 ─────────────────────────

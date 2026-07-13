@@ -82,6 +82,9 @@ fn main() {
             exam_commands::question_set_options,
             exam_commands::question_delete,
             exam_commands::question_vlm_analyze,
+            exam_commands::exam_answer_suggest,
+            exam_commands::exam_answer_human_decide,
+            exam_commands::exam_answers_list,
         ])
         .run(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");
