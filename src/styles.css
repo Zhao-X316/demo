@@ -130,7 +130,7 @@ button.danger { color: var(--bad); }
 .evidence-note > span { color: var(--muted); font-size: 12px; }
 .evidence-note textarea { width: 100%; }
 .evidence-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
-.reviewed-result { margin-top: 12px; padding: 9px 11px; color: var(--ok); background: var(--ok-bg); border-radius: 7px; font-size: 12px; }
+.reviewed-result { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; padding: 9px 11px; color: var(--ok); background: var(--ok-bg); border-radius: 7px; font-size: 12px; }
 .evidence-panel .audioplayer { width: 100%; max-width: 100%; }
 
 @media (max-width: 820px) {

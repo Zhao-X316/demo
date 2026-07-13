@@ -92,6 +92,7 @@ pub struct TaskCard {
     task_id: i64,
     kind: String,
     status: String,
+    due_date: String,
     student_no: String,
     student_name: String,
     content_no: String,
@@ -129,6 +130,50 @@ pub struct TodayView {
     normal: Vec<TaskCard>,
     makeup: Vec<TaskCard>,
     review: Vec<TaskCard>,
+    overdue_review: Vec<TaskCard>,
+}
+
+fn task_card(conn: &rusqlite::Connection, task: &suite_core::models::Task) -> R<TaskCard> {
+    let student = students::get_by_id(conn, task.student_id).map_err(e)?;
+    let content = contents::get_by_id(conn, task.ref_id).map_err(e)?;
+    let sub = submissions::find_by_task(conn, task.id).map_err(e)?;
+    let submission = match sub {
+        Some(submission) => {
+            let verdict = verdicts::get_by_submission(conn, submission.id).map_err(e)?;
+            let audio_path = playback_path(&submission);
+            Some(SubmissionCard {
+                submission_id: submission.id,
+                status: submission.status,
+                recognize_status: submission.recognize_status,
+                pending_review: is_pending_teacher_review(verdict.as_ref()),
+                file_path: audio_path,
+                recognized_text: submission.recognized_text,
+                answer_text: content.as_ref().map(|value| value.answer_text.clone()),
+                answer_version: content.as_ref().map(|value| value.answer_version),
+                scored_answer_version: verdict.as_ref().map(|value| value.answer_version),
+                accuracy: verdict.as_ref().and_then(|value| value.primary_score),
+                pass: verdict.as_ref().and_then(|value| value.pass),
+                fluency: verdict.as_ref().and_then(|value| value.secondary_score),
+                quality: verdict.as_ref().and_then(|value| value.quality.clone()),
+                human_result: verdict.as_ref().and_then(|value| value.human_result.clone()),
+                human_note: verdict.as_ref().and_then(|value| value.human_note.clone()),
+                machine_note: verdict.as_ref().and_then(|value| value.machine_note.clone()),
+            })
+        }
+        None => None,
+    };
+
+    Ok(TaskCard {
+        task_id: task.id,
+        kind: kind_str(task.kind).to_string(),
+        status: status_str(task.status).to_string(),
+        due_date: task.due_date.clone(),
+        student_no: student.as_ref().map(|value| value.student_no.clone()).unwrap_or_default(),
+        student_name: student.as_ref().map(|value| value.name.clone()).unwrap_or_default(),
+        content_no: content.as_ref().map(|value| value.content_no.clone()).unwrap_or_default(),
+        content_title: content.as_ref().map(|value| value.title.clone()).unwrap_or_default(),
+        submission,
+    })
 }
 
 // ───────────────────────── 命令 ─────────────────────────
@@ -140,50 +185,29 @@ pub fn dashboard_today(state: State<'_, AppState>) -> R<TodayView> {
     let date = today_str();
     let tasks_today = tasks::list_by_date(&conn, MODULE, &date).map_err(e)?;
 
-    let mut view =
-        TodayView { date, summary: TodaySummary::default(), normal: vec![], makeup: vec![], review: vec![] };
+    let mut view = TodayView {
+        date: date.clone(),
+        summary: TodaySummary::default(),
+        normal: vec![],
+        makeup: vec![],
+        review: vec![],
+        overdue_review: vec![],
+    };
     for t in tasks_today {
         // 已关闭（撤销/覆盖/删除已布置）的任务不再显示
         if t.status == TaskStatus::Closed {
             continue;
         }
-        let student = students::get_by_id(&conn, t.student_id).map_err(e)?;
-        let content = contents::get_by_id(&conn, t.ref_id).map_err(e)?;
-        let sub = submissions::find_by_task(&conn, t.id).map_err(e)?;
-        let submission = match sub {
-            Some(s) => {
-                let v = verdicts::get_by_submission(&conn, s.id).map_err(e)?;
-                let audio_path = playback_path(&s);
-                Some(SubmissionCard {
-                    submission_id: s.id,
-                    status: s.status,
-                    recognize_status: s.recognize_status,
-                    pending_review: is_pending_teacher_review(v.as_ref()),
-                    file_path: audio_path,
-                    recognized_text: s.recognized_text,
-                    answer_text: content.as_ref().map(|x| x.answer_text.clone()),
-                    answer_version: content.as_ref().map(|x| x.answer_version),
-                    scored_answer_version: v.as_ref().map(|x| x.answer_version),
-                    accuracy: v.as_ref().and_then(|x| x.primary_score),
-                    pass: v.as_ref().and_then(|x| x.pass),
-                    fluency: v.as_ref().and_then(|x| x.secondary_score),
-                    quality: v.as_ref().and_then(|x| x.quality.clone()),
-                    human_result: v.as_ref().and_then(|x| x.human_result.clone()),
-                    human_note: v.as_ref().and_then(|x| x.human_note.clone()),
-                    machine_note: v.as_ref().and_then(|x| x.machine_note.clone()),
-                })
-            }
-            None => None,
-        };
+        let card = task_card(&conn, &t)?;
 
         // —— 顶部汇总统计（不额外查库，顺手 tally）——
         let st = status_str(t.status);
-        let has_sub = submission.is_some();
-        let pending_review = submission.as_ref().is_some_and(|item| item.pending_review);
+        let has_sub = card.submission.is_some();
+        let pending_review = card.submission.as_ref().is_some_and(|item| item.pending_review);
         let is_pass = st == "passed";
         let is_fail = st == "failed";
-        let c_no = content.as_ref().map(|c| c.content_no.clone()).unwrap_or_default();
-        let c_title = content.as_ref().map(|c| c.title.clone()).unwrap_or_default();
+        let c_no = card.content_no.clone();
+        let c_title = card.content_title.clone();
         view.summary.should += 1;
         if matches!(t.kind, TaskKind::Makeup) {
             view.summary.makeup += 1;
@@ -225,20 +249,21 @@ pub fn dashboard_today(state: State<'_, AppState>) -> R<TodayView> {
             cs.failed += 1;
         }
 
-        let card = TaskCard {
-            task_id: t.id,
-            kind: kind_str(t.kind).to_string(),
-            status: st.to_string(),
-            student_no: student.as_ref().map(|s| s.student_no.clone()).unwrap_or_default(),
-            student_name: student.as_ref().map(|s| s.name.clone()).unwrap_or_default(),
-            content_no: c_no,
-            content_title: c_title,
-            submission,
-        };
         match t.kind {
             TaskKind::Normal => view.normal.push(card),
             TaskKind::Makeup => view.makeup.push(card),
             TaskKind::Review => view.review.push(card),
+        }
+    }
+
+    // 机器建议跨天后不能从老师视野消失。日切不会把 submitted/reopened 当未交，
+    // 这里再按同一个 pending_review 派生口径收进“逾期待老师处理”。
+    let overdue = tasks::list_review_candidates_before(&conn, MODULE, &date).map_err(e)?;
+    for task in overdue {
+        let card = task_card(&conn, &task)?;
+        if card.submission.as_ref().is_some_and(|item| item.pending_review) {
+            view.summary.pending += 1;
+            view.overdue_review.push(card);
         }
     }
     Ok(view)

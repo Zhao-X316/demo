@@ -103,7 +103,9 @@ export default function Today() {
         </div>
       </div>
       <div className="sub">
-        共 {s.should} 项任务 · 机器结果仅供参考 · 请逐条查看录音和文本证据后终审
+        今日 {s.should} 项任务
+        {view.overdue_review.length > 0 ? ` · 另有 ${view.overdue_review.length} 项逾期待终审` : ""}
+        {" · "}机器结果仅供参考 · 请逐条查看录音和文本证据后终审
       </div>
       {err && <div className="error">{err}</div>}
       {toast && <div className="ok-banner">{toast}</div>}
@@ -130,6 +132,9 @@ export default function Today() {
       <Section title="新背" list={view.normal} />
       <Section title="补背" list={view.makeup} />
       <Section title="复习" list={view.review} />
+      {(filter === "all" || filter === "wait") && (
+        <Section title="逾期待老师处理" list={view.overdue_review} />
+      )}
 
       {assign && (
         <AssignModal
@@ -165,10 +170,12 @@ function TaskRow({
   const [expanded, setExpanded] = useState(false);
   const [note, setNote] = useState(sub?.human_note ?? "");
   const [audioState, setAudioState] = useState<"idle" | "ready" | "error">("idle");
+  const [rejudging, setRejudging] = useState(false);
   useEffect(() => {
     setNote(sub?.human_note ?? "");
     setAudioState("idle");
-  }, [sub?.submission_id, sub?.file_path, sub?.human_note]);
+    setRejudging(false);
+  }, [sub?.submission_id, sub?.file_path, sub?.human_note, sub?.human_result]);
 
   const dot =
     t.status === "passed" ? "" : t.status === "failed" ? "f" : sub ? "w" : "n";
@@ -194,6 +201,7 @@ function TaskRow({
           </div>
           <div className="meta">
             {t.content_no} · {t.content_title}
+            {t.due_date && <span> · {t.due_date}</span>}
           </div>
         </div>
         <div className="spacer" />
@@ -293,15 +301,37 @@ function TaskRow({
               value={note}
               onChange={(event) => setNote(event.target.value)}
               placeholder="记录听辨依据、错漏位置或改判原因（可选）"
-              disabled={Boolean(sub.human_result)}
+              disabled={Boolean(sub.human_result) && !rejudging}
             />
           </label>
 
           {sub.human_result ? (
-            <div className="reviewed-result">
-              已终审：{sub.human_result === "pass" ? "通过" : sub.human_result === "fail" ? "不通过" : "重开"}
-              {sub.human_note ? ` · ${sub.human_note}` : ""}
-            </div>
+            rejudging ? (
+              <div className="evidence-actions">
+                <div className="evidence-hint">
+                  改判会先回滚旧副作用，再应用新结论；状态已漂移时系统会拒绝自动覆盖。
+                </div>
+                <div className="spacer" />
+                <button disabled={busy} onClick={() => setRejudging(false)}>取消</button>
+                <button
+                  className="primary"
+                  disabled={busy || !canDecide}
+                  onClick={() => onDecide(t, sub.human_result === "pass" ? "fail" : "pass", note)}
+                >
+                  确认改判为{sub.human_result === "pass" ? "不通过" : "通过"}
+                </button>
+              </div>
+            ) : (
+              <div className="reviewed-result">
+                <span>
+                  已终审：{sub.human_result === "pass" ? "通过" : sub.human_result === "fail" ? "不通过" : "重开"}
+                  {sub.human_note ? ` · ${sub.human_note}` : ""}
+                </span>
+                {sub.human_result !== "reopen" && (
+                  <button disabled={busy} onClick={() => setRejudging(true)}>发起改判</button>
+                )}
+              </div>
+            )
           ) : (
             <div className="evidence-actions">
               <div className="evidence-hint">

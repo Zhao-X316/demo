@@ -23,6 +23,7 @@ export interface TaskCard {
   task_id: number;
   kind: string;
   status: string;
+  due_date: string;
   student_no: string;
   student_name: string;
   content_no: string;
@@ -55,6 +56,7 @@ export interface TodayView {
   normal: TaskCard[];
   makeup: TaskCard[];
   review: TaskCard[];
+  overdue_review: TaskCard[];
 }
 
 export const dashboardToday = () => call<TodayView>("dashboard_today");

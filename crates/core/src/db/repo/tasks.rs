@@ -277,6 +277,29 @@ pub fn list_by_date(conn: &Connection, module: ModuleKey, date: &str) -> CoreRes
     Ok(out)
 }
 
+/// 早于 today、仍需老师处理的任务候选。
+///
+/// 这里只按任务状态和日期做窄查询；是否已经有机器 verdict 且尚未终审，
+/// 由命令层结合最新 submission/verdict 统一判定，避免把 ASR failed/待评分混入待确认。
+pub fn list_review_candidates_before(
+    conn: &Connection,
+    module: ModuleKey,
+    today: &str,
+) -> CoreResult<Vec<Task>> {
+    let sql = format!(
+        "SELECT {COLS} FROM tasks
+         WHERE module=?1 AND due_date < ?2 AND status IN ('submitted','reopened')
+         ORDER BY due_date, id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map((module.as_str(), today), row_to_task)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 /// 日切：早于 today 仍 open 的任务（用于结转/过期）。
 pub fn list_open_before(
     conn: &Connection,
@@ -383,5 +406,35 @@ mod tests {
         .unwrap();
         let stale = list_open_before(&conn, ModuleKey::Recitation, "2026-06-25").unwrap();
         assert_eq!(stale.len(), 1);
+    }
+
+    #[test]
+    fn overdue_review_candidates_exclude_open_and_today_tasks() {
+        let (conn, sid) = setup();
+        let make = |due_date: &'static str, ref_id: i64| NewTask {
+            module: ModuleKey::Recitation,
+            student_id: sid,
+            subject_id: None,
+            ref_type: "content",
+            ref_id,
+            kind: TaskKind::Normal,
+            due_date,
+            source_task_id: None,
+            card_id: None,
+        };
+        let submitted = insert(&conn, &make("2026-06-24", 11)).unwrap();
+        set_status(&conn, submitted, TaskStatus::Submitted).unwrap();
+        let reopened = insert(&conn, &make("2026-06-23", 12)).unwrap();
+        set_status(&conn, reopened, TaskStatus::Reopened).unwrap();
+        insert(&conn, &make("2026-06-22", 13)).unwrap();
+        let today = insert(&conn, &make("2026-06-25", 14)).unwrap();
+        set_status(&conn, today, TaskStatus::Submitted).unwrap();
+
+        let rows =
+            list_review_candidates_before(&conn, ModuleKey::Recitation, "2026-06-25").unwrap();
+        assert_eq!(
+            rows.iter().map(|task| task.id).collect::<Vec<_>>(),
+            vec![reopened, submitted]
+        );
     }
 }
