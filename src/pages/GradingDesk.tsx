@@ -22,7 +22,12 @@ import { RecContent, Student, contentsList, studentsList } from "../api/manage";
 import { AudioPlayer } from "../components/AudioPlayer";
 import { Avatar } from "../components/ui";
 
-const AUDIO_FILTER = [{ name: "音频", extensions: ["m4a", "mp3", "wav", "aac", "amr", "ogg"] }];
+const AUDIO_EXTENSIONS = ["m4a", "mp3", "wav", "aac", "amr", "ogg"] as const;
+
+function hasSupportedAudioExtension(path: string): boolean {
+  const clean = path.split(/[?#]/, 1)[0].toLowerCase();
+  return AUDIO_EXTENSIONS.some((ext) => clean.endsWith(`.${ext}`));
+}
 
 function asrText(meta: string | null): string {
   if (!meta) return "";
@@ -83,9 +88,16 @@ export default function GradingDesk() {
   const pickAndStage = async () => {
     setErr("");
     try {
-      const selFiles = await open({ multiple: true, filters: AUDIO_FILTER });
+      // macOS 原生扩展过滤在部分系统版本会把合法音频全部置灰；
+      // 保持文件选择可用，并在进入导入管线前执行同一白名单校验。
+      const selFiles = await open({ multiple: true });
       if (!selFiles) return;
       const paths = Array.isArray(selFiles) ? selFiles : [selFiles];
+      const unsupported = paths.filter((path) => !hasSupportedAudioExtension(path));
+      if (unsupported.length) {
+        setErr(`仅支持 ${AUDIO_EXTENSIONS.join(" / ")} 音频；本次未导入 ${unsupported.length} 个不支持的文件。`);
+        return;
+      }
       const res = await importStage(paths, force);
       setStaged((s) => [...s, ...res]);
       const dup = res.filter((r) => r.status === "duplicate").length;
@@ -453,8 +465,12 @@ function FailureDetail({
 
   const relocate = async () => {
     setErr("");
-    const selected = await open({ multiple: false, filters: AUDIO_FILTER });
+    const selected = await open({ multiple: false });
     if (!selected || Array.isArray(selected)) return;
+    if (!hasSupportedAudioExtension(selected)) {
+      setErr(`仅支持 ${AUDIO_EXTENSIONS.join(" / ")} 音频，请重新选择。`);
+      return;
+    }
     setBusy(true);
     try {
       await recognitionRelocate(failure.submission_id, selected);
