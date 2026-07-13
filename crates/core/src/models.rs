@@ -394,6 +394,178 @@ pub struct BackgroundJob {
     pub updated_at: String,
 }
 
+macro_rules! text_enum {
+    (
+        $(#[$meta:meta])*
+        pub enum $name:ident {
+            $($variant:ident => $value:literal),+ $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum $name {
+            $($variant),+
+        }
+
+        impl $name {
+            pub fn as_str(&self) -> &'static str {
+                match self {
+                    $(Self::$variant => $value),+
+                }
+            }
+
+            pub fn from_db(value: &str) -> Option<Self> {
+                match value {
+                    $($value => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+text_enum! {
+    /// 学习证据的生产模块。
+    pub enum EvidenceSourceModule {
+        Recitation => "recitation",
+        Grading => "grading",
+        Correction => "correction",
+        TeacherObservation => "teacher_observation",
+    }
+}
+
+text_enum! {
+    pub enum EvidenceKind {
+        Coverage => "coverage",
+        Accuracy => "accuracy",
+        Contradiction => "contradiction",
+        Fluency => "fluency",
+        Retention => "retention",
+        Reasoning => "reasoning",
+    }
+}
+
+text_enum! {
+    pub enum ConfirmationLevel {
+        MachineOnly => "machine_only",
+        TeacherOverall => "teacher_overall",
+        TeacherAccepted => "teacher_accepted",
+        TeacherCorrected => "teacher_corrected",
+    }
+}
+
+text_enum! {
+    pub enum AssessmentContext {
+        Homework => "homework",
+        InClass => "in_class",
+        ClosedBook => "closed_book",
+        OpenBook => "open_book",
+        Correction => "correction",
+    }
+}
+
+text_enum! {
+    pub enum EvidenceState {
+        Active => "active",
+        Reverted => "reverted",
+        Superseded => "superseded",
+        Voided => "voided",
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LearningEvidence {
+    pub id: i64,
+    pub public_id: String,
+    pub idempotency_key: String,
+    pub student_id: i64,
+    pub source_module: EvidenceSourceModule,
+    pub source_type: String,
+    pub source_ref_type: String,
+    pub source_ref_id: String,
+    pub source_revision: i64,
+    pub decision_ref_type: Option<String>,
+    pub decision_ref_id: Option<String>,
+    pub decision_revision: Option<i64>,
+    pub knowledge_node_id: Option<String>,
+    pub ability_dimension_id: Option<String>,
+    pub evidence_kind: EvidenceKind,
+    pub value: f64,
+    pub confirmation_level: ConfirmationLevel,
+    pub evidence_quality: f64,
+    pub assessment_context: AssessmentContext,
+    pub occurred_at: String,
+    pub rule_version: String,
+    pub knowledge_map_version: String,
+    pub state: EvidenceState,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutboxEvent {
+    pub id: i64,
+    pub public_id: String,
+    pub idempotency_key: String,
+    pub event_type: String,
+    pub event_version: i64,
+    pub aggregate_type: String,
+    pub aggregate_id: String,
+    pub aggregate_revision: i64,
+    pub payload_json: String,
+    pub occurred_at: String,
+    pub created_at: String,
+}
+
+text_enum! {
+    pub enum OutboxConsumptionStatus {
+        Pending => "pending",
+        Processing => "processing",
+        Succeeded => "succeeded",
+        Failed => "failed",
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutboxConsumption {
+    pub event_id: i64,
+    pub consumer: String,
+    pub status: OutboxConsumptionStatus,
+    pub attempts: i64,
+    pub max_attempts: i64,
+    pub lease_token: Option<String>,
+    pub lease_expires_at: Option<String>,
+    pub processed_at: Option<String>,
+    pub error_meta_json: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+text_enum! {
+    pub enum AuditActorType {
+        Teacher => "teacher",
+        System => "system",
+        Migration => "migration",
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditEvent {
+    pub id: i64,
+    pub public_id: String,
+    pub idempotency_key: String,
+    pub actor_type: AuditActorType,
+    pub actor_id: Option<String>,
+    pub action: String,
+    pub object_type: String,
+    pub object_id: String,
+    pub object_revision: Option<i64>,
+    pub note: Option<String>,
+    pub meta_json: Option<String>,
+    pub occurred_at: String,
+    pub created_at: String,
+}
+
 /// 通用提交（音频/图片/文本）。状态用字符串以便模块灵活扩展。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Submission {

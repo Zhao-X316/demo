@@ -37,6 +37,10 @@ pub static CORE_MIGRATIONS: &[Migration] = &[
         id: "core_0006",
         sql: include_str!("schema/0006_ai_runs_and_jobs.sql"),
     },
+    Migration {
+        id: "core_0007",
+        sql: include_str!("schema/0007_evidence_outbox_audit.sql"),
+    },
 ];
 
 /// 打开磁盘数据库并开启外键。
@@ -92,7 +96,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT count(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 6);
+        assert_eq!(n, 7);
         // 关键表存在
         let t: i64 = conn
             .query_row(
@@ -127,6 +131,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(shared_runtime_tables, 2);
+        let evidence_event_tables: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master
+                 WHERE type='table' AND name IN (
+                     'learning_evidence', 'outbox_events', 'outbox_consumptions', 'audit_events'
+                 )",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(evidence_event_tables, 4);
     }
 
     #[test]
