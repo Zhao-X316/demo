@@ -109,6 +109,80 @@ pub struct NewPageMatchRevision<'a> {
     pub confirmed_by: Option<&'a str>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PageAlignmentRevision {
+    pub id: i64,
+    pub public_id: String,
+    pub page_id: i64,
+    pub revision: i64,
+    pub match_revision_id: i64,
+    pub template_version: String,
+    pub transform_json: String,
+    pub confidence: f64,
+    pub aligned_artifact_id: Option<i64>,
+    pub decision: String,
+    pub reason_code: Option<String>,
+    pub confirmed_by: Option<String>,
+    pub state: String,
+}
+
+pub struct NewPageAlignmentRevision<'a> {
+    pub page_id: i64,
+    pub template_version: &'a str,
+    pub transform_json: &'a str,
+    pub confidence: f64,
+    pub aligned_artifact_id: Option<i64>,
+    pub decision: &'a str,
+    pub reason_code: Option<&'a str>,
+    pub confirmed_by: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnswerRegionRevision {
+    pub id: i64,
+    pub public_id: String,
+    pub page_id: i64,
+    pub assessment_item_id: i64,
+    pub region_index: i64,
+    pub revision: i64,
+    pub alignment_revision_id: i64,
+    pub bbox_json: String,
+    pub crop_artifact_id: Option<i64>,
+    pub mapping_confidence: Option<f64>,
+    pub decision: String,
+    pub reason_code: Option<String>,
+    pub confirmed_by: Option<String>,
+    pub state: String,
+}
+
+pub struct NewAnswerRegionRevision<'a> {
+    pub page_id: i64,
+    pub assessment_item_id: i64,
+    pub region_index: i64,
+    pub bbox_json: &'a str,
+    pub crop_artifact_id: Option<i64>,
+    pub mapping_confidence: Option<f64>,
+    pub decision: &'a str,
+    pub reason_code: Option<&'a str>,
+    pub confirmed_by: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegionTrace {
+    pub student_id: i64,
+    pub assessment_version_id: i64,
+    pub attempt_id: i64,
+    pub page_no: i64,
+    pub source_page_artifact_id: i64,
+    pub aligned_page_artifact_id: i64,
+    pub assessment_item_id: i64,
+    pub question_version_id: i64,
+    pub bbox_json: String,
+    pub crop_artifact_id: i64,
+    pub region_revision: i64,
+    pub region_decision: String,
+}
+
 fn required(value: &str, field: &str) -> CoreResult<()> {
     if value.trim().is_empty() {
         Err(CoreError::Invalid(format!("{field}不能为空")))
@@ -129,6 +203,51 @@ fn validate_schema_object(json: &str, field: &str) -> CoreResult<()> {
         return Err(CoreError::Invalid(format!(
             "{field} 必须是带整数 schema_version 的对象"
         )));
+    }
+    Ok(())
+}
+
+fn validate_transform(json: &str) -> CoreResult<()> {
+    validate_schema_object(json, "页面配准变换")?;
+    let value: Value = serde_json::from_str(json)
+        .map_err(|error| CoreError::Invalid(format!("页面配准变换 JSON 无效：{error}")))?;
+    let matrix = value
+        .get("matrix")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CoreError::Invalid("页面配准变换必须包含 matrix 数组".into()))?;
+    if matrix.len() != 9 || matrix.iter().any(|value| value.as_f64().is_none()) {
+        return Err(CoreError::Invalid(
+            "页面配准 matrix 必须包含 9 个数值".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_bbox(json: &str) -> CoreResult<()> {
+    validate_schema_object(json, "答案区域坐标")?;
+    let value: Value = serde_json::from_str(json)
+        .map_err(|error| CoreError::Invalid(format!("答案区域坐标 JSON 无效：{error}")))?;
+    let number = |key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_f64)
+            .filter(|number| number.is_finite())
+            .ok_or_else(|| CoreError::Invalid(format!("答案区域缺少数值字段 {key}")))
+    };
+    let x = number("x")?;
+    let y = number("y")?;
+    let width = number("width")?;
+    let height = number("height")?;
+    if x < 0.0
+        || y < 0.0
+        || width <= 0.0
+        || height <= 0.0
+        || x + width > 1.0 + f64::EPSILON
+        || y + height > 1.0 + f64::EPSILON
+    {
+        return Err(CoreError::Invalid(
+            "答案区域必须是页面内 0~1 的归一化矩形".into(),
+        ));
     }
     Ok(())
 }
@@ -755,6 +874,17 @@ pub fn decide_page_match(
          WHERE page_id=?1 AND state='active'",
         [input.page_id],
     )?;
+    // 页面身份一旦产生新 revision，旧配准与题区不能继续冒充当前结果。
+    tx.execute(
+        "UPDATE exam_answer_region_revisions_v2 SET state='superseded'
+         WHERE page_id=?1 AND state='active'",
+        [input.page_id],
+    )?;
+    tx.execute(
+        "UPDATE exam_page_alignment_revisions_v2 SET state='superseded'
+         WHERE page_id=?1 AND state='active'",
+        [input.page_id],
+    )?;
     let public_id = ids::new_public_id();
     let now = time::utc_now_rfc3339();
     tx.execute(
@@ -841,6 +971,469 @@ pub fn decide_page_match(
     get_match(conn, id)?.ok_or_else(|| CoreError::NotFound("刚创建的匹配结论".into()))
 }
 
+fn alignment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PageAlignmentRevision> {
+    Ok(PageAlignmentRevision {
+        id: row.get(0)?,
+        public_id: row.get(1)?,
+        page_id: row.get(2)?,
+        revision: row.get(3)?,
+        match_revision_id: row.get(4)?,
+        template_version: row.get(5)?,
+        transform_json: row.get(6)?,
+        confidence: row.get(7)?,
+        aligned_artifact_id: row.get(8)?,
+        decision: row.get(9)?,
+        reason_code: row.get(10)?,
+        confirmed_by: row.get(11)?,
+        state: row.get(12)?,
+    })
+}
+
+fn get_alignment(conn: &Connection, id: i64) -> CoreResult<Option<PageAlignmentRevision>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, public_id, page_id, revision, match_revision_id,
+                    template_version, transform_json, confidence, aligned_artifact_id,
+                    decision, reason_code, confirmed_by, state
+             FROM exam_page_alignment_revisions_v2 WHERE id=?1",
+            [id],
+            alignment_row,
+        )
+        .optional()?)
+}
+
+pub fn record_page_alignment(
+    conn: &Connection,
+    input: &NewPageAlignmentRevision<'_>,
+) -> CoreResult<PageAlignmentRevision> {
+    required(input.template_version, "模板版本")?;
+    validate_transform(input.transform_json)?;
+    if !valid_unit(input.confidence) {
+        return Err(CoreError::Invalid("配准置信度必须位于 0~1".into()));
+    }
+    if !matches!(
+        input.decision,
+        "suggested" | "teacher_confirmed" | "rejected"
+    ) {
+        return Err(CoreError::Invalid("页面配准结论非法".into()));
+    }
+    match (input.decision, input.confirmed_by) {
+        ("teacher_confirmed", Some(value)) => required(value, "配准确认人")?,
+        ("teacher_confirmed", None) => {
+            return Err(CoreError::Invalid("老师确认配准必须记录确认人".into()))
+        }
+        (_, Some(_)) => return Err(CoreError::Invalid("机器配准不能冒充老师确认".into())),
+        _ => {}
+    }
+    if matches!(input.decision, "suggested" | "teacher_confirmed")
+        && input.aligned_artifact_id.is_none()
+    {
+        return Err(CoreError::Invalid(
+            "有效配准必须引用派生页面 artifact".into(),
+        ));
+    }
+    let scope: Option<(i64, IngestPage)> = conn
+        .query_row(
+            "SELECT m.id, p.id, p.public_id, p.batch_id, p.source_artifact_id,
+                    p.import_index, p.expected_page_no, p.state
+             FROM exam_page_match_revisions_v2 m
+             JOIN exam_ingest_pages_v2 p ON p.id=m.page_id
+             WHERE p.id=?1 AND m.state='active' AND m.decision='teacher_confirmed'",
+            [input.page_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    IngestPage {
+                        id: row.get(1)?,
+                        public_id: row.get(2)?,
+                        batch_id: row.get(3)?,
+                        source_artifact_id: row.get(4)?,
+                        import_index: row.get(5)?,
+                        expected_page_no: row.get(6)?,
+                        state: row.get(7)?,
+                    },
+                ))
+            },
+        )
+        .optional()?;
+    let Some((match_revision_id, page)) = scope else {
+        return Err(CoreError::Invalid(
+            "页面必须先有当前老师确认的学生/页码匹配".into(),
+        ));
+    };
+    if let Some(artifact_id) = input.aligned_artifact_id {
+        let artifact = artifacts::get_by_id(conn, artifact_id)?
+            .ok_or_else(|| CoreError::NotFound(format!("artifact#{artifact_id}")))?;
+        if !matches!(artifact.kind, ArtifactKind::Page | ArtifactKind::Image)
+            || artifact.parent_artifact_id != Some(page.source_artifact_id)
+            || artifact.privacy_class != PrivacyClass::StudentSensitive
+            || artifact.archive_status != ArchiveStatus::Ready
+        {
+            return Err(CoreError::Invalid(
+                "配准结果必须是原页面派生的已归档 student_sensitive page/image artifact".into(),
+            ));
+        }
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let revision: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(revision),0)+1 FROM exam_page_alignment_revisions_v2
+         WHERE page_id=?1",
+        [input.page_id],
+        |row| row.get(0),
+    )?;
+    // 新配准会改变坐标系，旧题区必须同时失效。
+    tx.execute(
+        "UPDATE exam_answer_region_revisions_v2 SET state='superseded'
+         WHERE page_id=?1 AND state='active'",
+        [input.page_id],
+    )?;
+    tx.execute(
+        "UPDATE exam_page_alignment_revisions_v2 SET state='superseded'
+         WHERE page_id=?1 AND state='active'",
+        [input.page_id],
+    )?;
+    let public_id = ids::new_public_id();
+    let now = time::utc_now_rfc3339();
+    tx.execute(
+        "INSERT INTO exam_page_alignment_revisions_v2
+         (public_id, page_id, revision, match_revision_id, template_version,
+          transform_json, confidence, aligned_artifact_id, decision, reason_code,
+          confirmed_by, state, created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'active',?12)",
+        (
+            &public_id,
+            input.page_id,
+            revision,
+            match_revision_id,
+            input.template_version.trim(),
+            input.transform_json,
+            input.confidence,
+            input.aligned_artifact_id,
+            input.decision,
+            input.reason_code.map(str::trim),
+            input.confirmed_by.map(str::trim),
+            &now,
+        ),
+    )?;
+    let id = tx.last_insert_rowid();
+    resolve_open_issue(
+        &tx,
+        "page",
+        &page.public_id,
+        "PAGE_ALIGNMENT_REVIEW",
+        input.confirmed_by.unwrap_or("system"),
+        &now,
+    )?;
+    let page_state = match input.decision {
+        "teacher_confirmed" => "aligned",
+        "suggested" if input.confidence >= 0.90 => "matched",
+        _ => {
+            let details = serde_json::json!({
+                "schema_version": 1,
+                "decision": input.decision,
+                "confidence": input.confidence,
+                "reason_code": input.reason_code
+            })
+            .to_string();
+            open_issue(
+                &tx,
+                "page",
+                &page.public_id,
+                "PAGE_ALIGNMENT_REVIEW",
+                "blocking",
+                &details,
+                &now,
+            )?;
+            "needs_review"
+        }
+    };
+    tx.execute(
+        "UPDATE exam_ingest_pages_v2 SET state=?1, updated_at=?2 WHERE id=?3",
+        (page_state, &now, input.page_id),
+    )?;
+    refresh_batch_state(&tx, page.batch_id, &now)?;
+    append_audit(
+        &tx,
+        &AuditInput {
+            key: &format!("exam:page-alignment:{public_id}:active"),
+            actor_type: if input.decision == "teacher_confirmed" {
+                AuditActorType::Teacher
+            } else {
+                AuditActorType::System
+            },
+            actor_id: input.confirmed_by.map(str::trim),
+            action: "exam.page_alignment.activated",
+            object_type: "exam_page_alignment",
+            object_id: &public_id,
+            revision: Some(revision),
+            now: &now,
+        },
+    )?;
+    tx.commit()?;
+    get_alignment(conn, id)?.ok_or_else(|| CoreError::NotFound("刚创建的页面配准".into()))
+}
+
+fn region_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnswerRegionRevision> {
+    Ok(AnswerRegionRevision {
+        id: row.get(0)?,
+        public_id: row.get(1)?,
+        page_id: row.get(2)?,
+        assessment_item_id: row.get(3)?,
+        region_index: row.get(4)?,
+        revision: row.get(5)?,
+        alignment_revision_id: row.get(6)?,
+        bbox_json: row.get(7)?,
+        crop_artifact_id: row.get(8)?,
+        mapping_confidence: row.get(9)?,
+        decision: row.get(10)?,
+        reason_code: row.get(11)?,
+        confirmed_by: row.get(12)?,
+        state: row.get(13)?,
+    })
+}
+
+fn get_region(conn: &Connection, id: i64) -> CoreResult<Option<AnswerRegionRevision>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, public_id, page_id, assessment_item_id, region_index,
+                    revision, alignment_revision_id, bbox_json, crop_artifact_id,
+                    mapping_confidence, decision, reason_code, confirmed_by, state
+             FROM exam_answer_region_revisions_v2 WHERE id=?1",
+            [id],
+            region_row,
+        )
+        .optional()?)
+}
+
+pub fn record_answer_region(
+    conn: &Connection,
+    input: &NewAnswerRegionRevision<'_>,
+) -> CoreResult<AnswerRegionRevision> {
+    if input.region_index < 0 {
+        return Err(CoreError::Invalid("答案区域顺序不能为负数".into()));
+    }
+    validate_bbox(input.bbox_json)?;
+    validate_optional_unit(input.mapping_confidence, "题区映射置信度")?;
+    if !matches!(
+        input.decision,
+        "suggested" | "teacher_confirmed" | "rejected"
+    ) {
+        return Err(CoreError::Invalid("答案区域结论非法".into()));
+    }
+    if matches!(input.decision, "suggested" | "teacher_confirmed")
+        && (input.crop_artifact_id.is_none() || input.mapping_confidence.is_none())
+    {
+        return Err(CoreError::Invalid(
+            "有效答案区域必须引用裁剪 artifact 和独立置信度".into(),
+        ));
+    }
+    match (input.decision, input.confirmed_by) {
+        ("teacher_confirmed", Some(value)) => required(value, "题区确认人")?,
+        ("teacher_confirmed", None) => {
+            return Err(CoreError::Invalid("老师确认题区必须记录确认人".into()))
+        }
+        (_, Some(_)) => return Err(CoreError::Invalid("机器题区不能冒充老师确认".into())),
+        _ => {}
+    }
+    let scope: Option<(i64, i64, i64, String, i64)> = conn
+        .query_row(
+            "SELECT a.id, a.aligned_artifact_id, p.batch_id, p.public_id,
+                    at.assessment_version_id
+             FROM exam_page_alignment_revisions_v2 a
+             JOIN exam_page_match_revisions_v2 m ON m.id=a.match_revision_id
+             JOIN exam_attempts_v2 at ON at.id=m.attempt_id
+             JOIN exam_ingest_pages_v2 p ON p.id=a.page_id
+             WHERE a.page_id=?1 AND a.state='active' AND a.decision='teacher_confirmed'",
+            [input.page_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((alignment_id, aligned_artifact_id, batch_id, page_public_id, version_id)) = scope
+    else {
+        return Err(CoreError::Invalid(
+            "答案区域必须引用当前老师确认的页面配准".into(),
+        ));
+    };
+    let valid_item: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM exam_assessment_items_v2
+         WHERE id=?1 AND assessment_version_id=?2 AND state='active')",
+        (input.assessment_item_id, version_id),
+        |row| row.get(0),
+    )?;
+    if !valid_item {
+        return Err(CoreError::Invalid("题区与页面所属作业题目不一致".into()));
+    }
+    if let Some(crop_id) = input.crop_artifact_id {
+        let artifact = artifacts::get_by_id(conn, crop_id)?
+            .ok_or_else(|| CoreError::NotFound(format!("artifact#{crop_id}")))?;
+        if artifact.kind != ArtifactKind::Crop
+            || artifact.parent_artifact_id != Some(aligned_artifact_id)
+            || artifact.privacy_class != PrivacyClass::StudentSensitive
+            || artifact.archive_status != ArchiveStatus::Ready
+        {
+            return Err(CoreError::Invalid(
+                "答案裁剪必须是当前配准页面派生的已归档 student_sensitive crop artifact".into(),
+            ));
+        }
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let revision: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(revision),0)+1 FROM exam_answer_region_revisions_v2
+         WHERE page_id=?1 AND assessment_item_id=?2 AND region_index=?3",
+        (input.page_id, input.assessment_item_id, input.region_index),
+        |row| row.get(0),
+    )?;
+    tx.execute(
+        "UPDATE exam_answer_region_revisions_v2 SET state='superseded'
+         WHERE page_id=?1 AND assessment_item_id=?2 AND region_index=?3 AND state='active'",
+        (input.page_id, input.assessment_item_id, input.region_index),
+    )?;
+    let public_id = ids::new_public_id();
+    let now = time::utc_now_rfc3339();
+    tx.execute(
+        "INSERT INTO exam_answer_region_revisions_v2
+         (public_id, page_id, assessment_item_id, region_index, revision,
+          alignment_revision_id, bbox_json, crop_artifact_id, mapping_confidence,
+          decision, reason_code, confirmed_by, state, created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'active',?13)",
+        (
+            &public_id,
+            input.page_id,
+            input.assessment_item_id,
+            input.region_index,
+            revision,
+            alignment_id,
+            input.bbox_json,
+            input.crop_artifact_id,
+            input.mapping_confidence,
+            input.decision,
+            input.reason_code.map(str::trim),
+            input.confirmed_by.map(str::trim),
+            &now,
+        ),
+    )?;
+    let id = tx.last_insert_rowid();
+    let issue_code = format!(
+        "ANSWER_REGION_REVIEW:{}:{}",
+        input.assessment_item_id, input.region_index
+    );
+    resolve_open_issue(
+        &tx,
+        "page",
+        &page_public_id,
+        &issue_code,
+        input.confirmed_by.unwrap_or("system"),
+        &now,
+    )?;
+    let low_confidence = input.mapping_confidence.is_some_and(|value| value < 0.95);
+    let proposed_state = match input.decision {
+        "teacher_confirmed" => "segmented",
+        "suggested" if !low_confidence => "aligned",
+        _ => {
+            let details = serde_json::json!({
+                "schema_version": 1,
+                "decision": input.decision,
+                "mapping_confidence": input.mapping_confidence,
+                "reason_code": input.reason_code,
+                "assessment_item_id": input.assessment_item_id,
+                "region_index": input.region_index
+            })
+            .to_string();
+            open_issue(
+                &tx,
+                "page",
+                &page_public_id,
+                &issue_code,
+                "blocking",
+                &details,
+                &now,
+            )?;
+            "needs_review"
+        }
+    };
+    let other_blocking: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM exam_pipeline_issues_v2
+         WHERE target_type='page' AND target_public_id=?1
+           AND severity='blocking' AND state='open'",
+        [&page_public_id],
+        |row| row.get(0),
+    )?;
+    let page_state = if other_blocking > 0 {
+        "needs_review"
+    } else {
+        proposed_state
+    };
+    tx.execute(
+        "UPDATE exam_ingest_pages_v2 SET state=?1, updated_at=?2 WHERE id=?3",
+        (page_state, &now, input.page_id),
+    )?;
+    refresh_batch_state(&tx, batch_id, &now)?;
+    append_audit(
+        &tx,
+        &AuditInput {
+            key: &format!("exam:answer-region:{public_id}:active"),
+            actor_type: if input.decision == "teacher_confirmed" {
+                AuditActorType::Teacher
+            } else {
+                AuditActorType::System
+            },
+            actor_id: input.confirmed_by.map(str::trim),
+            action: "exam.answer_region.activated",
+            object_type: "exam_answer_region",
+            object_id: &public_id,
+            revision: Some(revision),
+            now: &now,
+        },
+    )?;
+    tx.commit()?;
+    get_region(conn, id)?.ok_or_else(|| CoreError::NotFound("刚创建的答案区域".into()))
+}
+
+pub fn trace_answer_region(conn: &Connection, region_id: i64) -> CoreResult<Option<RegionTrace>> {
+    Ok(conn
+        .query_row(
+            "SELECT at.student_id, at.assessment_version_id, m.attempt_id, m.page_no,
+                    p.source_artifact_id, a.aligned_artifact_id, r.assessment_item_id,
+                    i.question_version_id, r.bbox_json, r.crop_artifact_id,
+                    r.revision, r.decision
+             FROM exam_answer_region_revisions_v2 r
+             JOIN exam_page_alignment_revisions_v2 a ON a.id=r.alignment_revision_id
+             JOIN exam_page_match_revisions_v2 m ON m.id=a.match_revision_id
+             JOIN exam_attempts_v2 at ON at.id=m.attempt_id
+             JOIN exam_ingest_pages_v2 p ON p.id=r.page_id
+             JOIN exam_assessment_items_v2 i ON i.id=r.assessment_item_id
+             WHERE r.id=?1",
+            [region_id],
+            |row| {
+                Ok(RegionTrace {
+                    student_id: row.get(0)?,
+                    assessment_version_id: row.get(1)?,
+                    attempt_id: row.get(2)?,
+                    page_no: row.get(3)?,
+                    source_page_artifact_id: row.get(4)?,
+                    aligned_page_artifact_id: row.get(5)?,
+                    assessment_item_id: row.get(6)?,
+                    question_version_id: row.get(7)?,
+                    bbox_json: row.get(8)?,
+                    crop_artifact_id: row.get(9)?,
+                    region_revision: row.get(10)?,
+                    region_decision: row.get(11)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
 /// 启动恢复：中断的 processing 批次进入老师可见的 needs_review，页面事实不丢失。
 pub fn recover_stale_ingest_batches(conn: &Connection) -> CoreResult<usize> {
     let mut stmt = conn.prepare(
@@ -899,6 +1492,7 @@ mod tests {
     struct Fixture {
         conn: Connection,
         version_id: i64,
+        item_id: i64,
         attempt_id: i64,
         other_attempt_id: i64,
         artifact_id: i64,
@@ -910,7 +1504,8 @@ mod tests {
         run_migrations(&conn, crate::exam_migrations()).unwrap();
         let hash = "a".repeat(64);
         conn.execute_batch(&format!(
-            "INSERT INTO classes(name, term) VALUES ('八年级一班','2026秋');
+            r#"INSERT INTO subjects(name) VALUES ('历史');
+             INSERT INTO classes(name, term) VALUES ('八年级一班','2026秋');
              INSERT INTO students(student_no,name,class_id) VALUES ('S001','小林',1);
              INSERT INTO exam_assessments_v2
                (public_id,title,class_id,assessment_context,evidence_policy,state,
@@ -922,6 +1517,45 @@ mod tests {
                 confirmed_by,confirmed_at)
                VALUES ('assessment-version-a',1,1,'{hash}','confirmed',
                        '2026-07-13T08:00:00.000Z','teacher','2026-07-13T08:00:00.000Z');
+             INSERT INTO k1_textbook_editions
+               (public_id,subject_id,publisher_code,edition_code,title,grade,volume,state,created_at)
+               VALUES ('edition-a',1,'PEP','2024','中国历史八上','8','upper','active',
+                       '2026-07-13T08:00:00.000Z');
+             INSERT INTO k1_knowledge_maps
+               (public_id,textbook_edition_id,revision,state,created_at,confirmed_at)
+               VALUES ('map-a',1,1,'confirmed','2026-07-13T08:00:00.000Z',
+                       '2026-07-13T08:00:00.000Z');
+             INSERT INTO k1_questions
+               (public_id,owner_scope,owner_id,rights_status,sharing_allowed,created_at)
+               VALUES ('question-a','personal','teacher','unknown',0,
+                       '2026-07-13T08:00:00.000Z');
+             INSERT INTO k1_question_versions
+               (public_id,question_id,revision,question_type,stem,max_score,content_hash,
+                quality_level,state,created_at)
+               VALUES ('question-version-a',1,1,'true_false','鸦片战争爆发于1840年。',1,'{hash}',
+                       'L3','published','2026-07-13T08:00:00.000Z');
+             INSERT INTO k1_answer_key_versions
+               (public_id,question_version_id,revision,answer_json,state,created_at,
+                confirmed_by,confirmed_at)
+               VALUES ('answer-a',1,1,'{{"schema_version":1,"correct":true}}','confirmed',
+                       '2026-07-13T08:00:00.000Z','teacher','2026-07-13T08:00:00.000Z');
+             INSERT INTO k1_rubric_versions
+               (public_id,question_version_id,revision,max_score,state,created_at,
+                confirmed_by,confirmed_at)
+               VALUES ('rubric-a',1,1,1,'confirmed','2026-07-13T08:00:00.000Z',
+                       'teacher','2026-07-13T08:00:00.000Z');
+             INSERT INTO k1_link_sets
+               (public_id,question_version_id,knowledge_map_id,revision,state,created_at,
+                confirmed_by,confirmed_at)
+               VALUES ('link-set-a',1,1,1,'confirmed','2026-07-13T08:00:00.000Z',
+                       'teacher','2026-07-13T08:00:00.000Z');
+             INSERT INTO exam_assessment_items_v2
+               (public_id,assessment_version_id,question_version_id,answer_key_version_id,
+                rubric_version_id,link_set_id,order_index,score,presentation_snapshot_json,
+                state,created_at)
+               VALUES ('assessment-item-a',1,1,1,1,1,0,1,
+                       '{{"schema_version":1,"question_no":"1"}}','active',
+                       '2026-07-13T08:00:00.000Z');
              INSERT INTO exam_attempts_v2
                (public_id,assessment_version_id,student_id,attempt_no,source_kind,
                 attempt_kind,state,created_at,updated_at)
@@ -941,7 +1575,7 @@ mod tests {
                (public_id,assessment_version_id,student_id,attempt_no,source_kind,
                 attempt_kind,state,created_at,updated_at)
                VALUES ('attempt-b',2,1,1,'image','first','ingesting',
-                       '2026-07-13T08:00:00.000Z','2026-07-13T08:00:00.000Z');"
+                       '2026-07-13T08:00:00.000Z','2026-07-13T08:00:00.000Z');"#
         ))
         .unwrap();
         let artifact = create_or_get(
@@ -965,6 +1599,7 @@ mod tests {
         Fixture {
             conn,
             version_id: 1,
+            item_id: 1,
             attempt_id: 1,
             other_attempt_id: 2,
             artifact_id: artifact.id,
@@ -1015,6 +1650,56 @@ mod tests {
             checked_by_type: "fixture",
             checked_by: None,
         }
+    }
+
+    fn matched_page(fixture: &Fixture, key: &str) -> IngestPage {
+        let batch = batch(fixture, key);
+        let page = page(fixture, batch.id);
+        record_page_quality(&fixture.conn, &quality(page.id, "pass")).unwrap();
+        decide_page_match(
+            &fixture.conn,
+            &NewPageMatchRevision {
+                page_id: page.id,
+                attempt_id: Some(fixture.attempt_id),
+                page_no: Some(1),
+                student_confidence: Some(0.99),
+                page_no_confidence: Some(0.99),
+                template_confidence: Some(0.99),
+                decision: "teacher_confirmed",
+                reason_code: None,
+                confirmed_by: Some("teacher"),
+            },
+        )
+        .unwrap();
+        page
+    }
+
+    fn derived_artifact(
+        fixture: &Fixture,
+        kind: ArtifactKind,
+        hash_digit: char,
+        parent_id: i64,
+        derivative_type: &str,
+    ) -> i64 {
+        create_or_get(
+            &fixture.conn,
+            &NewArtifact {
+                kind,
+                sha256: &hash_digit.to_string().repeat(64),
+                mime_type: "image/png",
+                byte_size: 96,
+                original_name: None,
+                original_path: None,
+                archived_path: &format!("/archive/{derivative_type}-{hash_digit}.png"),
+                parent_artifact_id: Some(parent_id),
+                derivative_type: Some(derivative_type),
+                processing_version: "fixture-v1",
+                privacy_class: PrivacyClass::StudentSensitive,
+                archive_status: ArchiveStatus::Ready,
+            },
+        )
+        .unwrap()
+        .id
     }
 
     #[test]
@@ -1195,5 +1880,226 @@ mod tests {
         assert_eq!(issue, 1);
         drop(conn);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn alignment_and_region_require_teacher_confirmation_and_keep_full_trace() {
+        let fixture = setup();
+        let page = matched_page(&fixture, "region-batch");
+        let aligned_id = derived_artifact(
+            &fixture,
+            ArtifactKind::Page,
+            '2',
+            fixture.artifact_id,
+            "page_alignment",
+        );
+        let transform = r#"{"schema_version":1,"matrix":[1,0,0,0,1,0,0,0,1]}"#;
+        let suggested = record_page_alignment(
+            &fixture.conn,
+            &NewPageAlignmentRevision {
+                page_id: page.id,
+                template_version: "template-v1",
+                transform_json: transform,
+                confidence: 0.71,
+                aligned_artifact_id: Some(aligned_id),
+                decision: "suggested",
+                reason_code: Some("LOW_ALIGNMENT_CONFIDENCE"),
+                confirmed_by: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(suggested.revision, 1);
+        assert_eq!(
+            get_page(&fixture.conn, page.id).unwrap().unwrap().state,
+            "needs_review"
+        );
+
+        let alignment = record_page_alignment(
+            &fixture.conn,
+            &NewPageAlignmentRevision {
+                page_id: page.id,
+                template_version: "template-v1",
+                transform_json: transform,
+                confidence: 0.71,
+                aligned_artifact_id: Some(aligned_id),
+                decision: "teacher_confirmed",
+                reason_code: Some("TEACHER_CHECKED_CORNERS"),
+                confirmed_by: Some("teacher"),
+            },
+        )
+        .unwrap();
+        assert_eq!(alignment.revision, 2);
+        assert_eq!(
+            get_page(&fixture.conn, page.id).unwrap().unwrap().state,
+            "aligned"
+        );
+
+        let crop_id = derived_artifact(
+            &fixture,
+            ArtifactKind::Crop,
+            '3',
+            aligned_id,
+            "answer_region",
+        );
+        let bbox = r#"{"schema_version":1,"x":0.1,"y":0.2,"width":0.7,"height":0.2}"#;
+        let region_suggestion = record_answer_region(
+            &fixture.conn,
+            &NewAnswerRegionRevision {
+                page_id: page.id,
+                assessment_item_id: fixture.item_id,
+                region_index: 0,
+                bbox_json: bbox,
+                crop_artifact_id: Some(crop_id),
+                mapping_confidence: Some(0.74),
+                decision: "suggested",
+                reason_code: Some("LOW_REGION_CONFIDENCE"),
+                confirmed_by: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(region_suggestion.revision, 1);
+        assert_eq!(
+            get_page(&fixture.conn, page.id).unwrap().unwrap().state,
+            "needs_review"
+        );
+
+        let region = record_answer_region(
+            &fixture.conn,
+            &NewAnswerRegionRevision {
+                page_id: page.id,
+                assessment_item_id: fixture.item_id,
+                region_index: 0,
+                bbox_json: bbox,
+                crop_artifact_id: Some(crop_id),
+                mapping_confidence: Some(0.74),
+                decision: "teacher_confirmed",
+                reason_code: Some("TEACHER_CHECKED_REGION"),
+                confirmed_by: Some("teacher"),
+            },
+        )
+        .unwrap();
+        assert_eq!(region.revision, 2);
+        assert_eq!(
+            get_page(&fixture.conn, page.id).unwrap().unwrap().state,
+            "segmented"
+        );
+        let trace = trace_answer_region(&fixture.conn, region.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(trace.student_id, 1);
+        assert_eq!(trace.assessment_version_id, fixture.version_id);
+        assert_eq!(trace.attempt_id, fixture.attempt_id);
+        assert_eq!(trace.page_no, 1);
+        assert_eq!(trace.source_page_artifact_id, fixture.artifact_id);
+        assert_eq!(trace.aligned_page_artifact_id, aligned_id);
+        assert_eq!(trace.assessment_item_id, fixture.item_id);
+        assert_eq!(trace.question_version_id, 1);
+        assert_eq!(trace.crop_artifact_id, crop_id);
+    }
+
+    #[test]
+    fn new_alignment_invalidates_old_regions_and_crop_lineage_is_enforced() {
+        let fixture = setup();
+        let page = matched_page(&fixture, "realign-batch");
+        let aligned_id = derived_artifact(
+            &fixture,
+            ArtifactKind::Page,
+            '4',
+            fixture.artifact_id,
+            "page_alignment",
+        );
+        let transform = r#"{"schema_version":1,"matrix":[1,0,0,0,1,0,0,0,1]}"#;
+        record_page_alignment(
+            &fixture.conn,
+            &NewPageAlignmentRevision {
+                page_id: page.id,
+                template_version: "template-v1",
+                transform_json: transform,
+                confidence: 0.99,
+                aligned_artifact_id: Some(aligned_id),
+                decision: "teacher_confirmed",
+                reason_code: None,
+                confirmed_by: Some("teacher"),
+            },
+        )
+        .unwrap();
+        let wrong_parent_crop = derived_artifact(
+            &fixture,
+            ArtifactKind::Crop,
+            '5',
+            fixture.artifact_id,
+            "answer_region_wrong_parent",
+        );
+        let bbox = r#"{"schema_version":1,"x":0.1,"y":0.2,"width":0.7,"height":0.2}"#;
+        assert!(record_answer_region(
+            &fixture.conn,
+            &NewAnswerRegionRevision {
+                page_id: page.id,
+                assessment_item_id: fixture.item_id,
+                region_index: 0,
+                bbox_json: bbox,
+                crop_artifact_id: Some(wrong_parent_crop),
+                mapping_confidence: Some(0.99),
+                decision: "teacher_confirmed",
+                reason_code: None,
+                confirmed_by: Some("teacher"),
+            }
+        )
+        .is_err());
+        let crop_id = derived_artifact(
+            &fixture,
+            ArtifactKind::Crop,
+            '6',
+            aligned_id,
+            "answer_region",
+        );
+        let region = record_answer_region(
+            &fixture.conn,
+            &NewAnswerRegionRevision {
+                page_id: page.id,
+                assessment_item_id: fixture.item_id,
+                region_index: 0,
+                bbox_json: bbox,
+                crop_artifact_id: Some(crop_id),
+                mapping_confidence: Some(0.99),
+                decision: "teacher_confirmed",
+                reason_code: None,
+                confirmed_by: Some("teacher"),
+            },
+        )
+        .unwrap();
+
+        let realigned_id = derived_artifact(
+            &fixture,
+            ArtifactKind::Page,
+            '7',
+            fixture.artifact_id,
+            "page_alignment_v2",
+        );
+        record_page_alignment(
+            &fixture.conn,
+            &NewPageAlignmentRevision {
+                page_id: page.id,
+                template_version: "template-v2",
+                transform_json: transform,
+                confidence: 0.98,
+                aligned_artifact_id: Some(realigned_id),
+                decision: "teacher_confirmed",
+                reason_code: Some("TEMPLATE_CHANGED"),
+                confirmed_by: Some("teacher"),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            get_region(&fixture.conn, region.id).unwrap().unwrap().state,
+            "superseded"
+        );
+        assert_eq!(
+            get_page(&fixture.conn, page.id).unwrap().unwrap().state,
+            "aligned"
+        );
+        assert!(trace_answer_region(&fixture.conn, region.id)
+            .unwrap()
+            .is_some());
     }
 }
