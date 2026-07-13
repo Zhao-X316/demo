@@ -18,6 +18,7 @@ pub struct AppState {
 
 pub fn run_all_migrations(conn: &Connection) -> CoreResult<()> {
     suite_core::db::run_migrations(conn, suite_core::db::CORE_MIGRATIONS)?;
+    suite_core::db::run_migrations(conn, module_knowledge::knowledge_migrations())?;
     suite_core::db::run_migrations(conn, module_recitation::recitation_migrations())?;
     suite_core::db::run_migrations(conn, module_exam::exam_migrations())?;
     Ok(())
@@ -83,6 +84,7 @@ fn group_has_pending(conn: &Connection, migrations: &[Migration]) -> CoreResult<
 
 fn has_pending_migrations(conn: &Connection) -> CoreResult<bool> {
     Ok(group_has_pending(conn, suite_core::db::CORE_MIGRATIONS)?
+        || group_has_pending(conn, module_knowledge::knowledge_migrations())?
         || group_has_pending(conn, module_recitation::recitation_migrations())?
         || group_has_pending(conn, module_exam::exam_migrations())?)
 }

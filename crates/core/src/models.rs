@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 pub enum ModuleKey {
     Recitation,
     Exam,
+    Knowledge,
     Wrongbook,
 }
 
@@ -19,6 +20,7 @@ impl ModuleKey {
         match self {
             ModuleKey::Recitation => "recitation",
             ModuleKey::Exam => "exam",
+            ModuleKey::Knowledge => "knowledge",
             ModuleKey::Wrongbook => "wrongbook",
         }
     }
@@ -26,6 +28,7 @@ impl ModuleKey {
     pub fn from_db(s: &str) -> Self {
         match s {
             "exam" => ModuleKey::Exam,
+            "knowledge" => ModuleKey::Knowledge,
             "wrongbook" => ModuleKey::Wrongbook,
             _ => ModuleKey::Recitation,
         }

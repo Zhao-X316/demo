@@ -21,3 +21,4 @@ rusqlite = { version = "0.31", features = ["bundled", "backup"] }
 suite-core = { path = "../crates/core" }
 module-recitation = { path = "../crates/module-recitation" }
 module-exam = { path = "../crates/module-exam" }
+module-knowledge = { path = "../crates/module-knowledge" }
