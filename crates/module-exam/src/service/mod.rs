@@ -2,3 +2,4 @@
 
 pub mod assessment;
 pub mod grading;
+pub mod papers;
