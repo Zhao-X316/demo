@@ -9,10 +9,16 @@ pub mod db;
 use suite_core::models::ModuleKey;
 use suite_core::ports::{Migration, Module};
 
-static MIGRATIONS: &[Migration] = &[Migration {
-    id: "k1_0001",
-    sql: include_str!("../migrations/0001_taxonomy.sql"),
-}];
+static MIGRATIONS: &[Migration] = &[
+    Migration {
+        id: "k1_0001",
+        sql: include_str!("../migrations/0001_taxonomy.sql"),
+    },
+    Migration {
+        id: "k1_0002",
+        sql: include_str!("../migrations/0002_content_versions.sql"),
+    },
+];
 
 pub fn knowledge_migrations() -> &'static [Migration] {
     MIGRATIONS
