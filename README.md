@@ -8,25 +8,27 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 
 ## 当前进度
 
+> 2026-07-13：M1 A6b 隔离真机 G01-G16 已全部通过；分支 `redesign/frontend-b` 尚未 tag、合并或发布，下一闸门是对 `0a28a26..当前 HEAD` 的异模型正式复核。
+
 | 部分 | 状态 | 说明 |
 |------|------|------|
 | `crates/core` 共享内核 | ✅ 实现 + 单测 | 错误/实体/能力抽象(ports)/纯算法(归一化·拼音容错·相似度·正确率门控·间隔重复·hash) |
-| `crates/core` DB 层 | ✅ 实现 + 单测 | 迁移框架 + 11张通用表 + 仓储(settings/students/memory_cards/file_ledger/submissions/tasks/verdicts) |
-| `crates/core` 复习引擎 | ✅ 实现 + 单测 | `services/review`：record_pass/lapse（间隔重复编排） |
-| `crates/module-recitation` M1 域 | ✅ 实现 + 单测 | 文件名解析·熟练度A/B/C·评分编排·火山ASR占位·rec_contents仓储 |
-| `crates/module-recitation` M1 服务 | ✅ 实现 + 单测 | import(去重/解析/匹配/异常池)·scoring(评分→判定→复习/补背)·tasks(补背/到期复习/日切) |
-| Tauri 应用外壳 `src-tauri` | ✅ 实现 + CI 编译通过 | state(DB+迁移)/commands(dashboard/human_decide/seed_demo)/main |
-| 前端 `src`（今日看板） | ✅ 实现 + 构建通过 | React shell + 模块注册表 + 看板(三组卡片+人工判定) |
+| `crates/core` DB 层 | ✅ 实现 + 单测 | 迁移框架 + 通用仓储；任务、提交、判定、复习卡与 effect 账本支持事务/改判/漂移保护 |
+| `crates/core` 复习引擎 | ✅ 实现 + 单测 | `services/review`：pass/lapse 分账；补做通过从 stage 1 重启且保留 lapse |
+| `crates/module-recitation` M1 域 | ✅ 实现 + 单测 | 文件名解析、熟练度 A/B/C、评分编排、识别 ports、rec_contents 仓储 |
+| `crates/module-recitation` M1 服务 | ✅ 实现 + 单测 | import 去重/归档、ASR 可恢复状态机、机器建议、老师终审、补背/到期复习/日切、双向改判 |
+| Tauri 应用外壳 `src-tauri` | ✅ 实现 + 独立检查 | DB+迁移、终审命令、在线备份/恢复、按 hash 录音归档、凭据掩码与最小 asset scope |
+| 前端 `src` | ✅ 实现 + 真机通过 | 方向 B 六区 IA；今日/批改台/内容库/学生/记录/设置，证据终审、失败恢复和改判闭环 |
 | 跨平台 CI | ✅ 后端三平台 + 应用 Win/Mac 编译 | `.github/workflows/ci.yml` |
 | 打包 CI（安装包） | ✅ 工作流就绪 | `release.yml`：手动/tag 触发出 `.msi/.exe/.dmg` |
-| 火山 ASR 真接口 | ✅ 接入（极速版flash, reqwest） | `src-tauri/asr.rs`；凭据取自设置页 |
-| 页面（看板/导入/异常池/管理/设置） | ✅ 全部完成 | 五页齐全，M1 在 UI 上闭环 |
-| 音频回放 | ✅ asset 协议 | 看板/导入/异常池均可播放原录音 |
+| 火山 ASR 真接口 | ✅ 标准版 submit+query | 境内端点绕系统代理；processing/ok/failed 可恢复，失败可重试、同 hash 重定位或作废 |
+| 页面与老师终审 | ✅ A6b 真机通过 | 机器只给建议；老师核对录音/ASR/答案版本/评分/备注后终审，副作用才生效 |
+| 音频回放 | ✅ app-managed archive | 按 hash 归档；原文件改名、重启和数据库恢复后仍可回放，原路径只兜底 |
 | ffmpeg 转码/时长探测 | ✅ 可选集成 | 装了 ffmpeg 则转 16k 单声道 wav + 探测时长，否则降级 |
 
-已验证（CI 实测）：后端 55 测试在 **Windows/macOS/Linux** 全通过；前端 `tsc+vite` 构建通过；**Tauri 应用在 macOS 上编译通过**（Windows 同步验证中）。
+当前候选已验证：workspace **94 tests**、Tauri 外壳 **12 tests**、workspace/Tauri 两套 Clippy `-D warnings`、Tauri check、前端 `tsc+vite`、`git diff --check` 全通过；独立 identifier `com.jiaofu.suite.a6b` 的真实 macOS `.app` 完成 16 项阻断验收。
 
-> 整个应用（后端 + Tauri 外壳 + React 看板）已在真实 macOS 上完整编译。`release.yml` 可一键产出未签名安装包。
+> 这些结果不等于授权发布。异模型复核、tag、合并和安装包发布仍需单独放行。
 
 ## 构建安装包
 
@@ -53,12 +55,18 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 ## 开发命令
 
 ```bash
-# 纯逻辑构建与测试（任意平台）
-cargo test
-cargo clippy --workspace --all-targets
+# workspace 纯逻辑（不包含 src-tauri）
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 
-# macOS 上构建 App（后续接入 src-tauri 后）
-# npm install && npm run tauri build
+# Tauri 外壳必须单独检查
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo check --manifest-path src-tauri/Cargo.toml
+
+# 前端与本地 App
+npm run build
+npm run tauri build
 ```
 
 ## 安全红线
