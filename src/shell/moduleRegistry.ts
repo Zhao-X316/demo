@@ -7,6 +7,6 @@ export interface ModuleDef {
 
 export const modules: ModuleDef[] = [
   { key: "recitation", name: "背诵批改", icon: "📖" },
-  // { key: "exam", name: "题目批改", icon: "📝" },
+  { key: "exam", name: "题目批改", icon: "📝" },
   // { key: "wrongbook", name: "错题统计", icon: "📊" },
 ];
