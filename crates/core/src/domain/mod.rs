@@ -8,6 +8,7 @@
 
 pub mod accuracy;
 pub mod hashing;
+pub mod ids;
 pub mod normalize;
 pub mod pinyin_util;
 pub mod scheduler;

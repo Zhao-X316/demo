@@ -29,6 +29,10 @@ pub static CORE_MIGRATIONS: &[Migration] = &[
         id: "core_0004",
         sql: include_str!("schema/0004_memory_card_counters.sql"),
     },
+    Migration {
+        id: "core_0005",
+        sql: include_str!("schema/0005_artifacts.sql"),
+    },
 ];
 
 /// 打开磁盘数据库并开启外键。
@@ -84,7 +88,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT count(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 4);
+        assert_eq!(n, 5);
         // 关键表存在
         let t: i64 = conn
             .query_row(
@@ -102,6 +106,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(effects, 1);
+        let artifacts: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='artifacts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(artifacts, 1);
     }
 
     #[test]
@@ -144,6 +156,43 @@ mod tests {
             )
             .unwrap();
         assert!(table_exists);
+    }
+
+    #[test]
+    fn artifact_migration_preserves_legacy_submission_without_guessing() {
+        let conn = open_in_memory().unwrap();
+        run_migrations(&conn, &CORE_MIGRATIONS[..4]).unwrap();
+        conn.execute(
+            "INSERT INTO submissions (module, media_type, file_path, archived_path, file_hash)
+             VALUES ('recitation', 'audio', '/legacy.wav', '/archive/legacy.wav', 'legacy')",
+            [],
+        )
+        .unwrap();
+        let submission_id = conn.last_insert_rowid();
+
+        run_migrations(&conn, CORE_MIGRATIONS).unwrap();
+        let artifact_id: Option<i64> = conn
+            .query_row(
+                "SELECT artifact_id FROM submissions WHERE id=?1",
+                [submission_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(artifact_id, None);
+        let applied: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM schema_migrations WHERE id='core_0005'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(applied, 1);
+
+        run_migrations(&conn, CORE_MIGRATIONS).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM submissions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
     }
 
     #[test]

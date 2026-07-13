@@ -154,6 +154,125 @@ pub enum MediaType {
     Text,
 }
 
+/// 统一资产类型。原始文件和所有派生文件都在 core 中登记。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    Audio,
+    Document,
+    Page,
+    Crop,
+    Image,
+    Export,
+}
+
+impl ArtifactKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ArtifactKind::Audio => "audio",
+            ArtifactKind::Document => "document",
+            ArtifactKind::Page => "page",
+            ArtifactKind::Crop => "crop",
+            ArtifactKind::Image => "image",
+            ArtifactKind::Export => "export",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "audio" => Some(ArtifactKind::Audio),
+            "document" => Some(ArtifactKind::Document),
+            "page" => Some(ArtifactKind::Page),
+            "crop" => Some(ArtifactKind::Crop),
+            "image" => Some(ArtifactKind::Image),
+            "export" => Some(ArtifactKind::Export),
+            _ => None,
+        }
+    }
+}
+
+/// 资产隐私等级。学生原始证据不能静默降级成可共享内容。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivacyClass {
+    StudentSensitive,
+    TeachingContent,
+    PublicSafe,
+}
+
+impl PrivacyClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PrivacyClass::StudentSensitive => "student_sensitive",
+            PrivacyClass::TeachingContent => "teaching_content",
+            PrivacyClass::PublicSafe => "public_safe",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "student_sensitive" => Some(PrivacyClass::StudentSensitive),
+            "teaching_content" => Some(PrivacyClass::TeachingContent),
+            "public_safe" => Some(PrivacyClass::PublicSafe),
+            _ => None,
+        }
+    }
+}
+
+/// app-managed 归档文件的当前状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchiveStatus {
+    Pending,
+    Ready,
+    Missing,
+    Failed,
+    Deleted,
+}
+
+impl ArchiveStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ArchiveStatus::Pending => "pending",
+            ArchiveStatus::Ready => "ready",
+            ArchiveStatus::Missing => "missing",
+            ArchiveStatus::Failed => "failed",
+            ArchiveStatus::Deleted => "deleted",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "pending" => Some(ArchiveStatus::Pending),
+            "ready" => Some(ArchiveStatus::Ready),
+            "missing" => Some(ArchiveStatus::Missing),
+            "failed" => Some(ArchiveStatus::Failed),
+            "deleted" => Some(ArchiveStatus::Deleted),
+            _ => None,
+        }
+    }
+}
+
+/// 跨模块统一资产。内容字段不可覆盖；校正、裁剪和脱敏通过 parent 创建新资产。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Artifact {
+    pub id: i64,
+    pub public_id: String,
+    pub kind: ArtifactKind,
+    pub sha256: String,
+    pub mime_type: String,
+    pub byte_size: i64,
+    pub original_name: Option<String>,
+    pub original_path: Option<String>,
+    pub archived_path: String,
+    pub parent_artifact_id: Option<i64>,
+    pub derivative_type: Option<String>,
+    pub processing_version: String,
+    pub privacy_class: PrivacyClass,
+    pub archive_status: ArchiveStatus,
+    pub created_at: String,
+}
+
 /// 通用提交（音频/图片/文本）。状态用字符串以便模块灵活扩展。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Submission {
@@ -166,6 +285,7 @@ pub struct Submission {
     pub file_path: String,
     pub archived_path: Option<String>,
     pub file_hash: String,
+    pub artifact_id: Option<i64>,
     pub duration_ms: Option<i64>,
     pub parsed_meta: Option<String>,
     pub recognized_text: Option<String>,

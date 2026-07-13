@@ -19,7 +19,7 @@ pub struct NewSubmission<'a> {
     pub status: &'a str,
 }
 
-const COLS: &str = "id, module, task_id, student_id, ref_id, media_type, file_path, archived_path, file_hash, \
+const COLS: &str = "id, module, task_id, student_id, ref_id, media_type, file_path, archived_path, file_hash, artifact_id, \
     duration_ms, parsed_meta, recognized_text, recognize_meta, recognize_status, anomaly_type, status";
 
 fn row_to_submission(r: &rusqlite::Row<'_>) -> rusqlite::Result<Submission> {
@@ -33,6 +33,7 @@ fn row_to_submission(r: &rusqlite::Row<'_>) -> rusqlite::Result<Submission> {
         file_path: r.get("file_path")?,
         archived_path: r.get("archived_path")?,
         file_hash: r.get("file_hash")?,
+        artifact_id: r.get("artifact_id")?,
         duration_ms: r.get("duration_ms")?,
         parsed_meta: r.get("parsed_meta")?,
         recognized_text: r.get("recognized_text")?,
