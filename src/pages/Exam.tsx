@@ -161,10 +161,19 @@ function GradeTab({
   };
 
   const decide = async (answer: AnswerDetail, correct: boolean) => {
+    const nextNote = (notes[answer.id] ?? answer.human_note ?? "").trim();
+    const sameResult = answer.status === "confirmed" && answer.human_correct === correct;
+    const sameNote = (answer.human_note ?? "") === nextNote;
     setBusy(true);
     try {
-      await examAnswerHumanDecide(answer.id, correct, notes[answer.id]?.trim() || null);
-      onDone(answer.status === "confirmed" ? "改判已完成，错题与掌握度已重算" : "老师终审已保存");
+      await examAnswerHumanDecide(answer.id, correct, nextNote || null);
+      if (sameResult && sameNote) {
+        onDone("结论未变化，未重复累计错题或掌握度");
+      } else if (sameResult) {
+        onDone("终审备注已更新，结论和派生统计未变化");
+      } else {
+        onDone(answer.status === "confirmed" ? "改判已完成，错题与掌握度已重算" : "老师终审已保存");
+      }
     } catch (err) {
       onError(String(err));
     } finally {
@@ -263,8 +272,8 @@ function GradeTab({
           <div className="answer-review">
             <input
               type="text"
-              placeholder={answer.human_note || "终审备注（可选）"}
-              value={notes[answer.id] ?? ""}
+              placeholder="终审备注（可选）"
+              value={notes[answer.id] ?? answer.human_note ?? ""}
               onChange={(event) => setNotes((current) => ({ ...current, [answer.id]: event.target.value }))}
             />
             <div>

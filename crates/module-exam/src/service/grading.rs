@@ -197,6 +197,33 @@ pub fn human_decide(
     note: Option<&str>,
 ) -> CoreResult<AnswerDetail> {
     let tx = conn.unchecked_transaction()?;
+    let normalized_note = note.map(str::trim).filter(|value| !value.is_empty());
+    let current: Option<(String, Option<bool>, Option<String>)> = tx
+        .query_row(
+            "SELECT status, human_correct, human_note
+             FROM exam_student_answers WHERE id=?1",
+            [answer_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((current_status, current_result, current_note)) = current else {
+        return Err(CoreError::NotFound(format!("作答 {answer_id}")));
+    };
+
+    if current_status == "confirmed" && current_result == Some(is_correct) {
+        if current_note.as_deref() != normalized_note {
+            tx.execute(
+                "UPDATE exam_student_answers
+                 SET human_note=?1, updated_at=datetime('now')
+                 WHERE id=?2",
+                (normalized_note, answer_id),
+            )?;
+        }
+        tx.commit()?;
+        return get_answer(conn, answer_id)?
+            .ok_or_else(|| CoreError::Db("教师判定后未取回作答".into()));
+    }
+
     let affected = tx.execute(
         "UPDATE exam_student_answers
          SET human_correct=?1, is_correct=?1,
@@ -204,7 +231,7 @@ pub fn human_decide(
              status='confirmed', human_note=?2,
              decided_at=datetime('now'), updated_at=datetime('now')
          WHERE id=?3",
-        (is_correct as i64, note.map(str::trim), answer_id),
+        (is_correct as i64, normalized_note, answer_id),
     )?;
     if affected == 0 {
         return Err(CoreError::NotFound(format!("作答 {answer_id}")));
@@ -486,12 +513,39 @@ mod tests {
         assert_eq!(mastery, (1, 1));
         assert_eq!(counts(&conn), (1, 0));
 
-        human_decide(&conn, answer.id, true, None).unwrap();
+        conn.execute(
+            "UPDATE exam_student_answers
+             SET decided_at='2026-07-13 01:02:03', updated_at='2026-07-13 01:02:03'
+             WHERE id=?1",
+            [answer.id],
+        )
+        .unwrap();
+        let duplicate = human_decide(
+            &conn,
+            answer.id,
+            true,
+            Some("老师复核后改为正确"),
+        )
+        .unwrap();
+        assert_eq!(duplicate.decided_at.as_deref(), Some("2026-07-13 01:02:03"));
+        let unchanged_updated_at: String = conn
+            .query_row(
+                "SELECT updated_at FROM exam_student_answers WHERE id=?1",
+                [answer.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(unchanged_updated_at, "2026-07-13 01:02:03");
+
+        let note_only = human_decide(&conn, answer.id, true, Some("只更新终审备注")).unwrap();
+        assert_eq!(note_only.human_note.as_deref(), Some("只更新终审备注"));
+        assert_eq!(note_only.decided_at.as_deref(), Some("2026-07-13 01:02:03"));
         let mastery: (i64, i64) = conn.query_row(
             "SELECT total, correct FROM exam_knowledge_mastery WHERE student_id=?1 AND knowledge_point_id=?2",
             (student_id, trap_kp), |r| Ok((r.get(0)?, r.get(1)?)),
         ).unwrap();
         assert_eq!(mastery, (1, 1));
+        assert_eq!(counts(&conn), (1, 0));
     }
 
     #[test]
