@@ -226,6 +226,41 @@ button.tab.active { border-bottom-color: var(--brand); color: var(--brand); font
 .exam-card-head b { font-size: 14px; }
 .exam-form { max-width: none; }
 .exam-form > button { align-self: flex-start; }
+.ok-text { color: var(--ok); }
+.bad-text { color: var(--bad); }
+.objective-empty { display: flex; flex-direction: column; gap: 8px; }
+.objective-toolbar { display: grid; grid-template-columns: minmax(220px, .7fr) minmax(300px, 1.3fr) auto auto; gap: 12px; align-items: end; }
+.objective-toolbar .field { margin: 0; }
+.objective-stats { display: flex; flex-wrap: wrap; gap: 6px 12px; align-self: center; color: var(--muted); font-size: 12px; }
+.objective-stats span { white-space: nowrap; }
+.objective-batch-note { grid-column: 1 / -1; }
+.objective-review-list { display: flex; flex-direction: column; gap: 8px; }
+.objective-review-row { display: grid; grid-template-columns: 150px minmax(0, 1fr) 190px; gap: 14px; align-items: center; padding: 13px 14px; border: 1px solid #F1D39D; border-radius: 9px; background: var(--panel); }
+.objective-review-row.confirmed { border-color: var(--line); }
+.objective-student { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; font-size: 12px; color: var(--muted); }
+.objective-student b { color: var(--text); font-size: 13px; }
+.objective-evidence { display: grid; grid-template-columns: minmax(140px, .45fr) minmax(260px, 1fr); gap: 12px; align-items: center; min-width: 0; }
+.objective-crop { width: 100%; max-height: 90px; object-fit: contain; border: 1px solid var(--line); border-radius: 7px; background: var(--bg-sub); }
+.objective-crop.missing { display: grid; place-items: center; min-height: 72px; color: var(--faint); font-size: 12px; }
+.objective-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 14px; color: var(--muted); font-size: 12px; }
+.objective-facts b { color: var(--text); }
+.objective-facts b.ok-text { color: var(--ok); }
+.objective-facts b.bad-text { color: var(--bad); }
+.objective-actions { display: flex; flex-direction: column; gap: 7px; }
+.objective-actions details { padding: 7px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg-sub); }
+.objective-actions summary { color: var(--muted); font-size: 12px; cursor: pointer; }
+.objective-actions details[open] summary { margin-bottom: 8px; }
+.objective-actions .field { margin-bottom: 7px; }
+.objective-actions .field .fl { font-size: 11px; }
+.objective-actions input { padding: 6px 7px; font-size: 12px; }
+.objective-actions details button { width: 100%; }
+.objective-publish-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; }
+.objective-attempt { display: flex; flex-direction: column; gap: 8px; }
+.objective-attempt .exam-card-head { margin-bottom: 2px; }
+.objective-attempt-score { display: flex; align-items: baseline; gap: 5px; }
+.objective-attempt-score b { font-size: 24px; }
+.objective-attempt-score span { color: var(--muted); font-size: 12px; }
+.objective-attempt > button { margin-top: auto; }
 .form-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, .45fr); gap: 10px; }
 .answer-reference { display: grid; grid-template-columns: auto 1fr auto auto; gap: 10px; padding: 9px 11px; border-radius: 7px; background: var(--bg-sub); color: var(--muted); font-size: 12px; }
 .answer-reference b { color: var(--text); }
@@ -256,4 +291,12 @@ button.tab.active { border-bottom-color: var(--brand); color: var(--brand); font
 @media (max-width: 920px) {
   .exam-grid, .exam-grid.wide-left { grid-template-columns: 1fr; }
   .answer-row { grid-template-columns: 1fr; }
+  .objective-toolbar { grid-template-columns: 1fr; }
+  .objective-batch-note { grid-column: auto; }
+  .objective-review-row { grid-template-columns: 1fr; }
+  .objective-student { flex-direction: row; align-items: center; }
+}
+
+@media (max-width: 620px) {
+  .objective-evidence, .objective-facts { grid-template-columns: 1fr; }
 }

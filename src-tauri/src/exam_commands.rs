@@ -5,7 +5,11 @@ use tauri::State;
 
 use module_exam::db::knowledge_points::{self as kp, KnowledgePoint, KpInput};
 use module_exam::db::questions::{self, NewOption, NewQuestion, Question, QuestionOption};
+use module_exam::service::assessment::{self, GradeDecision, Publication};
 use module_exam::service::grading::{self, AnswerDetail};
+use module_exam::service::objective::{
+    self, ObjectiveReviewBatch, ObjectiveWorkbench, StrictBatchReview,
+};
 use module_exam::vlm::{self as exam_vlm, AnalyzedQuestion};
 
 use crate::secrets;
@@ -13,6 +17,8 @@ use crate::state::AppState;
 use crate::vlm;
 
 type R<T> = Result<T, String>;
+const LOCAL_TEACHER_ACTOR: &str = "teacher";
+
 fn e<E: ToString>(err: E) -> String {
     err.to_string()
 }
@@ -199,6 +205,78 @@ pub fn exam_answer_human_decide(
 pub fn exam_answers_list(state: State<'_, AppState>, limit: Option<i64>) -> R<Vec<AnswerDetail>> {
     let conn = lock(&state)?;
     grading::list_answers(&conn, limit.unwrap_or(50)).map_err(e)
+}
+
+// ───────────────────── T6 标准卷按题终审 ─────────────────────
+
+/// 只读工作台：聚合当前 observation、机器建议、老师 revision 和发布预览。
+#[tauri::command]
+pub fn exam_objective_workbench(
+    state: State<'_, AppState>,
+    assessment_version_id: Option<i64>,
+    limit: Option<i64>,
+) -> R<ObjectiveWorkbench> {
+    let conn = lock(&state)?;
+    objective::list_objective_workbench(&conn, assessment_version_id, limit.unwrap_or(500))
+        .map_err(e)
+}
+
+/// 老师逐条接受当前客观题建议；不会自动发布成绩。
+#[tauri::command]
+pub fn exam_objective_accept(state: State<'_, AppState>, suggestion_id: i64) -> R<GradeDecision> {
+    let conn = lock(&state)?;
+    objective::accept_objective_suggestion(&conn, suggestion_id, LOCAL_TEACHER_ACTOR).map_err(e)
+}
+
+/// 老师对异常记录人工记分；写 teacher_corrected revision，仍不自动发布。
+#[tauri::command]
+pub fn exam_objective_correct(
+    state: State<'_, AppState>,
+    suggestion_id: i64,
+    teacher_score: f64,
+    teacher_note: Option<String>,
+) -> R<GradeDecision> {
+    let conn = lock(&state)?;
+    objective::correct_objective_suggestion(
+        &conn,
+        suggestion_id,
+        teacher_score,
+        teacher_note.as_deref(),
+        LOCAL_TEACHER_ACTOR,
+    )
+    .map_err(e)
+}
+
+/// 严格批量确认：服务层会逐条记录纳入/排除原因，且整批原子提交。
+#[tauri::command]
+pub fn exam_objective_strict_batch_accept(
+    state: State<'_, AppState>,
+    suggestion_ids: Vec<i64>,
+    confidence_threshold: Option<f64>,
+    idempotency_key: String,
+) -> R<ObjectiveReviewBatch> {
+    let conn = lock(&state)?;
+    objective::strict_batch_accept(
+        &conn,
+        &StrictBatchReview {
+            suggestion_ids: &suggestion_ids,
+            confidence_threshold: confidence_threshold
+                .unwrap_or(objective::DEFAULT_STRICT_BATCH_CONFIDENCE),
+            reviewed_by: LOCAL_TEACHER_ACTOR,
+            idempotency_key: &idempotency_key,
+        },
+    )
+    .map_err(e)
+}
+
+/// 老师显式发布单份 attempt；只有全部题目已终审时服务层才放行。
+#[tauri::command]
+pub fn exam_objective_publish_attempt(
+    state: State<'_, AppState>,
+    attempt_id: i64,
+) -> R<Publication> {
+    let conn = lock(&state)?;
+    assessment::publish_attempt(&conn, attempt_id, LOCAL_TEACHER_ACTOR).map_err(e)
 }
 
 // ───────────────────────── 豆包视觉：题目预分析 ─────────────────────────

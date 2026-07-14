@@ -97,6 +97,71 @@ pub struct StrictBatchReview<'a> {
     pub idempotency_key: &'a str,
 }
 
+/// T6 按题工作台只读行。它把老师终审需要的证据聚到一个 DTO，
+/// 但不暴露供应商凭据、任意模型参数或可写数据库状态。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObjectiveWorkbenchRow {
+    pub assessment_id: i64,
+    pub assessment_version_id: i64,
+    pub assessment_title: String,
+    pub attempt_id: i64,
+    pub attempt_state: String,
+    pub active_publication_id: Option<i64>,
+    pub student_id: i64,
+    pub student_no: String,
+    pub student_name: String,
+    pub assessment_item_id: i64,
+    pub order_index: i64,
+    pub max_score: f64,
+    pub question_version_id: i64,
+    pub question_no: String,
+    pub question_type: String,
+    pub question_stem: String,
+    pub answer_region_revision_id: i64,
+    pub crop_path: Option<String>,
+    pub suggestion_id: i64,
+    pub observation_state: String,
+    pub observed_answer_json: Option<String>,
+    pub confidence: Option<f64>,
+    pub suggestion_outcome: String,
+    pub suggested_score: Option<f64>,
+    pub batch_eligible: bool,
+    pub exclusion_reason: Option<String>,
+    pub grade_decision_id: Option<i64>,
+    pub grade_decision_revision: Option<i64>,
+    pub teacher_score: Option<f64>,
+    pub confirmation_level: Option<String>,
+    pub review_mode: Option<String>,
+    pub current_suggestion_confirmed: bool,
+    pub decided_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObjectiveAttemptSummary {
+    pub assessment_id: i64,
+    pub assessment_version_id: i64,
+    pub assessment_title: String,
+    pub attempt_id: i64,
+    pub attempt_state: String,
+    pub active_publication_id: Option<i64>,
+    pub student_id: i64,
+    pub student_no: String,
+    pub student_name: String,
+    pub item_count: i64,
+    pub observed_count: i64,
+    pub confirmed_count: i64,
+    pub teacher_total_score: f64,
+    pub max_total_score: f64,
+    pub published_total_score: Option<f64>,
+    pub can_publish: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObjectiveWorkbench {
+    pub rows: Vec<ObjectiveWorkbenchRow>,
+    pub attempts: Vec<ObjectiveAttemptSummary>,
+}
+
 #[derive(Debug)]
 struct ObservationScope {
     attempt_id: i64,
@@ -110,6 +175,7 @@ struct ObservationScope {
 #[derive(Debug)]
 struct ReviewScope {
     assessment_version_id: i64,
+    max_score: f64,
     suggestion: ObjectiveGradeSuggestion,
     observation_state: String,
     observation_result: String,
@@ -228,6 +294,151 @@ pub fn get_objective_suggestion(
             suggestion_row,
         )
         .optional()?)
+}
+
+/// 读取当前 active observation/suggestion 对应的按题终审工作台。
+/// `assessment_version_id=None` 时返回最近范围，供桌面端首次进入使用。
+pub fn list_objective_workbench(
+    conn: &Connection,
+    assessment_version_id: Option<i64>,
+    limit: i64,
+) -> CoreResult<ObjectiveWorkbench> {
+    let limit = limit.clamp(1, 1000);
+    let mut row_stmt = conn.prepare(
+        "SELECT a.id,v.id,a.title,
+                at.id,at.state,at.active_publication_id,
+                st.id,st.student_no,st.name,
+                i.id,i.order_index,i.score,
+                q.id,
+                COALESCE(CAST(json_extract(i.presentation_snapshot_json,'$.question_no') AS TEXT),
+                         CAST(i.order_index + 1 AS TEXT)),
+                q.question_type,q.stem,
+                o.answer_region_revision_id,art.archived_path,
+                s.id,o.result_state,o.observed_answer_json,o.confidence,
+                s.outcome,s.suggested_score,s.batch_eligible,s.exclusion_reason,
+                d.id,d.revision,d.teacher_score,d.confirmation_level,src.review_mode,
+                CASE WHEN src.suggestion_id=s.id THEN 1 ELSE 0 END,d.decided_at
+         FROM exam_objective_grade_suggestions_v2 s
+         JOIN exam_objective_observation_revisions_v2 o
+           ON o.id=s.observation_revision_id AND o.state='active'
+         JOIN exam_answer_region_revisions_v2 r
+           ON r.id=o.answer_region_revision_id
+         LEFT JOIN artifacts art ON art.id=r.crop_artifact_id
+         JOIN exam_attempts_v2 at ON at.id=s.attempt_id AND at.state<>'voided'
+         JOIN students st ON st.id=at.student_id
+         JOIN exam_assessment_items_v2 i
+           ON i.id=s.assessment_item_id AND i.state='active'
+         JOIN exam_assessment_versions_v2 v ON v.id=i.assessment_version_id
+         JOIN exam_assessments_v2 a ON a.id=v.assessment_id
+         JOIN k1_question_versions q ON q.id=i.question_version_id
+         LEFT JOIN exam_grade_decisions_v2 d
+           ON d.attempt_id=at.id AND d.assessment_item_id=i.id AND d.state='active'
+         LEFT JOIN exam_grade_decision_objective_sources_v2 src
+           ON src.grade_decision_id=d.id
+         WHERE s.state='active' AND (?1 IS NULL OR v.id=?1)
+         ORDER BY v.id DESC,i.order_index,st.student_no,at.attempt_no
+         LIMIT ?2",
+    )?;
+    let rows = row_stmt
+        .query_map((assessment_version_id, limit), |row| {
+            Ok(ObjectiveWorkbenchRow {
+                assessment_id: row.get(0)?,
+                assessment_version_id: row.get(1)?,
+                assessment_title: row.get(2)?,
+                attempt_id: row.get(3)?,
+                attempt_state: row.get(4)?,
+                active_publication_id: row.get(5)?,
+                student_id: row.get(6)?,
+                student_no: row.get(7)?,
+                student_name: row.get(8)?,
+                assessment_item_id: row.get(9)?,
+                order_index: row.get(10)?,
+                max_score: row.get(11)?,
+                question_version_id: row.get(12)?,
+                question_no: row.get(13)?,
+                question_type: row.get(14)?,
+                question_stem: row.get(15)?,
+                answer_region_revision_id: row.get(16)?,
+                crop_path: row.get(17)?,
+                suggestion_id: row.get(18)?,
+                observation_state: row.get(19)?,
+                observed_answer_json: row.get(20)?,
+                confidence: row.get(21)?,
+                suggestion_outcome: row.get(22)?,
+                suggested_score: row.get(23)?,
+                batch_eligible: row.get(24)?,
+                exclusion_reason: row.get(25)?,
+                grade_decision_id: row.get(26)?,
+                grade_decision_revision: row.get(27)?,
+                teacher_score: row.get(28)?,
+                confirmation_level: row.get(29)?,
+                review_mode: row.get(30)?,
+                current_suggestion_confirmed: row.get(31)?,
+                decided_at: row.get(32)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(row_stmt);
+
+    let mut attempt_stmt = conn.prepare(
+        "SELECT a.id,v.id,a.title,
+                at.id,at.state,at.active_publication_id,
+                st.id,st.student_no,st.name,
+                (SELECT COUNT(*) FROM exam_assessment_items_v2 i
+                 WHERE i.assessment_version_id=v.id AND i.state='active'),
+                (SELECT COUNT(*) FROM exam_objective_grade_suggestions_v2 s
+                 WHERE s.attempt_id=at.id AND s.state='active'),
+                (SELECT COUNT(*) FROM exam_grade_decisions_v2 d
+                 JOIN exam_assessment_items_v2 i ON i.id=d.assessment_item_id
+                 WHERE d.attempt_id=at.id AND d.state='active'
+                   AND i.assessment_version_id=v.id AND i.state='active'),
+                (SELECT COALESCE(SUM(d.teacher_score),0.0)
+                 FROM exam_grade_decisions_v2 d
+                 JOIN exam_assessment_items_v2 i ON i.id=d.assessment_item_id
+                 WHERE d.attempt_id=at.id AND d.state='active'
+                   AND i.assessment_version_id=v.id AND i.state='active'),
+                (SELECT COALESCE(SUM(i.score),0.0)
+                 FROM exam_assessment_items_v2 i
+                 WHERE i.assessment_version_id=v.id AND i.state='active'),
+                pi.total_score,
+                CASE WHEN at.state='ready_to_publish' THEN 1 ELSE 0 END
+         FROM exam_attempts_v2 at
+         JOIN students st ON st.id=at.student_id
+         JOIN exam_assessment_versions_v2 v ON v.id=at.assessment_version_id
+         JOIN exam_assessments_v2 a ON a.id=v.assessment_id
+         LEFT JOIN exam_grade_publication_items_v2 pi
+           ON pi.publication_id=at.active_publication_id AND pi.attempt_id=at.id
+         WHERE at.state<>'voided'
+           AND (?1 IS NULL OR v.id=?1)
+           AND EXISTS(SELECT 1 FROM exam_objective_grade_suggestions_v2 s
+                      WHERE s.attempt_id=at.id AND s.state='active')
+         ORDER BY v.id DESC,st.student_no,at.attempt_no
+         LIMIT ?2",
+    )?;
+    let attempts = attempt_stmt
+        .query_map((assessment_version_id, limit), |row| {
+            Ok(ObjectiveAttemptSummary {
+                assessment_id: row.get(0)?,
+                assessment_version_id: row.get(1)?,
+                assessment_title: row.get(2)?,
+                attempt_id: row.get(3)?,
+                attempt_state: row.get(4)?,
+                active_publication_id: row.get(5)?,
+                student_id: row.get(6)?,
+                student_no: row.get(7)?,
+                student_name: row.get(8)?,
+                item_count: row.get(9)?,
+                observed_count: row.get(10)?,
+                confirmed_count: row.get(11)?,
+                teacher_total_score: row.get(12)?,
+                max_total_score: row.get(13)?,
+                published_total_score: row.get(14)?,
+                can_publish: row.get(15)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok(ObjectiveWorkbench { rows, attempts })
 }
 
 fn get_observation_result(
@@ -599,7 +810,7 @@ fn review_scope(conn: &Connection, suggestion_id: i64) -> CoreResult<ReviewScope
                 s.id,s.public_id,s.observation_revision_id,s.attempt_id,
                 s.assessment_item_id,s.answer_key_version_id,s.outcome,s.suggested_score,
                 s.result_json,s.batch_eligible,s.exclusion_reason,s.state,
-                o.state,o.result_state,o.confidence,r.state,r.decision
+                o.state,o.result_state,o.confidence,r.state,r.decision,i.score
          FROM exam_objective_grade_suggestions_v2 s
          JOIN exam_objective_observation_revisions_v2 o ON o.id=s.observation_revision_id
          JOIN exam_answer_region_revisions_v2 r ON r.id=o.answer_region_revision_id
@@ -609,6 +820,7 @@ fn review_scope(conn: &Connection, suggestion_id: i64) -> CoreResult<ReviewScope
         |row| {
             Ok(ReviewScope {
                 assessment_version_id: row.get(0)?,
+                max_score: row.get(18)?,
                 suggestion: ObjectiveGradeSuggestion {
                     id: row.get(1)?,
                     public_id: row.get(2)?,
@@ -738,6 +950,76 @@ pub fn accept_objective_suggestion(
             point_results_json: &scope.suggestion.result_json,
             teacher_note: None,
             confirmation_level: "teacher_accepted",
+            decided_by: reviewed_by,
+        },
+    )?;
+    let now = time::utc_now_rfc3339();
+    link_decision_source(
+        &tx,
+        decision.id,
+        suggestion_id,
+        "single",
+        None,
+        reviewed_by.trim(),
+        &now,
+    )?;
+    tx.commit()?;
+    Ok(decision)
+}
+
+/// 老师查看原始题区后对异常或机器建议进行人工记分。
+/// 结果写入新的 `teacher_corrected` revision，并继续保留具体 suggestion 来源。
+pub fn correct_objective_suggestion(
+    conn: &Connection,
+    suggestion_id: i64,
+    teacher_score: f64,
+    teacher_note: Option<&str>,
+    reviewed_by: &str,
+) -> CoreResult<GradeDecision> {
+    required(reviewed_by, "客观题终审人")?;
+    let teacher_note = teacher_note
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| CoreError::Invalid("人工记分必须填写证据依据".into()))?;
+    let tx = conn.unchecked_transaction()?;
+    let scope = review_scope(&tx, suggestion_id)?;
+    if scope.suggestion.state != "active" || scope.observation_state != "active" {
+        return Err(CoreError::Invalid("客观题建议已被后续观察替代".into()));
+    }
+    if scope.region_state != "active" || scope.region_decision != "teacher_confirmed" {
+        return Err(CoreError::Invalid(
+            "答案区域已变化，请先重新核对页面证据".into(),
+        ));
+    }
+    if !teacher_score.is_finite()
+        || teacher_score < 0.0
+        || teacher_score > scope.max_score + 0.000_001
+    {
+        return Err(CoreError::Invalid(format!(
+            "人工得分必须位于 0~{} 分",
+            scope.max_score
+        )));
+    }
+    let machine_result: Value = serde_json::from_str(&scope.suggestion.result_json)
+        .map_err(|error| CoreError::Parse(format!("客观题机器建议 JSON 无效：{error}")))?;
+    let point_results = serde_json::json!({
+        "schema_version": 1,
+        "source": "objective_teacher_correction",
+        "suggestion_id": suggestion_id,
+        "machine_result": machine_result,
+        "teacher_score": teacher_score
+    })
+    .to_string();
+    let decision = decide_grade_in_transaction(
+        &tx,
+        &NewGradeDecision {
+            attempt_id: scope.suggestion.attempt_id,
+            assessment_item_id: scope.suggestion.assessment_item_id,
+            machine_grade_ai_run_id: None,
+            teacher_score,
+            point_results_json: &point_results,
+            teacher_note: Some(teacher_note),
+            confirmation_level: "teacher_corrected",
             decided_by: reviewed_by,
         },
     )?;
@@ -1223,6 +1505,55 @@ mod tests {
     }
 
     #[test]
+    fn teacher_correction_completes_an_unscored_exception_idempotently() {
+        let fixture = setup();
+        let blank = record_objective_observation(
+            &fixture.conn,
+            &NewObjectiveObservation {
+                answer_region_revision_id: fixture.region_one,
+                source_kind: "fixed_fixture",
+                result_state: "blank",
+                observed_answer_json: None,
+                confidence: None,
+                ai_run_id: None,
+                failure_meta_json: None,
+                idempotency_key: "teacher-correct-blank",
+            },
+        )
+        .unwrap();
+        assert_eq!(blank.suggestion.outcome, "unscored");
+
+        let first = correct_objective_suggestion(
+            &fixture.conn,
+            blank.suggestion.id,
+            0.5,
+            Some("已查看原始题区，按部分作答记分"),
+            "teacher",
+        )
+        .unwrap();
+        let repeated = correct_objective_suggestion(
+            &fixture.conn,
+            blank.suggestion.id,
+            0.5,
+            Some("已查看原始题区，按部分作答记分"),
+            "teacher",
+        )
+        .unwrap();
+        assert_eq!(first.id, repeated.id);
+        assert_eq!(first.teacher_score, 0.5);
+        assert_eq!(first.confirmation_level, "teacher_corrected");
+
+        let workbench = list_objective_workbench(&fixture.conn, Some(1), 100).unwrap();
+        assert!(workbench.rows[0].current_suggestion_confirmed);
+        assert_eq!(workbench.rows[0].teacher_score, Some(0.5));
+        assert_eq!(
+            workbench.rows[0].confirmation_level.as_deref(),
+            Some("teacher_corrected")
+        );
+        assert!(workbench.attempts[0].can_publish);
+    }
+
+    #[test]
     fn strict_batch_confirms_only_high_confidence_and_records_exclusions() {
         let fixture = setup();
         let high = record_objective_observation(
@@ -1357,5 +1688,62 @@ mod tests {
             )
             .unwrap();
         assert_eq!(counts, (0, 0, 0));
+    }
+
+    #[test]
+    fn workbench_read_model_tracks_review_totals_and_explicit_publication() {
+        let fixture = setup();
+        let high = record_objective_observation(
+            &fixture.conn,
+            &observed(fixture.region_one, "workbench-high", 0.99),
+        )
+        .unwrap();
+        record_objective_observation(
+            &fixture.conn,
+            &observed(fixture.region_two, "workbench-low", 0.72),
+        )
+        .unwrap();
+
+        let initial = list_objective_workbench(&fixture.conn, None, 100).unwrap();
+        assert_eq!(initial.rows.len(), 2);
+        assert_eq!(initial.attempts.len(), 2);
+        assert_eq!(initial.rows[0].question_no, "1");
+        assert_eq!(initial.rows[0].observation_state, "recognized");
+        assert!(!initial.rows[0].current_suggestion_confirmed);
+        assert_eq!(
+            initial.rows[1].exclusion_reason.as_deref(),
+            Some("LOW_CONFIDENCE")
+        );
+
+        accept_objective_suggestion(&fixture.conn, high.suggestion.id, "teacher").unwrap();
+        let reviewed = list_objective_workbench(&fixture.conn, Some(1), 100).unwrap();
+        let reviewed_row = reviewed
+            .rows
+            .iter()
+            .find(|row| row.suggestion_id == high.suggestion.id)
+            .unwrap();
+        assert!(reviewed_row.current_suggestion_confirmed);
+        assert_eq!(reviewed_row.teacher_score, Some(1.0));
+        let reviewed_attempt = reviewed
+            .attempts
+            .iter()
+            .find(|attempt| attempt.attempt_id == fixture.attempt_one)
+            .unwrap();
+        assert_eq!(reviewed_attempt.confirmed_count, 1);
+        assert_eq!(reviewed_attempt.teacher_total_score, 1.0);
+        assert!(reviewed_attempt.can_publish);
+        assert_eq!(reviewed_attempt.published_total_score, None);
+
+        super::super::assessment::publish_attempt(&fixture.conn, fixture.attempt_one, "teacher")
+            .unwrap();
+        let published = list_objective_workbench(&fixture.conn, Some(1), 100).unwrap();
+        let published_attempt = published
+            .attempts
+            .iter()
+            .find(|attempt| attempt.attempt_id == fixture.attempt_one)
+            .unwrap();
+        assert_eq!(published_attempt.attempt_state, "published");
+        assert!(!published_attempt.can_publish);
+        assert_eq!(published_attempt.published_total_score, Some(1.0));
     }
 }
