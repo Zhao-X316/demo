@@ -194,6 +194,20 @@ pub fn create_question_version(
     conn: &Connection,
     input: &NewQuestionVersion<'_>,
 ) -> CoreResult<QuestionVersion> {
+    let tx = conn.unchecked_transaction()?;
+    let version = create_question_version_in_transaction(&tx, input)?;
+    tx.commit()?;
+    Ok(version)
+}
+
+/// 在调用方持有的 transaction 内创建不可变题目版本。
+///
+/// 供跨模块工作流把题目身份、题目版本和自己的业务引用原子提交；
+/// 本函数不会自行 commit，事务边界仍由调用方负责。
+pub fn create_question_version_in_transaction(
+    conn: &Connection,
+    input: &NewQuestionVersion<'_>,
+) -> CoreResult<QuestionVersion> {
     validate_question_type(input.question_type)?;
     required(input.stem, "题干")?;
     if !input.max_score.is_finite() || input.max_score <= 0.0 {
@@ -230,8 +244,7 @@ pub fn create_question_version(
     let hash = content_hash(input)?;
     let public_id = ids::new_public_id();
     let created_at = time::utc_now_rfc3339();
-    let tx = conn.unchecked_transaction()?;
-    tx.execute(
+    conn.execute(
         "INSERT INTO k1_question_versions
          (public_id, question_id, revision, question_type, stem, material_text, max_score,
           content_hash, source_artifact_id, source_anchor_json, supersedes_version_id,
@@ -254,9 +267,9 @@ pub fn create_question_version(
             &created_at,
         ),
     )?;
-    let version_id = tx.last_insert_rowid();
+    let version_id = conn.last_insert_rowid();
     for option in input.options {
-        tx.execute(
+        conn.execute(
             "INSERT INTO k1_question_options
              (public_id, question_version_id, label, content, order_index, created_at)
              VALUES (?1,?2,?3,?4,?5,?6)",
@@ -270,7 +283,6 @@ pub fn create_question_version(
             ),
         )?;
     }
-    tx.commit()?;
     get_question_version(conn, version_id)?
         .ok_or_else(|| CoreError::NotFound("刚创建的题目版本".into()))
 }
@@ -336,6 +348,35 @@ pub fn find_exact_versions(
          ORDER BY id",
     )?;
     let ids = stmt.query_map((hash, question_type), |row| row.get::<_, i64>(0))?;
+    let mut out = Vec::new();
+    for id in ids {
+        if let Some(version) = get_question_version(conn, id?)? {
+            out.push(version);
+        }
+    }
+    Ok(out)
+}
+
+/// 在指定题库空间内查找精确内容版本，避免私有题目跨老师误复用。
+pub fn find_exact_versions_for_owner(
+    conn: &Connection,
+    hash: &str,
+    question_type: &str,
+    owner_scope: &str,
+    owner_id: &str,
+) -> CoreResult<Vec<QuestionVersion>> {
+    let mut stmt = conn.prepare(
+        "SELECT v.id
+         FROM k1_question_versions v
+         JOIN k1_questions q ON q.id=v.question_id
+         WHERE v.content_hash=?1 AND v.question_type=?2
+           AND v.state NOT IN ('deprecated','archived')
+           AND q.owner_scope=?3 AND q.owner_id=?4
+         ORDER BY v.id",
+    )?;
+    let ids = stmt.query_map((hash, question_type, owner_scope, owner_id.trim()), |row| {
+        row.get::<_, i64>(0)
+    })?;
     let mut out = Vec::new();
     for id in ids {
         if let Some(version) = get_question_version(conn, id?)? {

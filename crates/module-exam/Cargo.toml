@@ -6,11 +6,9 @@ description = "M2 改作业模块：图像识别 + 答案对比 + 逐选项知�
 
 [dependencies]
 suite-core = { path = "../core" }
+module-knowledge = { path = "../module-knowledge" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 rusqlite = "0.31"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
-
-[dev-dependencies]
-module-knowledge = { path = "../module-knowledge" }
