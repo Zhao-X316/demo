@@ -8,7 +8,7 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 
 ## 当前进度
 
-> 2026-07-14：M1 A6b 隔离真机 G01-G16 与 M2-A1 手工客观题纵切均已通过。独立分支 `codex/t2-artifacts` 已完成 T2～T5；T6 在 `de55b34` 固定客观题服务核心后，又由 `8346753` 接通 Tauri DTO/命令、按题工作台、严格批量确认、异常人工记分、总分预览和显式发布。真实 OMR provider 仍未接入；所有范围仍未 tag、合并、推送或发布。
+> 2026-07-14：M1 A6b 隔离真机 G01-G16 与 M2-A1 手工客观题纵切均已通过。独立分支 `codex/t2-artifacts` 已完成 T2～T5；T6 在 `de55b34` 固定客观题服务核心、由 `8346753` 接通桌面工作台后，又补上独立 bundle id、固定业务夹具和真 `.app` 数据态验收。真实 OMR provider 仍未接入；所有范围仍未 tag、合并、推送或发布。
 
 | 部分 | 状态 | 说明 |
 |------|------|------|
@@ -27,11 +27,11 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 | 页面与老师终审 | ✅ A6b 真机通过 | 机器只给建议；老师核对录音/ASR/答案版本/评分/备注后终审，副作用才生效 |
 | M2 页面证据链 / OCR | 🟡 T4 契约完成 | 固定夹具已覆盖原图 artifact、页面质量、学生/页码匹配、模板配准、题区裁剪、异常池、重启恢复和完整追溯；真实 OCR/OMR provider 与新 UI 尚未接入 |
 | M2.5 题目自动沉淀 | 🟡 T5 核心合同完成 | 精确复用当前作业已固定的 K1 版本；否则创建老师私有 C0 候选；冲突/歧义进入待确认，学生卷只允许脱敏文本；相似题语义检索、候选整理 UI 和晋级尚未接入 |
-| M2 标准卷客观题 | 🟡 T6 桌面纵切完成·待真实 OMR | 选择/判断观察与确定性建议；空白/涂改/低置信/失败分态；按题逐条或严格批量终审；异常需老师填写依据后人工记分；全题终审后仍需显式发布 |
+| M2 标准卷客观题 | 🟡 T6 真 `.app` 数据态纵切完成·待真实 OMR | 固定隔离夹具已验证选择/判断观察、2 条严格批量、4 条异常逐条人工记分、6 份显式发布与 12 条正式学习证据；真实扫描/拍照 OMR 仍未接入 |
 | 音频回放 | ✅ app-managed archive | 按 hash 归档；原文件改名、重启和数据库恢复后仍可回放，原路径只兜底 |
 | ffmpeg 转码/时长探测 | ✅ 可选集成 | 装了 ffmpeg 则转 16k 单声道 wav + 探测时长，否则降级 |
 
-当前 T6 桌面纵切 HEAD 已验证：module-exam **33 tests**、workspace **162 tests**、Tauri 外壳 **12 tests**、workspace/Tauri 两套 Clippy `-D warnings`、Tauri check、前端 `tsc+vite` 和 `git diff --check` 全通过；`tauri build --debug --bundles app` 成功生成 `.app`。使用隔离 `HOME=/tmp/jiaofu-t6-shell-20260714` 启动真实 App shell，创建本地库/每日备份并完成 17 个迁移，`integrity_check=ok`；未接入固定业务 fixture，因此这只证明真壳启动/迁移，不等于终审 UI 的数据态真机验收。三份真实数据库副本迁移证据仍见上一批 `/tmp/jiaofu-t6-migrate.j5VOSi`，正式库未写入。完整 debug DMG 在本机 `bundle_dmg.sh` 阶段失败，但 `.app` 构建成功；该打包环境问题未被包装成发布完成。真实 OMR provider、扫描/拍照样本和阈值校准仍待完成。
+当前 T6 已验证：module-exam **33 tests**、workspace **162 tests**、Tauri `--all-targets` **14 tests**（外壳 12 + 隔离夹具 2）、workspace/Tauri 两套 Clippy `-D warnings`、Tauri check、前端 `tsc+vite` 和 `git diff --check` 全通过；`npm run acceptance:t6:build` 生成 bundle id 为 `com.jiaofu.suite.t6fixture` 的独立 `.app`。固定夹具完成 17 个迁移、6 份作答、2 条严格批量、4 条异常人工终审、6 个发布 revision 和 12 条正式学习证据，`integrity_check=ok`、外键违规 0、归档缺失 0。真 `.app` 已完成终审与发布 UI 操作；同一隔离库的进程重启及发布后数据库复核通过，但重启后 GUI 留图仍受 macOS 锁屏阻挡，未包装成完整重启界面验收。正式库未写入。完整 debug DMG 的既有本机打包问题仍未冒充发布完成；真实 OMR provider、扫描/拍照样本和阈值校准仍待完成。
 
 > 这些结果不等于授权发布。异模型复核、tag、合并和安装包发布仍需单独放行。
 
@@ -75,6 +75,10 @@ cargo check --manifest-path src-tauri/Cargo.toml
 # 前端与本地 App
 npm run build
 npm run tauri build
+
+# T6 独立验收包（独立 bundle id，不读取正式应用目录）
+npm run acceptance:t6:build
+cargo test --manifest-path src-tauri/Cargo.toml --example t6_objective_fixture
 ```
 
 ## 安全红线
