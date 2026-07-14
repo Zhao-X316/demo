@@ -8,7 +8,7 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 
 ## 当前进度
 
-> 2026-07-13：M1 A6b 隔离真机 G01-G16 与 M2-A1 手工客观题纵切均已通过。当前在独立分支 `codex/t2-artifacts` 完成 T2 共享内核、T3 K1/M2-B0 兼容底座、T4 M2-B1 页面/题区证据链和 T5 M2.5-0/1 私有候选自动沉淀合同，功能 HEAD `4c1f865`；所有范围仍未 tag、合并、推送或发布。
+> 2026-07-14：M1 A6b 隔离真机 G01-G16 与 M2-A1 手工客观题纵切均已通过。当前在独立分支 `codex/t2-artifacts` 完成 T2～T5，并由 `de55b34` 落地 T6 客观题核心纵切：观察/确定性建议、老师单题与严格批量终审、显式发布和正式学习证据；所有范围仍未 tag、合并、推送或发布。
 
 | 部分 | 状态 | 说明 |
 |------|------|------|
@@ -18,19 +18,20 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 | `crates/module-recitation` M1 域 | ✅ 实现 + 单测 | 文件名解析、熟练度 A/B/C、评分编排、识别 ports、rec_contents 仓储 |
 | `crates/module-recitation` M1 服务 | ✅ 实现 + 单测 | import 去重/归档、ASR 可恢复状态机、机器建议、老师终审、补背/到期复习/日切、双向改判 |
 | `crates/module-knowledge` K1 | 🟡 T3 兼容底座 | 教材/知识/考点/能力稳定版本，题目/答案/rubric/link 不可变版本，C0～L4 质量闸门与旧表显式映射；导入、搜索和 UI 尚未接入 |
-| `crates/module-exam` M2 | 🟡 A1 + B0/B1 + M2.5-0/1 底座 | 手工客观题终审纵切已真机通过；assessment/version/item/attempt、评分/发布 revision、页面证据链，以及可恢复题目沉淀 job、私有 C0 候选、精确复用和隐私门禁已落地 |
+| `crates/module-exam` M2 | 🟡 A1 + B0/B1 + M2.5 + B2 核心 | 手工纵切已真机通过；assessment/attempt、页面证据链、私有候选沉淀，以及客观题 observation/suggestion、单题/严格批量终审、显式发布和正式 learning evidence 已落地 |
 | Tauri 应用外壳 `src-tauri` | ✅ 实现 + 独立检查 | DB+迁移、终审命令、在线备份/恢复、按 hash 录音归档、凭据掩码与最小 asset scope |
-| 前端 `src` | 🟡 M1/M2-A1 已接入 | 方向 B 模块切换；M1 六区，以及 M2-A1 快速批改/题库/知识点页面；T3/T4/T5 新契约暂未新增 UI |
+| 前端 `src` | 🟡 M1/M2-A1 已接入 | 方向 B 模块切换；M1 六区，以及 M2-A1 快速批改/题库/知识点页面；T3～T6 新契约暂未新增 UI |
 | 跨平台 CI | ✅ 后端三平台 + 应用 Win/Mac 编译 | `.github/workflows/ci.yml` |
 | 打包 CI（安装包） | ✅ 工作流就绪 | `release.yml`：手动/tag 触发出 `.msi/.exe/.dmg` |
 | 火山 ASR 真接口 | ✅ 标准版 submit+query | 境内端点绕系统代理；processing/ok/failed 可恢复，失败可重试、同 hash 重定位或作废 |
 | 页面与老师终审 | ✅ A6b 真机通过 | 机器只给建议；老师核对录音/ASR/答案版本/评分/备注后终审，副作用才生效 |
 | M2 页面证据链 / OCR | 🟡 T4 契约完成 | 固定夹具已覆盖原图 artifact、页面质量、学生/页码匹配、模板配准、题区裁剪、异常池、重启恢复和完整追溯；真实 OCR/OMR provider 与新 UI 尚未接入 |
 | M2.5 题目自动沉淀 | 🟡 T5 核心合同完成 | 精确复用当前作业已固定的 K1 版本；否则创建老师私有 C0 候选；冲突/歧义进入待确认，学生卷只允许脱敏文本；相似题语义检索、候选整理 UI 和晋级尚未接入 |
+| M2 标准卷客观题 | 🟡 T6 核心合同完成 | 选择/判断观察与标准答案确定性比较；空白、涂改、低置信度、失败分态；严格批量逐条留痕；单题/批量确认不自动发布；发布与正式证据同事务，改分撤销旧证据 |
 | 音频回放 | ✅ app-managed archive | 按 hash 归档；原文件改名、重启和数据库恢复后仍可回放，原路径只兜底 |
 | ffmpeg 转码/时长探测 | ✅ 可选集成 | 装了 ffmpeg 则转 16k 单声道 wav + 探测时长，否则降级 |
 
-当前 T5 功能 HEAD 已验证：T5 专项 **8 tests**、workspace **156 tests**、Tauri 外壳 **12 tests**、workspace/Tauri 两套 Clippy `-D warnings`、Tauri check、前端 `tsc+vite` 和 `git diff --check` 全通过。三份真实数据库仅复制到 `/tmp/jiaofu-t5-final.tAwmY6` 执行全部 16 个迁移，均为 `integrity_check=ok`、foreign key check 0 行、T5 表 4 张/触发器 5 个，源库 hash 不变。M1 有独立 identifier `com.jiaofu.suite.a6b` 的 16 项真机证据；M2-A1 也已在 `com.jiaofu.suite.m2a1` 完成终审、改判、幂等和重启持久化真机验收。T4/T5 目前仍是数据库/服务契约和固定夹具纵向链路，不代表真实 OCR/OMR、候选整理 UI 或相似题语义检索已完成。
+当前 T6 核心 HEAD 已验证：module-exam **31 tests**、workspace **160 tests**、Tauri 外壳 **12 tests**、workspace/Tauri 两套 Clippy `-D warnings`、Tauri check、前端 `tsc+vite` 和 `git diff --check` 全通过。三份真实数据库仅复制到 `/tmp/jiaofu-t6-migrate.j5VOSi` 执行全部 17 个迁移，均为 `integrity_check=ok`、foreign key check 0 行、T6 表 5 张/触发器 10 个，源库 hash 不变。M1 有独立 identifier `com.jiaofu.suite.a6b` 的 16 项真机证据；M2-A1 也已在 `com.jiaofu.suite.m2a1` 完成终审、改判、幂等和重启持久化真机验收。T6 当前仍是数据库/服务契约与确定性 fixture，不代表真实 OMR provider、Tauri IPC、按题工作台或发布 UI 已完成。
 
 > 这些结果不等于授权发布。异模型复核、tag、合并和安装包发布仍需单独放行。
 
@@ -52,7 +53,7 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 │  │  ├─ src/{lib,grader,asr_volcano, domain/{filename,fluency}}.rs
 │  │  └─ migrations/0001_recitation.sql
 │  ├─ module-knowledge/         # K1：教材/知识/题目/答案/rubric/link 版本底座
-│  └─ module-exam/             # M2：手工纵切 + 证据链 + assessment/grade/publication + M2.5 私有候选沉淀
+│  └─ module-exam/             # M2：页面证据链 + assessment/grade/publication + 私有候选 + 客观题终审/正式证据
 ├─ src-tauri/                  # 桌面外壳与 IPC 命令
 └─ src/                        # React 前端
 ```
