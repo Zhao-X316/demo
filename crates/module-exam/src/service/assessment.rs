@@ -5,8 +5,15 @@
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use suite_core::db::repo::audit::NewAuditEvent;
+use suite_core::db::repo::learning_evidence::NewLearningEvidence;
+use suite_core::db::repo::outbox::NewOutboxEvent;
+use suite_core::db::repo::{audit, learning_evidence, outbox};
 use suite_core::domain::{hashing, ids, time};
 use suite_core::error::{CoreError, CoreResult};
+use suite_core::models::{
+    AssessmentContext, AuditActorType, ConfirmationLevel, EvidenceKind, EvidenceSourceModule,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssessmentDraft {
@@ -547,7 +554,10 @@ fn normalized_note(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|note| !note.is_empty())
 }
 
-pub fn decide_grade(conn: &Connection, input: &NewGradeDecision<'_>) -> CoreResult<GradeDecision> {
+pub(crate) fn decide_grade_in_transaction(
+    conn: &Connection,
+    input: &NewGradeDecision<'_>,
+) -> CoreResult<GradeDecision> {
     validate_schema_object(input.point_results_json, "评分点结果")?;
     required(input.decided_by, "评分确认人")?;
     if !matches!(
@@ -559,8 +569,7 @@ pub fn decide_grade(conn: &Connection, input: &NewGradeDecision<'_>) -> CoreResu
     if !input.teacher_score.is_finite() || input.teacher_score < 0.0 {
         return Err(CoreError::Invalid("老师得分非法".into()));
     }
-    let tx = conn.unchecked_transaction()?;
-    let scope: Option<(String, i64, f64)> = tx
+    let scope: Option<(String, i64, f64)> = conn
         .query_row(
             "SELECT at.state, at.assessment_version_id, i.score
              FROM exam_attempts_v2 at
@@ -580,7 +589,7 @@ pub fn decide_grade(conn: &Connection, input: &NewGradeDecision<'_>) -> CoreResu
         return Err(CoreError::Invalid("老师得分不能超过题目分值".into()));
     }
     if let Some(ai_run_id) = input.machine_grade_ai_run_id {
-        let valid_run: bool = tx.query_row(
+        let valid_run: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM ai_runs
              WHERE id=?1 AND run_type='answer_grade' AND status='succeeded')",
             [ai_run_id],
@@ -591,7 +600,7 @@ pub fn decide_grade(conn: &Connection, input: &NewGradeDecision<'_>) -> CoreResu
         }
     }
     let note = normalized_note(input.teacher_note);
-    let current: Option<GradeDecision> = tx
+    let current: Option<GradeDecision> = conn
         .query_row(
             "SELECT id, public_id, attempt_id, assessment_item_id, revision,
                     machine_grade_ai_run_id, teacher_score, point_results_json, teacher_note,
@@ -609,24 +618,31 @@ pub fn decide_grade(conn: &Connection, input: &NewGradeDecision<'_>) -> CoreResu
             && active.teacher_note.as_deref() == note
             && active.confirmation_level == input.confirmation_level
         {
-            tx.commit()?;
             return Ok(active.clone());
         }
     }
-    let revision: i64 = tx.query_row(
+    let revision: i64 = conn.query_row(
         "SELECT COALESCE(MAX(revision), 0) + 1 FROM exam_grade_decisions_v2
          WHERE attempt_id=?1 AND assessment_item_id=?2",
         (input.attempt_id, input.assessment_item_id),
         |row| row.get(0),
     )?;
-    tx.execute(
+    if let Some(active) = current.as_ref() {
+        suite_core::db::repo::learning_evidence::revert_for_decision(
+            conn,
+            "grade_decision",
+            &active.public_id,
+            active.revision,
+        )?;
+    }
+    conn.execute(
         "UPDATE exam_grade_decisions_v2 SET state='superseded'
          WHERE attempt_id=?1 AND assessment_item_id=?2 AND state='active'",
         (input.attempt_id, input.assessment_item_id),
     )?;
     let public_id = ids::new_public_id();
     let now = time::utc_now_rfc3339();
-    tx.execute(
+    conn.execute(
         "INSERT INTO exam_grade_decisions_v2
          (public_id, attempt_id, assessment_item_id, revision, machine_grade_ai_run_id,
           teacher_score, point_results_json, teacher_note, confirmation_level, state,
@@ -646,8 +662,8 @@ pub fn decide_grade(conn: &Connection, input: &NewGradeDecision<'_>) -> CoreResu
             &now,
         ),
     )?;
-    let decision_id = tx.last_insert_rowid();
-    let (item_count, decision_count): (i64, i64) = tx.query_row(
+    let decision_id = conn.last_insert_rowid();
+    let (item_count, decision_count): (i64, i64) = conn.query_row(
         "SELECT
            (SELECT COUNT(*) FROM exam_assessment_items_v2
             WHERE assessment_version_id=?1 AND state='active'),
@@ -658,7 +674,7 @@ pub fn decide_grade(conn: &Connection, input: &NewGradeDecision<'_>) -> CoreResu
         (assessment_version_id, input.attempt_id),
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    tx.execute(
+    conn.execute(
         "UPDATE exam_attempts_v2 SET state=?1, updated_at=?2 WHERE id=?3",
         (
             if item_count > 0 && item_count == decision_count {
@@ -670,9 +686,15 @@ pub fn decide_grade(conn: &Connection, input: &NewGradeDecision<'_>) -> CoreResu
             input.attempt_id,
         ),
     )?;
-    tx.commit()?;
     get_decision(conn, decision_id)?
         .ok_or_else(|| CoreError::NotFound("刚创建的 grade decision".into()))
+}
+
+pub fn decide_grade(conn: &Connection, input: &NewGradeDecision<'_>) -> CoreResult<GradeDecision> {
+    let tx = conn.unchecked_transaction()?;
+    let decision = decide_grade_in_transaction(&tx, input)?;
+    tx.commit()?;
+    Ok(decision)
 }
 
 #[derive(Serialize)]
@@ -681,6 +703,271 @@ struct DecisionHashInput {
     assessment_item_id: i64,
     revision: i64,
     score_millis: i64,
+}
+
+#[derive(Debug)]
+struct EvidenceDecision {
+    public_id: String,
+    revision: i64,
+    teacher_score: f64,
+    confirmation_level: String,
+    decided_at: String,
+    item_public_id: String,
+    item_score: f64,
+    link_set_id: i64,
+}
+
+fn evidence_context(value: &str) -> AssessmentContext {
+    match value {
+        "homework" => AssessmentContext::Homework,
+        "open_book" => AssessmentContext::OpenBook,
+        "correction" => AssessmentContext::Correction,
+        "classwork" | "demo" => AssessmentContext::InClass,
+        "quiz" | "exam" => AssessmentContext::ClosedBook,
+        _ => AssessmentContext::InClass,
+    }
+}
+
+fn evidence_confirmation(value: &str) -> CoreResult<ConfirmationLevel> {
+    match value {
+        "teacher_accepted" => Ok(ConfirmationLevel::TeacherAccepted),
+        "teacher_corrected" => Ok(ConfirmationLevel::TeacherCorrected),
+        _ => Err(CoreError::Invalid("评分 revision 不是老师确认结果".into())),
+    }
+}
+
+struct EvidenceTarget<'a> {
+    target_kind: &'a str,
+    target_public_id: &'a str,
+    knowledge_node_id: Option<&'a str>,
+    ability_dimension_id: Option<&'a str>,
+    quality: f64,
+    knowledge_map_version: &'a str,
+}
+
+struct EvidenceContext<'a> {
+    student_id: i64,
+    source_module: EvidenceSourceModule,
+    assessment_context: AssessmentContext,
+    decision: &'a EvidenceDecision,
+    published_by: &'a str,
+}
+
+fn activate_evidence_target(
+    conn: &Connection,
+    context: &EvidenceContext<'_>,
+    target: &EvidenceTarget<'_>,
+) -> CoreResult<()> {
+    let decision = context.decision;
+    let idempotency_key = format!(
+        "exam:evidence:decision:{}:{}:{}",
+        decision.public_id, target.target_kind, target.target_public_id
+    );
+    let existed = learning_evidence::get_by_idempotency_key(conn, &idempotency_key)?.is_some();
+    let evidence = learning_evidence::create_or_get(
+        conn,
+        &NewLearningEvidence {
+            idempotency_key: &idempotency_key,
+            student_id: context.student_id,
+            source_module: context.source_module,
+            source_type: "objective_question",
+            source_ref_type: "assessment_item",
+            source_ref_id: &decision.item_public_id,
+            source_revision: decision.revision,
+            decision_ref_type: Some("grade_decision"),
+            decision_ref_id: Some(&decision.public_id),
+            decision_revision: Some(decision.revision),
+            knowledge_node_id: target.knowledge_node_id,
+            ability_dimension_id: target.ability_dimension_id,
+            evidence_kind: EvidenceKind::Accuracy,
+            value: (decision.teacher_score / decision.item_score).clamp(0.0, 1.0),
+            confirmation_level: evidence_confirmation(&decision.confirmation_level)?,
+            evidence_quality: target.quality.clamp(0.0, 1.0),
+            assessment_context: context.assessment_context,
+            occurred_at: &decision.decided_at,
+            rule_version: "objective-grading-v1",
+            knowledge_map_version: target.knowledge_map_version,
+        },
+    )?;
+    if existed {
+        return Ok(());
+    }
+    let payload = serde_json::json!({
+        "schema_version": 1,
+        "evidence_public_id": evidence.public_id,
+        "student_id": context.student_id,
+        "decision_public_id": decision.public_id,
+        "decision_revision": decision.revision
+    })
+    .to_string();
+    outbox::create_event(
+        conn,
+        &NewOutboxEvent {
+            idempotency_key: &format!("exam:outbox:evidence:{}", evidence.public_id),
+            event_type: "learning_evidence_changed",
+            event_version: 1,
+            aggregate_type: "learning_evidence",
+            aggregate_id: &evidence.public_id,
+            aggregate_revision: decision.revision,
+            payload_json: &payload,
+            occurred_at: &decision.decided_at,
+        },
+    )?;
+    audit::append(
+        conn,
+        &NewAuditEvent {
+            idempotency_key: &format!("exam:audit:evidence:{}", evidence.public_id),
+            actor_type: AuditActorType::Teacher,
+            actor_id: Some(context.published_by),
+            action: "exam.learning_evidence.activated",
+            object_type: "learning_evidence",
+            object_id: &evidence.public_id,
+            object_revision: Some(decision.revision),
+            note: Some("老师显式发布后激活客观题正式学习证据"),
+            meta_json: None,
+            occurred_at: &decision.decided_at,
+        },
+    )?;
+    Ok(())
+}
+
+fn activate_publication_evidence(
+    conn: &Connection,
+    attempt_id: i64,
+    published_by: &str,
+) -> CoreResult<()> {
+    let scope: (i64, String, String, String, String) = conn.query_row(
+        "SELECT at.student_id,at.attempt_kind,a.assessment_context,a.evidence_policy,
+                at.public_id
+         FROM exam_attempts_v2 at
+         JOIN exam_assessment_versions_v2 v ON v.id=at.assessment_version_id
+         JOIN exam_assessments_v2 a ON a.id=v.assessment_id
+         WHERE at.id=?1",
+        [attempt_id],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        },
+    )?;
+    let (student_id, attempt_kind, context_raw, evidence_policy, _attempt_public_id) = scope;
+    if evidence_policy == "exclude"
+        || (evidence_policy == "progress_only" && attempt_kind != "correction")
+    {
+        return Ok(());
+    }
+    let policy_weight = match evidence_policy.as_str() {
+        "include" => 1.0,
+        "include_low_weight" => 0.5,
+        "progress_only" => 0.6,
+        _ => return Err(CoreError::Invalid("作业证据策略非法".into())),
+    };
+    let source_module = if attempt_kind == "correction" {
+        EvidenceSourceModule::Correction
+    } else {
+        EvidenceSourceModule::Grading
+    };
+    let assessment_context = evidence_context(&context_raw);
+    let mut stmt = conn.prepare(
+        "SELECT d.public_id,d.revision,d.teacher_score,d.confirmation_level,d.decided_at,
+                i.public_id,i.score,i.link_set_id
+         FROM exam_grade_decisions_v2 d
+         JOIN exam_assessment_items_v2 i ON i.id=d.assessment_item_id
+         WHERE d.attempt_id=?1 AND d.state='active' AND i.state='active'
+         ORDER BY i.order_index,d.id",
+    )?;
+    let rows = stmt.query_map([attempt_id], |row| {
+        Ok(EvidenceDecision {
+            public_id: row.get(0)?,
+            revision: row.get(1)?,
+            teacher_score: row.get(2)?,
+            confirmation_level: row.get(3)?,
+            decided_at: row.get(4)?,
+            item_public_id: row.get(5)?,
+            item_score: row.get(6)?,
+            link_set_id: row.get(7)?,
+        })
+    })?;
+    let decisions = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+    for decision in &decisions {
+        let map: (String, i64) = conn.query_row(
+            "SELECT m.public_id,m.revision
+             FROM k1_link_sets l JOIN k1_knowledge_maps m ON m.id=l.knowledge_map_id
+             WHERE l.id=?1 AND l.state='confirmed' AND m.state='confirmed'",
+            [decision.link_set_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let knowledge_map_version = format!("{}:r{}", map.0, map.1);
+        let context = EvidenceContext {
+            student_id,
+            source_module,
+            assessment_context,
+            decision,
+            published_by: published_by.trim(),
+        };
+        let mut knowledge_stmt = conn.prepare(
+            "SELECT DISTINCT n.public_id
+             FROM k1_knowledge_links l
+             JOIN k1_knowledge_nodes n ON n.id=l.knowledge_node_id AND n.state='active'
+             WHERE l.link_set_id=?1 AND l.source_type='question'
+               AND l.relation_type='direct_assessment'
+               AND l.confirmation_level='teacher_confirmed'
+             ORDER BY n.public_id",
+        )?;
+        let knowledge_nodes = knowledge_stmt
+            .query_map([decision.link_set_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(knowledge_stmt);
+        for node in &knowledge_nodes {
+            activate_evidence_target(
+                conn,
+                &context,
+                &EvidenceTarget {
+                    target_kind: "knowledge",
+                    target_public_id: node,
+                    knowledge_node_id: Some(node),
+                    ability_dimension_id: None,
+                    quality: policy_weight,
+                    knowledge_map_version: &knowledge_map_version,
+                },
+            )?;
+        }
+        let mut ability_stmt = conn.prepare(
+            "SELECT DISTINCT d.public_id,l.evidence_strength
+             FROM k1_ability_links l
+             JOIN k1_ability_dimensions d
+               ON d.id=l.ability_dimension_id AND d.state='active'
+             WHERE l.link_set_id=?1 AND l.source_type='question'
+               AND l.confirmation_level='teacher_confirmed'
+             ORDER BY d.public_id",
+        )?;
+        let ability_nodes = ability_stmt
+            .query_map([decision.link_set_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(ability_stmt);
+        for (node, strength) in &ability_nodes {
+            activate_evidence_target(
+                conn,
+                &context,
+                &EvidenceTarget {
+                    target_kind: "ability",
+                    target_public_id: node,
+                    knowledge_node_id: None,
+                    ability_dimension_id: Some(node),
+                    quality: policy_weight * strength,
+                    knowledge_map_version: &knowledge_map_version,
+                },
+            )?;
+        }
+    }
+    Ok(())
 }
 
 pub fn publish_attempt(
@@ -783,6 +1070,7 @@ pub fn publish_attempt(
             [old_id],
         )?;
     }
+    activate_publication_evidence(&tx, attempt_id, published_by)?;
     tx.execute(
         "UPDATE exam_attempts_v2
          SET state='published', active_publication_id=?1, updated_at=?2 WHERE id=?3",
@@ -1131,6 +1419,20 @@ mod tests {
         let published = publish_attempt(&fixture.conn, fixture.attempt_id, "teacher").unwrap();
         assert_eq!(published.revision, 1);
         assert_eq!(published.total_score, 1.0);
+        let first_evidence: (i64, i64, i64) = fixture
+            .conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM learning_evidence WHERE state='active'),
+                   (SELECT COUNT(*) FROM outbox_events
+                    WHERE event_type='learning_evidence_changed'),
+                   (SELECT COUNT(*) FROM audit_events
+                    WHERE action='exam.learning_evidence.activated')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(first_evidence, (2, 2, 2));
         let changed = decide_grade(&fixture.conn, &decision(&fixture, 0.0, Some("改判"))).unwrap();
         assert_eq!(changed.revision, 2);
         assert_eq!(
@@ -1149,6 +1451,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(old_state, "published", "改分但未重发时旧发布仍然有效");
+        let evidence_after_change: (i64, i64) = fixture
+            .conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM learning_evidence WHERE state='active'),
+                   (SELECT COUNT(*) FROM learning_evidence WHERE state='reverted')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(evidence_after_change, (0, 2));
 
         let republished = publish_attempt(&fixture.conn, fixture.attempt_id, "teacher").unwrap();
         assert_eq!(republished.revision, 2);
@@ -1173,6 +1486,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(frozen_old_decision, first.id);
+        let evidence_after_republish: (i64, i64) = fixture
+            .conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM learning_evidence WHERE state='active'),
+                   (SELECT COUNT(*) FROM learning_evidence WHERE state='reverted')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(evidence_after_republish, (2, 2));
         assert!(fixture
             .conn
             .execute(
@@ -1186,6 +1510,7 @@ mod tests {
     fn decision_revision_rolls_back_if_insert_fails() {
         let fixture = setup();
         let first = decide_grade(&fixture.conn, &decision(&fixture, 1.0, None)).unwrap();
+        publish_attempt(&fixture.conn, fixture.attempt_id, "teacher").unwrap();
         fixture
             .conn
             .execute_batch(
@@ -1205,6 +1530,55 @@ mod tests {
             )
             .unwrap();
         assert_eq!(active, (first.id, "active".into()));
+        let evidence_states: (i64, i64) = fixture
+            .conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM learning_evidence WHERE state='active'),
+                   (SELECT COUNT(*) FROM learning_evidence WHERE state='reverted')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(evidence_states, (2, 0));
+    }
+
+    #[test]
+    fn publication_and_formal_evidence_roll_back_together() {
+        let fixture = setup();
+        decide_grade(&fixture.conn, &decision(&fixture, 1.0, None)).unwrap();
+        fixture
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER fail_publication_evidence
+                 BEFORE INSERT ON learning_evidence
+                 BEGIN SELECT RAISE(ABORT, 'injected evidence failure'); END;",
+            )
+            .unwrap();
+        assert!(publish_attempt(&fixture.conn, fixture.attempt_id, "teacher").is_err());
+        let counts: (i64, i64, i64, String, Option<i64>) = fixture
+            .conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM exam_grade_publications_v2),
+                   (SELECT COUNT(*) FROM learning_evidence),
+                   (SELECT COUNT(*) FROM outbox_events
+                    WHERE event_type='learning_evidence_changed'),
+                   state,active_publication_id
+                 FROM exam_attempts_v2 WHERE id=?1",
+                [fixture.attempt_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(counts, (0, 0, 0, "ready_to_publish".into(), None));
     }
 
     #[test]
