@@ -23,3 +23,5 @@ module-recitation = { path = "../crates/module-recitation" }
 module-exam = { path = "../crates/module-exam" }
 module-knowledge = { path = "../crates/module-knowledge" }
 image = { version = "0.24.9", default-features = false, features = ["jpeg", "png", "webp"] }
+quick-xml = "0.31.0"
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }

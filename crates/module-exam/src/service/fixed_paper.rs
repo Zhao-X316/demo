@@ -319,7 +319,15 @@ pub fn register_fixed_input_document(
     let format_matches = match input.source_format {
         "jpeg" => artifact.kind == ArtifactKind::Image && artifact.mime_type == "image/jpeg",
         "pdf" => artifact.kind == ArtifactKind::Document && artifact.mime_type == "application/pdf",
-        "text" => artifact.kind == ArtifactKind::Document && artifact.mime_type == "text/plain",
+        "text" => {
+            artifact.kind == ArtifactKind::Document
+                && matches!(
+                    artifact.mime_type.as_str(),
+                    "text/plain"
+                        | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+        }
         _ => false,
     };
     if !format_matches {
@@ -1559,6 +1567,66 @@ mod tests {
             }
         )
         .is_err());
+    }
+
+    #[test]
+    fn office_documents_are_answer_sources_not_student_work() {
+        let fixture = seed_base();
+        for (index, (format, mime_type, hash_char)) in [
+            (
+                "docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                '8',
+            ),
+            (
+                "xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                '9',
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let artifact_id = create_artifact(
+                &fixture.conn,
+                ArtifactKind::Document,
+                hash_char,
+                mime_type,
+                None,
+                None,
+                PrivacyClass::TeachingContent,
+                &format!("answer.{format}"),
+            );
+            let answer = register_fixed_input_document(
+                &fixture.conn,
+                &NewFixedInputDocument {
+                    ingest_batch_id: fixture.batch_id,
+                    source_artifact_id: artifact_id,
+                    document_role: "answer_source",
+                    source_format: "text",
+                    import_index: index as i64,
+                    page_count: 1,
+                    idempotency_key: &format!("answer-{format}"),
+                    created_by: "teacher",
+                },
+            )
+            .unwrap();
+            assert_eq!(answer.source_format, "text");
+            assert!(register_fixed_input_document(
+                &fixture.conn,
+                &NewFixedInputDocument {
+                    ingest_batch_id: fixture.batch_id,
+                    source_artifact_id: artifact_id,
+                    document_role: "student_work",
+                    source_format: "text",
+                    import_index: index as i64,
+                    page_count: 1,
+                    idempotency_key: &format!("student-{format}"),
+                    created_by: "teacher",
+                }
+            )
+            .is_err());
+        }
     }
 
     #[test]

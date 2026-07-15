@@ -41,6 +41,7 @@ pub struct AnswerSourceRunInput {
     mime_type: String,
     source_bytes: Vec<u8>,
     source_text: Option<String>,
+    text_extraction_version: Option<String>,
     visualization_version: Option<String>,
     visual_pages: Vec<AnswerSourceVisualPage>,
     items: Vec<AnswerSourceItemSpec>,
@@ -57,6 +58,7 @@ impl AnswerSourceRunInput {
             mime_type: &self.mime_type,
             source_bytes: &self.source_bytes,
             source_text: self.source_text.as_deref(),
+            text_extraction_version: self.text_extraction_version.as_deref(),
             visualization_version: self.visualization_version.as_deref(),
             visual_pages: &self.visual_pages,
             items: &self.items,
@@ -88,7 +90,7 @@ pub fn load_metadata(conn: &Connection, batch_id: i64) -> CoreResult<AnswerSourc
     if batch_id <= 0 {
         return Err(CoreError::Invalid("答案资料批次 id 必须为正数".into()));
     }
-    let (artifact_id, source_format, assessment_version_id): (i64, String, i64) = conn
+    let (artifact_id, registered_format, assessment_version_id): (i64, String, i64) = conn
         .query_row(
             "SELECT d.source_artifact_id,d.source_format,b.assessment_version_id
              FROM exam_fixed_input_documents_v2 d
@@ -109,9 +111,20 @@ pub fn load_metadata(conn: &Connection, batch_id: i64) -> CoreResult<AnswerSourc
             "答案资料必须已归档为 teaching_content".into(),
         ));
     }
-    if !matches!(source_format.as_str(), "jpeg" | "pdf" | "text") {
-        return Err(CoreError::Invalid("答案资料只支持 JPG、PDF 或文本".into()));
+    if !matches!(registered_format.as_str(), "jpeg" | "pdf" | "text") {
+        return Err(CoreError::Invalid(
+            "答案资料登记格式只支持 JPG、PDF 或文本型文档".into(),
+        ));
     }
+    let source_format = match (registered_format.as_str(), artifact.mime_type.as_str()) {
+        ("text", "application/vnd.openxmlformats-officedocument.wordprocessingml.document") => {
+            "docx".to_string()
+        }
+        ("text", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") => {
+            "xlsx".to_string()
+        }
+        _ => registered_format,
+    };
     let mut stmt = conn.prepare(
         "SELECT i.id,i.order_index,
                 COALESCE(json_extract(i.presentation_snapshot_json,'$.question_no'),CAST(i.order_index+1 AS TEXT)),
@@ -165,41 +178,56 @@ pub fn load_input(metadata: AnswerSourceRunMetadata) -> CoreResult<AnswerSourceR
     if hashing::sha256_hex(&source_bytes) != metadata.source_artifact_sha256 {
         return Err(CoreError::Invalid("答案资料归档与登记 hash 不一致".into()));
     }
-    let (source_text, visualization_version, visual_pages) = match metadata.source_format.as_str() {
-        "text" => (
-            Some(
-                String::from_utf8(source_bytes.clone())
-                    .map_err(|_| CoreError::Invalid("文本答案资料必须是 UTF-8".into()))?,
+    let (source_text, text_extraction_version, visualization_version, visual_pages) =
+        match metadata.source_format.as_str() {
+            "text" => (
+                Some(
+                    String::from_utf8(source_bytes.clone())
+                        .map_err(|_| CoreError::Invalid("文本答案资料必须是 UTF-8".into()))?,
+                ),
+                None,
+                None,
+                vec![],
             ),
-            None,
-            vec![],
-        ),
-        "jpeg" => (
-            None,
-            Some(SOURCE_IMAGE_VERSION.into()),
-            vec![AnswerSourceVisualPage {
-                page_no: 1,
-                mime_type: "image/jpeg".into(),
-                sha256: metadata.source_artifact_sha256.clone(),
-                bytes: source_bytes.clone(),
-            }],
-        ),
-        "pdf" => {
-            let rendered = pdf_pages::render_to_jpegs(&metadata.archived_path)?;
-            let pages = rendered
-                .into_iter()
-                .enumerate()
-                .map(|(index, bytes)| AnswerSourceVisualPage {
-                    page_no: (index + 1) as i64,
+            "docx" => (
+                Some(crate::office_answers::extract_docx(&source_bytes)?),
+                Some(crate::office_answers::DOCX_EXTRACTION_VERSION.into()),
+                None,
+                vec![],
+            ),
+            "xlsx" => (
+                Some(crate::office_answers::extract_xlsx(&source_bytes)?),
+                Some(crate::office_answers::XLSX_EXTRACTION_VERSION.into()),
+                None,
+                vec![],
+            ),
+            "jpeg" => (
+                None,
+                None,
+                Some(SOURCE_IMAGE_VERSION.into()),
+                vec![AnswerSourceVisualPage {
+                    page_no: 1,
                     mime_type: "image/jpeg".into(),
-                    sha256: hashing::sha256_hex(&bytes),
-                    bytes,
-                })
-                .collect();
-            (None, Some(PDF_VISUALIZATION_VERSION.into()), pages)
-        }
-        _ => return Err(CoreError::Invalid("答案资料格式不受支持".into())),
-    };
+                    sha256: metadata.source_artifact_sha256.clone(),
+                    bytes: source_bytes.clone(),
+                }],
+            ),
+            "pdf" => {
+                let rendered = pdf_pages::render_to_jpegs(&metadata.archived_path)?;
+                let pages = rendered
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, bytes)| AnswerSourceVisualPage {
+                        page_no: (index + 1) as i64,
+                        mime_type: "image/jpeg".into(),
+                        sha256: hashing::sha256_hex(&bytes),
+                        bytes,
+                    })
+                    .collect();
+                (None, None, Some(PDF_VISUALIZATION_VERSION.into()), pages)
+            }
+            _ => return Err(CoreError::Invalid("答案资料格式不受支持".into())),
+        };
     let mut input = AnswerSourceRunInput {
         ingest_batch_id: metadata.ingest_batch_id,
         source_artifact_id: metadata.source_artifact_id,
@@ -208,6 +236,7 @@ pub fn load_input(metadata: AnswerSourceRunMetadata) -> CoreResult<AnswerSourceR
         mime_type: metadata.mime_type,
         source_bytes,
         source_text,
+        text_extraction_version,
         visualization_version,
         visual_pages,
         items: metadata.items,

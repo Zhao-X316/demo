@@ -1,4 +1,4 @@
-//! 答案图片/PDF/文本结构化的 provider-neutral 合同。
+//! 答案图片/PDF/文本/Office 结构化的 provider-neutral 合同。
 //!
 //! 请求只携带老师上传的 teaching_content 与当前作业题目清单，不携带学生作答，也
 //! 不携带当前标准答案。模型只能生成带来源锚点的候选，不能确认答案或改写 K1。
@@ -104,6 +104,7 @@ pub struct AnswerSourceRecognitionRequest<'a> {
     pub mime_type: &'a str,
     pub source_bytes: &'a [u8],
     pub source_text: Option<&'a str>,
+    pub text_extraction_version: Option<&'a str>,
     pub visualization_version: Option<&'a str>,
     pub visual_pages: &'a [AnswerSourceVisualPage],
     pub items: &'a [AnswerSourceItemSpec],
@@ -124,9 +125,12 @@ impl AnswerSourceRecognitionRequest<'_> {
         {
             return Err(CoreError::Invalid("答案资料 hash 非法".into()));
         }
-        if !matches!(self.source_format, "jpeg" | "pdf" | "text") {
+        if !matches!(
+            self.source_format,
+            "jpeg" | "pdf" | "text" | "docx" | "xlsx"
+        ) {
             return Err(CoreError::Invalid(
-                "答案结构化只接受 JPG、PDF 或文本".into(),
+                "答案结构化只接受 JPG、PDF、文本、DOCX 或 XLSX".into(),
             ));
         }
         if self.source_bytes.is_empty() || self.items.is_empty() {
@@ -144,14 +148,33 @@ impl AnswerSourceRecognitionRequest<'_> {
                     .map(str::trim)
                     .unwrap_or_default()
                     .is_empty()
+                    || self.text_extraction_version.is_some()
                     || self.visualization_version.is_some()
                     || !self.visual_pages.is_empty()
                 {
                     return Err(CoreError::Invalid("文本答案资料输入形态非法".into()));
                 }
             }
+            "docx" | "xlsx" => {
+                if self
+                    .source_text
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .is_empty()
+                    || self
+                        .text_extraction_version
+                        .map(str::trim)
+                        .unwrap_or_default()
+                        .is_empty()
+                    || self.visualization_version.is_some()
+                    || !self.visual_pages.is_empty()
+                {
+                    return Err(CoreError::Invalid("Word/Excel 答案资料输入形态非法".into()));
+                }
+            }
             "jpeg" | "pdf" => {
                 if self.source_text.is_some()
+                    || self.text_extraction_version.is_some()
                     || self
                         .visualization_version
                         .map(str::trim)
@@ -214,6 +237,8 @@ impl AnswerSourceRecognitionRequest<'_> {
             "source_artifact_sha256": self.source_artifact_sha256.to_ascii_lowercase(),
             "source_format": self.source_format,
             "mime_type": self.mime_type.to_ascii_lowercase(),
+            "source_text_sha256": self.source_text.map(|value| hashing::sha256_hex(value.as_bytes())),
+            "text_extraction_version": self.text_extraction_version,
             "visualization_version": self.visualization_version,
             "visual_pages": self.visual_pages.iter().map(|page| serde_json::json!({
                 "page_no": page.page_no,
@@ -306,7 +331,7 @@ impl AnswerSourceRecognitionOutput {
                         return Err(CoreError::Invalid("答案来源锚点页码越界".into()));
                     }
                 }
-                "text" => {
+                "text" | "docx" | "xlsx" => {
                     if entry
                         .source_anchor
                         .get("line")
@@ -427,6 +452,7 @@ mod tests {
             mime_type: "text/plain",
             source_bytes: SOURCE,
             source_text: Some("1.A 2.TRUE"),
+            text_extraction_version: None,
             visualization_version: None,
             visual_pages: &[],
             items,
@@ -509,6 +535,7 @@ mod tests {
             mime_type: "application/pdf",
             source_bytes: source,
             source_text: None,
+            text_extraction_version: None,
             visualization_version: Some("fixture-renderer-v1"),
             visual_pages: &pages,
             items: &items,
@@ -547,5 +574,42 @@ mod tests {
         output.validate_against(&request).unwrap();
         output.entries[1].source_anchor["page"] = serde_json::json!(3);
         assert!(output.validate_against(&request).is_err());
+    }
+
+    #[test]
+    fn office_input_hash_binds_extracted_text_and_extractor_version() {
+        let items = items();
+        let source = b"docx-fixture";
+        let base = AnswerSourceRecognitionRequest {
+            ingest_batch_id: 7,
+            source_artifact_id: 9,
+            source_artifact_sha256: &hashing::sha256_hex(source),
+            source_format: "docx",
+            mime_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            source_bytes: source,
+            source_text: Some("第1段\t1.A"),
+            text_extraction_version: Some("ooxml-docx-text-v1"),
+            visualization_version: None,
+            visual_pages: &[],
+            items: &items,
+        };
+        let changed_text = AnswerSourceRecognitionRequest {
+            source_text: Some("第1段\t1.B"),
+            ..base
+        };
+        assert_ne!(
+            base.input_hash().unwrap(),
+            changed_text.input_hash().unwrap()
+        );
+
+        let changed_version = AnswerSourceRecognitionRequest {
+            source_text: base.source_text,
+            text_extraction_version: Some("ooxml-docx-text-v2"),
+            ..base
+        };
+        assert_ne!(
+            base.input_hash().unwrap(),
+            changed_version.input_hash().unwrap()
+        );
     }
 }

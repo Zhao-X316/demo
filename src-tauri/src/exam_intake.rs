@@ -176,6 +176,8 @@ enum SourceFormat {
     Jpeg,
     Pdf,
     Text,
+    Docx,
+    Xlsx,
 }
 
 impl SourceFormat {
@@ -184,6 +186,8 @@ impl SourceFormat {
             Self::Jpeg => "jpeg",
             Self::Pdf => "pdf",
             Self::Text => "text",
+            Self::Docx => "docx",
+            Self::Xlsx => "xlsx",
         }
     }
 
@@ -192,6 +196,8 @@ impl SourceFormat {
             Self::Jpeg => "image/jpeg",
             Self::Pdf => "application/pdf",
             Self::Text => "text/plain",
+            Self::Docx => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            Self::Xlsx => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         }
     }
 
@@ -200,13 +206,22 @@ impl SourceFormat {
             Self::Jpeg => "jpg",
             Self::Pdf => "pdf",
             Self::Text => "txt",
+            Self::Docx => "docx",
+            Self::Xlsx => "xlsx",
         }
     }
 
     fn artifact_kind(self) -> ArtifactKind {
         match self {
             Self::Jpeg => ArtifactKind::Image,
-            Self::Pdf | Self::Text => ArtifactKind::Document,
+            Self::Pdf | Self::Text | Self::Docx | Self::Xlsx => ArtifactKind::Document,
+        }
+    }
+
+    fn registration_format(self) -> &'static str {
+        match self {
+            Self::Docx | Self::Xlsx => "text",
+            _ => self.as_str(),
         }
     }
 }
@@ -266,8 +281,10 @@ fn source_format(path: &Path, allow_text: bool) -> CoreResult<SourceFormat> {
         Some("jpg" | "jpeg") => Ok(SourceFormat::Jpeg),
         Some("pdf") => Ok(SourceFormat::Pdf),
         Some("txt") if allow_text => Ok(SourceFormat::Text),
+        Some("docx") if allow_text => Ok(SourceFormat::Docx),
+        Some("xlsx") if allow_text => Ok(SourceFormat::Xlsx),
         _ if allow_text => Err(CoreError::Invalid(
-            "答案资料只支持 JPG、JPEG、PDF 或 TXT".into(),
+            "答案资料只支持 JPG、JPEG、PDF、DOCX、XLSX 或 TXT".into(),
         )),
         _ => Err(CoreError::Invalid("学生试卷只支持 JPG、JPEG 或 PDF".into())),
     }
@@ -906,7 +923,7 @@ pub(crate) fn persist_fixed_intake(
                 ingest_batch_id: batch.id,
                 source_artifact_id: artifact.id,
                 document_role: "student_work",
-                source_format: source.format.as_str(),
+                source_format: source.format.registration_format(),
                 import_index: source_index as i64,
                 page_count,
                 idempotency_key: &format!(
@@ -1078,7 +1095,7 @@ pub(crate) fn persist_fixed_intake(
                 ingest_batch_id: batch.id,
                 source_artifact_id: artifact.id,
                 document_role: "answer_source",
-                source_format: source.format.as_str(),
+                source_format: source.format.registration_format(),
                 import_index: 0,
                 page_count,
                 idempotency_key: &format!("{}:answer:0", request.idempotency_key.trim()),
@@ -1533,6 +1550,20 @@ mod tests {
 
     fn write_jpeg(path: &Path, value: &[u8]) {
         std::fs::write(path, value).unwrap();
+    }
+
+    #[test]
+    fn office_files_are_accepted_only_as_answer_sources() {
+        assert_eq!(
+            source_format(Path::new("答案.docx"), true).unwrap(),
+            SourceFormat::Docx
+        );
+        assert_eq!(
+            source_format(Path::new("答案.xlsx"), true).unwrap(),
+            SourceFormat::Xlsx
+        );
+        assert!(source_format(Path::new("学生作业.docx"), false).is_err());
+        assert!(source_format(Path::new("学生作业.xlsx"), false).is_err());
     }
 
     #[test]

@@ -18,6 +18,7 @@ mod exam_commands;
 mod exam_intake;
 mod objective_provider;
 mod objective_run;
+mod office_answers;
 mod ordinary_paper_materialization;
 mod ordinary_paper_provider;
 mod ordinary_paper_run;

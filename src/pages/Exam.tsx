@@ -138,7 +138,7 @@ const MATERIAL_TYPE_LABEL: Record<string, string> = {
 };
 
 const STUDENT_FILE_EXTENSIONS = ["jpg", "jpeg", "pdf"];
-const ANSWER_FILE_EXTENSIONS = ["jpg", "jpeg", "pdf", "txt"];
+const ANSWER_FILE_EXTENSIONS = ["jpg", "jpeg", "pdf", "docx", "xlsx", "txt"];
 const ANSWER_SOURCE_REASON_CODES = new Set([
   "ANSWER_SOURCE_STRUCTURE_PENDING",
   "ANSWER_SOURCE_STRUCTURE_FAILED",
@@ -452,7 +452,7 @@ function FixedIntakeTab({
       const selected = await open({ multiple: false });
       if (!selected || Array.isArray(selected)) return;
       if (!hasExtension(selected, ANSWER_FILE_EXTENSIONS)) {
-        onError("答案资料只支持 JPG、JPEG、PDF 或 TXT。");
+        onError("答案资料只支持 JPG、JPEG、PDF、DOCX、XLSX 或 TXT。");
         return;
       }
       setAnswerPath(selected);
@@ -525,7 +525,7 @@ function FixedIntakeTab({
         batchId,
         retry
           ? `answer-source:${batchId}:retry:${crypto.randomUUID()}`
-          : `answer-source:${batchId}:structure:v1`,
+          : `answer-source:${batchId}:structure:v3`,
       );
       setAnswerSourceAnalysis(analysis);
       if (analysis.run.status === "failed") {
@@ -1162,7 +1162,7 @@ function FixedIntakeTab({
             <div className="intake-upload-line">
               <div>
                 <b>答案资料（选填）</b>
-                <small>上传图片、PDF、TXT，或直接粘贴</small>
+                <small>上传图片、PDF、Word、Excel、TXT，或直接粘贴</small>
               </div>
               <button className="secondary" onClick={pickAnswer}>选择答案</button>
               <strong>{answerPath ? fileName(answerPath) : "可跳过"}</strong>
@@ -1189,7 +1189,7 @@ function FixedIntakeTab({
         <button className="primary intake-primary" disabled={busy} onClick={submit}>
           {busy ? "正在安全归档并拆分页面…" : "上传并开始整理"}
         </button>
-        <div className="muted intake-safe-note">原图保留；PDF 按页归档；本步骤不会自动计分或发布。</div>
+        <div className="muted intake-safe-note">原文件保留；PDF 按页识别，Word/Excel 仅在本机提取文字；本步骤不会自动计分或发布。</div>
       </section>
 
       <aside className="exam-card intake-result-card">

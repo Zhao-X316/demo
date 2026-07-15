@@ -356,7 +356,7 @@ pub fn exam_fixed_intake_prepare(
     exam_intake::persist_fixed_intake(&conn, &state.data_dir, &request, &prepared).map_err(e)
 }
 
-/// 结构化老师上传的答案图片或文本，并逐题生成带来源锚点的 AI 草稿。
+/// 结构化老师上传的答案图片、PDF、文本或 Office 文件，并逐题生成带来源锚点的 AI 草稿。
 ///
 /// 请求不含学生作答或当前 K1 标准答案；外部调用期间不持 SQLite 锁。成功结果仍须
 /// 老师一次确认，冲突/缺题在固定卷预检中保持 blocked。

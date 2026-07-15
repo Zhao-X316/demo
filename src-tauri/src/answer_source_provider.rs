@@ -1,4 +1,4 @@
-//! 火山方舟答案图片/PDF/文本结构化适配器。
+//! 火山方舟答案图片/PDF/文本/Office 结构化适配器。
 //!
 //! 模型只看到老师答案资料与题目清单，不看到学生答案或当前 K1 标准答案。
 
@@ -17,8 +17,8 @@ use crate::secrets::VolcanoCreds;
 use crate::vlm::{ARK_URL, DEFAULT_MODEL};
 
 const MODEL_VERSION: &str = "ark-chat-completions-v3";
-const CONFIG_VERSION: &str = "answer-source-image-text-pdf-v2";
-const RULE_VERSION: &str = "answer-source-structured-json-page-anchor-v2";
+const CONFIG_VERSION: &str = "answer-source-image-text-pdf-office-v3";
+const RULE_VERSION: &str = "answer-source-structured-json-source-anchor-v3";
 
 pub struct ArkAnswerSourceRecognizer {
     api_key: String,
@@ -83,14 +83,14 @@ fn build_prompt(request: &AnswerSourceRecognitionRequest<'_>) -> String {
     format!(
         "你是教师上传答案资料的结构化整理器，只提取资料中明确写出的答案，不判学生作答。\n\
          当前题目清单：{items}。\n\
-         文本答案资料（图片时为空）：{source_text}\n\
+         文本答案资料（图片/PDF 时为空；Word/Excel 已在本机安全提取）：{source_text}\n\
          只输出一个 JSON 对象，不要 markdown：state 为 ready|needs_review|blocked；\n\
          entries 为 [{{assessment_item_id,answer_json,source_anchor,confidence}}]；\n\
          confidence 为 0~1；issue_codes 为字符串数组。\n\
          answer_json 必须带 schema_version=1：单选/多选使用 correct_labels 字符串数组；\n\
          判断题使用 correct 布尔值；填空使用 slots 数组，每项含 order_index 与 canonical_answers；\n\
          简答使用 reference_answer 与 rubric_points 数组。source_anchor 必须带 schema_version=1，\n\
-         图片/PDF 写真实的 page（从1开始）和 region_hint，文本写 line/quote。不得新增清单外题目，不得根据题干猜答案，\n\
+         图片/PDF 写真实的 page（从1开始）和 region_hint，文本/Word/Excel 写 line/quote。不得新增清单外题目，不得根据题干猜答案，\n\
          不得利用学生多数答案；资料没写清、缺题或题号无法绑定时必须 needs_review/blocked。\n\
          只有逐题覆盖完整且每项与总置信度均不低于0.95时才能 ready。"
     )
@@ -305,6 +305,7 @@ mod tests {
             mime_type: "text/plain",
             source_bytes: b"1.A",
             source_text: Some("1.A"),
+            text_extraction_version: None,
             visualization_version: None,
             visual_pages: &[],
             items: &items,
@@ -365,6 +366,7 @@ mod tests {
             mime_type: "application/pdf",
             source_bytes: source,
             source_text: None,
+            text_extraction_version: None,
             visualization_version: Some("fixture-renderer-v1"),
             visual_pages: &pages,
             items: &items,
