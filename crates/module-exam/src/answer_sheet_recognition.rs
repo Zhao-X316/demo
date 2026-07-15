@@ -6,7 +6,8 @@
 
 use std::collections::BTreeSet;
 
-use image::DynamicImage;
+use image::codecs::jpeg::JpegEncoder;
+use image::{DynamicImage, Rgb, RgbImage};
 use serde::{Deserialize, Serialize};
 use suite_core::domain::hashing;
 use suite_core::error::{CoreError, CoreResult};
@@ -19,6 +20,7 @@ use crate::objective_recognition::{
 };
 
 pub const ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION: i64 = 1;
+pub const ANSWER_SHEET_ANCHOR_CONFIDENCE_THRESHOLD: f64 = 0.35;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SheetRect {
@@ -190,6 +192,287 @@ impl AnswerSheetTemplateDefinition {
         serde_json::to_string(self)
             .map_err(|error| CoreError::Parse(format!("答题卡模板序列化失败：{error}")))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DetectedAnswerSheetAnchor {
+    pub key: String,
+    pub source_x: f64,
+    pub source_y: f64,
+    pub confidence: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnswerSheetAlignmentResult {
+    /// 把标准模板坐标映射到学生原图坐标的 3x3 单应矩阵。
+    pub template_to_source: [f64; 9],
+    pub detected_anchors: Vec<DetectedAnswerSheetAnchor>,
+    pub confidence: f64,
+    pub aligned_jpeg: Vec<u8>,
+}
+
+/// 使用固定四角锚点把拍照答题卡校正到模板画布。
+///
+/// 这里不猜题号或答案；锚点不足、顺序翻转或页面裁切都会直接失败，避免把正确涂点
+/// 映射到错误题号。
+pub fn align_answer_sheet_page(
+    definition: &AnswerSheetTemplateDefinition,
+    source_image_bytes: &[u8],
+) -> Result<AnswerSheetAlignmentResult, ObjectiveRecognitionFailure> {
+    definition.validate().map_err(invalid_request)?;
+    let source = image::load_from_memory(source_image_bytes)
+        .map(DynamicImage::into_rgb8)
+        .map_err(|_| {
+            failure(
+                ObjectiveRecognitionErrorCode::DecodeFailed,
+                "答题卡整页图片无法解码",
+                false,
+            )
+        })?;
+    let gray = DynamicImage::ImageRgb8(source.clone()).into_luma8();
+    let mut detected = Vec::with_capacity(4);
+    let mut correspondences = Vec::with_capacity(4);
+    for anchor in &definition.anchors {
+        let point = detect_anchor(&gray, anchor)?;
+        let template_x =
+            (anchor.expected.x + anchor.expected.width / 2.0) * definition.canvas_width as f64;
+        let template_y =
+            (anchor.expected.y + anchor.expected.height / 2.0) * definition.canvas_height as f64;
+        correspondences.push((template_x, template_y, point.source_x, point.source_y));
+        detected.push(point);
+    }
+    validate_detected_orientation(&detected)?;
+    let matrix = solve_homography(&correspondences).ok_or_else(|| {
+        failure(
+            ObjectiveRecognitionErrorCode::TemplateMismatch,
+            "答题卡四角锚点无法形成稳定透视变换",
+            false,
+        )
+    })?;
+    let (aligned, outside_ratio) = warp_template_canvas(
+        &source,
+        definition.canvas_width,
+        definition.canvas_height,
+        &matrix,
+    );
+    // 相机透视校正后的四边允许保留少量白色安全边；超过 5% 才视为裁切。
+    if outside_ratio > 0.05 {
+        return Err(failure(
+            ObjectiveRecognitionErrorCode::TemplateMismatch,
+            "答题卡边缘疑似裁切或锚点错位",
+            false,
+        ));
+    }
+    let mut aligned_jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut aligned_jpeg, 92)
+        .encode_image(&aligned)
+        .map_err(|_| {
+            failure(
+                ObjectiveRecognitionErrorCode::Internal,
+                "答题卡校正图生成失败",
+                true,
+            )
+        })?;
+    let confidence = detected
+        .iter()
+        .map(|anchor| anchor.confidence)
+        .fold(1.0_f64, f64::min);
+    Ok(AnswerSheetAlignmentResult {
+        template_to_source: matrix,
+        detected_anchors: detected,
+        confidence,
+        aligned_jpeg,
+    })
+}
+
+fn detect_anchor(
+    gray: &image::GrayImage,
+    anchor: &AnswerSheetAnchor,
+) -> Result<DetectedAnswerSheetAnchor, ObjectiveRecognitionFailure> {
+    let width = gray.width();
+    let height = gray.height();
+    let x0 = (anchor.search.x * width as f64).floor().max(0.0) as u32;
+    let y0 = (anchor.search.y * height as f64).floor().max(0.0) as u32;
+    let x1 = ((anchor.search.x + anchor.search.width) * width as f64)
+        .ceil()
+        .min(width as f64) as u32;
+    let y1 = ((anchor.search.y + anchor.search.height) * height as f64)
+        .ceil()
+        .min(height as f64) as u32;
+    let mut weight_sum = 0.0;
+    let mut weighted_x = 0.0;
+    let mut weighted_y = 0.0;
+    let mut dark_pixels = 0_u64;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let luma = gray.get_pixel(x, y).0[0];
+            if luma <= 96 {
+                let weight = f64::from(255 - luma);
+                weight_sum += weight;
+                weighted_x += (x as f64 + 0.5) * weight;
+                weighted_y += (y as f64 + 0.5) * weight;
+                dark_pixels += 1;
+            }
+        }
+    }
+    let expected_area =
+        (anchor.expected.width * width as f64) * (anchor.expected.height * height as f64);
+    let confidence = (dark_pixels as f64 / expected_area.max(1.0)).min(1.0);
+    if weight_sum <= 0.0 || confidence < ANSWER_SHEET_ANCHOR_CONFIDENCE_THRESHOLD {
+        return Err(failure(
+            ObjectiveRecognitionErrorCode::TemplateMismatch,
+            &format!("未找到答题卡{}锚点", anchor.key),
+            false,
+        ));
+    }
+    Ok(DetectedAnswerSheetAnchor {
+        key: anchor.key.trim().to_ascii_lowercase(),
+        source_x: weighted_x / weight_sum,
+        source_y: weighted_y / weight_sum,
+        confidence,
+    })
+}
+
+fn validate_detected_orientation(
+    detected: &[DetectedAnswerSheetAnchor],
+) -> Result<(), ObjectiveRecognitionFailure> {
+    let point = |key: &str| {
+        detected
+            .iter()
+            .find(|anchor| anchor.key == key)
+            .map(|anchor| (anchor.source_x, anchor.source_y))
+    };
+    let Some(top_left) = point("top_left") else {
+        return Err(missing_anchor());
+    };
+    let Some(top_right) = point("top_right") else {
+        return Err(missing_anchor());
+    };
+    let Some(bottom_left) = point("bottom_left") else {
+        return Err(missing_anchor());
+    };
+    let Some(bottom_right) = point("bottom_right") else {
+        return Err(missing_anchor());
+    };
+    if top_left.0 >= top_right.0
+        || bottom_left.0 >= bottom_right.0
+        || top_left.1 >= bottom_left.1
+        || top_right.1 >= bottom_right.1
+    {
+        return Err(failure(
+            ObjectiveRecognitionErrorCode::TemplateMismatch,
+            "答题卡锚点顺序翻转或页面方向错误",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+fn missing_anchor() -> ObjectiveRecognitionFailure {
+    failure(
+        ObjectiveRecognitionErrorCode::TemplateMismatch,
+        "答题卡缺少四角锚点",
+        false,
+    )
+}
+
+fn solve_homography(points: &[(f64, f64, f64, f64)]) -> Option<[f64; 9]> {
+    if points.len() != 4 {
+        return None;
+    }
+    let mut augmented = [[0.0_f64; 9]; 8];
+    for (index, &(x, y, u, v)) in points.iter().enumerate() {
+        let row = index * 2;
+        augmented[row] = [x, y, 1.0, 0.0, 0.0, 0.0, -u * x, -u * y, u];
+        augmented[row + 1] = [0.0, 0.0, 0.0, x, y, 1.0, -v * x, -v * y, v];
+    }
+    for column in 0..8 {
+        let pivot = (column..8).max_by(|left, right| {
+            augmented[*left][column]
+                .abs()
+                .total_cmp(&augmented[*right][column].abs())
+        })?;
+        if augmented[pivot][column].abs() < 1e-9 {
+            return None;
+        }
+        augmented.swap(column, pivot);
+        let divisor = augmented[column][column];
+        for value in augmented[column].iter_mut().skip(column) {
+            *value /= divisor;
+        }
+        let pivot_row = augmented[column];
+        for (row, target_row) in augmented.iter_mut().enumerate() {
+            if row == column {
+                continue;
+            }
+            let factor = target_row[column];
+            for (value, pivot_value) in target_row.iter_mut().zip(pivot_row.iter()).skip(column) {
+                *value -= factor * pivot_value;
+            }
+        }
+    }
+    let mut matrix = [0.0; 9];
+    for index in 0..8 {
+        matrix[index] = augmented[index][8];
+    }
+    matrix[8] = 1.0;
+    matrix
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(matrix)
+}
+
+fn warp_template_canvas(
+    source: &RgbImage,
+    output_width: u32,
+    output_height: u32,
+    matrix: &[f64; 9],
+) -> (RgbImage, f64) {
+    let mut output = RgbImage::from_pixel(output_width, output_height, Rgb([255, 255, 255]));
+    let mut outside = 0_u64;
+    for y in 0..output_height {
+        for x in 0..output_width {
+            let x = x as f64 + 0.5;
+            let y = y as f64 + 0.5;
+            let denominator = matrix[6] * x + matrix[7] * y + matrix[8];
+            if denominator.abs() < 1e-9 {
+                outside += 1;
+                continue;
+            }
+            let source_x = (matrix[0] * x + matrix[1] * y + matrix[2]) / denominator;
+            let source_y = (matrix[3] * x + matrix[4] * y + matrix[5]) / denominator;
+            if let Some(pixel) = bilinear_sample(source, source_x, source_y) {
+                output.put_pixel((x - 0.5) as u32, (y - 0.5) as u32, pixel);
+            } else {
+                outside += 1;
+            }
+        }
+    }
+    let total = u64::from(output_width) * u64::from(output_height);
+    (output, outside as f64 / total.max(1) as f64)
+}
+
+fn bilinear_sample(image: &RgbImage, x: f64, y: f64) -> Option<Rgb<u8>> {
+    if x < 0.0 || y < 0.0 || x > (image.width() - 1) as f64 || y > (image.height() - 1) as f64 {
+        return None;
+    }
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = (x0 + 1).min(image.width() - 1);
+    let y1 = (y0 + 1).min(image.height() - 1);
+    let dx = x - x0 as f64;
+    let dy = y - y0 as f64;
+    let p00 = image.get_pixel(x0, y0).0;
+    let p10 = image.get_pixel(x1, y0).0;
+    let p01 = image.get_pixel(x0, y1).0;
+    let p11 = image.get_pixel(x1, y1).0;
+    let mut output = [0_u8; 3];
+    for channel in 0..3 {
+        let top = p00[channel] as f64 * (1.0 - dx) + p10[channel] as f64 * dx;
+        let bottom = p01[channel] as f64 * (1.0 - dx) + p11[channel] as f64 * dx;
+        output[channel] = (top * (1.0 - dy) + bottom * dy).round() as u8;
+    }
+    Some(Rgb(output))
 }
 
 /// 在页面配准和题区裁剪完成后，对单题裁剪做本地模板差分。
@@ -518,6 +801,53 @@ mod tests {
         }
     }
 
+    fn valid_template() -> AnswerSheetTemplateDefinition {
+        let anchor = |key: &str, x: f64, y: f64, search_x: f64, search_y: f64| AnswerSheetAnchor {
+            key: key.into(),
+            expected: SheetRect {
+                x,
+                y,
+                width: 0.05,
+                height: 0.05,
+            },
+            search: SheetRect {
+                x: search_x,
+                y: search_y,
+                width: 0.25,
+                height: 0.25,
+            },
+        };
+        AnswerSheetTemplateDefinition {
+            schema_version: 1,
+            assessment_version_id: 1,
+            template_version: "answer-sheet-v1".into(),
+            page_no: 1,
+            canvas_width: 200,
+            canvas_height: 200,
+            blank_artifact_id: 1,
+            blank_artifact_sha256: "a".repeat(64),
+            anchors: vec![
+                anchor("top_left", 0.05, 0.05, 0.0, 0.0),
+                anchor("top_right", 0.90, 0.05, 0.75, 0.0),
+                anchor("bottom_left", 0.05, 0.90, 0.0, 0.75),
+                anchor("bottom_right", 0.90, 0.90, 0.75, 0.75),
+            ],
+            items: vec![AnswerSheetItemTemplate {
+                assessment_item_id: 1,
+                region_index: 0,
+                question_type: ObjectiveQuestionType::Single,
+                region: SheetRect {
+                    x: 0.1,
+                    y: 0.1,
+                    width: 0.5,
+                    height: 0.1,
+                },
+                cells: cells(),
+            }],
+            policy: policy(),
+        }
+    }
+
     #[test]
     fn local_omr_recognizes_one_clear_mark() {
         let blank = image::GrayImage::from_pixel(100, 40, Luma([255]));
@@ -562,30 +892,33 @@ mod tests {
 
     #[test]
     fn template_requires_four_anchors_and_unique_question_mapping() {
-        let definition = AnswerSheetTemplateDefinition {
-            schema_version: 1,
-            assessment_version_id: 1,
-            template_version: "answer-sheet-v1".into(),
-            page_no: 1,
-            canvas_width: 1000,
-            canvas_height: 1400,
-            blank_artifact_id: 1,
-            blank_artifact_sha256: "a".repeat(64),
-            anchors: vec![],
-            items: vec![AnswerSheetItemTemplate {
-                assessment_item_id: 1,
-                region_index: 0,
-                question_type: ObjectiveQuestionType::Single,
-                region: SheetRect {
-                    x: 0.1,
-                    y: 0.1,
-                    width: 0.5,
-                    height: 0.1,
-                },
-                cells: cells(),
-            }],
-            policy: policy(),
-        };
+        let mut definition = valid_template();
+        definition.anchors.clear();
         assert!(definition.validate().is_err());
+    }
+
+    #[test]
+    fn four_anchors_align_a_skewed_photo_to_the_template_canvas() {
+        let mut source = RgbImage::from_pixel(260, 260, Rgb([255, 255, 255]));
+        for (center_x, center_y) in [(25, 25), (235, 15), (35, 235), (225, 245)] {
+            for y in center_y - 6..center_y + 6 {
+                for x in center_x - 6..center_x + 6 {
+                    source.put_pixel(x, y, Rgb([0, 0, 0]));
+                }
+            }
+        }
+        let mut bytes = Vec::new();
+        JpegEncoder::new_with_quality(&mut bytes, 95)
+            .encode_image(&source)
+            .unwrap();
+        let result = align_answer_sheet_page(&valid_template(), &bytes).unwrap();
+        let aligned = image::load_from_memory(&result.aligned_jpeg).unwrap();
+        assert_eq!((aligned.width(), aligned.height()), (200, 200));
+        assert_eq!(result.detected_anchors.len(), 4);
+        assert!(result.confidence >= ANSWER_SHEET_ANCHOR_CONFIDENCE_THRESHOLD);
+        assert_ne!(
+            result.template_to_source,
+            [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+        );
     }
 }
