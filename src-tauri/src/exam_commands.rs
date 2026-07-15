@@ -18,7 +18,8 @@ use module_exam::vlm::{self as exam_vlm, AnalyzedQuestion};
 
 use crate::exam_intake::{
     self, FixedIntakeOption, FixedIntakeRequest, FixedIntakeResult, GroupingConfirmationResult,
-    GroupingQualityConfirmationResult, MaterialTypeConfirmationResult, PageCycleSuggestion,
+    GroupingQualityConfirmationResult, GroupingRetakeResult, MaterialTypeConfirmationResult,
+    PageCycleSuggestion,
 };
 use crate::objective_provider::ArkObjectiveRecognizer;
 use crate::objective_run::{self, BeginObjectiveRun};
@@ -372,6 +373,25 @@ pub fn exam_fixed_intake_confirm_grouping_quality(
 ) -> R<GroupingQualityConfirmationResult> {
     let conn = lock(&state)?;
     exam_intake::confirm_intake_grouping_quality(&conn, batch_id, &rejected_page_ids).map_err(e)
+}
+
+/// 只替换一个当前待重拍页；旧原图和旧确认快照保留，不移动其他学生的照片顺序。
+#[tauri::command]
+pub fn exam_fixed_intake_replace_rejected_page(
+    state: State<'_, AppState>,
+    batch_id: i64,
+    rejected_page_id: i64,
+    replacement_path: String,
+) -> R<GroupingRetakeResult> {
+    let conn = lock(&state)?;
+    exam_intake::replace_intake_rejected_page(
+        &conn,
+        &state.data_dir,
+        batch_id,
+        rejected_page_id,
+        &replacement_path,
+    )
+    .map_err(e)
 }
 
 /// 对一条已完成老师确认、且已有明确答题格坐标的客观题区域执行真实视觉识别。

@@ -22,6 +22,7 @@ import {
   examFixedIntakeOptions,
   examFixedIntakeConfirmMaterialType,
   examFixedIntakePrepare,
+  examFixedIntakeReplaceRejectedPage,
   examObjectiveAccept,
   examObjectiveCorrect,
   examObjectivePublishAttempt,
@@ -267,6 +268,7 @@ function FixedIntakeTab({
   const [rejectedPageIds, setRejectedPageIds] = useState<number[]>([]);
   const [loadingEvidence, setLoadingEvidence] = useState(false);
   const [confirmingQuality, setConfirmingQuality] = useState(false);
+  const [retakingPageId, setRetakingPageId] = useState<number | null>(null);
   const [groupingStartNo, setGroupingStartNo] = useState("");
   const [absentStudentNos, setAbsentStudentNos] = useState<string[]>([]);
   const [result, setResult] = useState<FixedIntakeResult | null>(null);
@@ -432,10 +434,32 @@ function FixedIntakeTab({
         rejectedPageIds,
       );
       setResult({ ...result, ...confirmed });
+      setGroupingEvidence(await examFixedIntakeGroupingEvidence(result.batchId));
     } catch (err) {
       onError(String(err));
     } finally {
       setConfirmingQuality(false);
+    }
+  };
+
+  const replaceRejectedPage = async (pageId: number) => {
+    if (!result) return;
+    try {
+      const selected = await open({ multiple: false, filters: [{ name: "重拍照片", extensions: ["jpg", "jpeg"] }] });
+      if (!selected || Array.isArray(selected)) return;
+      setRetakingPageId(pageId);
+      const replaced = await examFixedIntakeReplaceRejectedPage(result.batchId, pageId, selected);
+      setResult({
+        ...result,
+        mappedGroupCount: replaced.mappedGroupCount,
+        rejectedGroupCount: replaced.rejectedGroupCount,
+        nextAction: replaced.nextAction,
+      });
+      setGroupingEvidence(await examFixedIntakeGroupingEvidence(result.batchId));
+    } catch (err) {
+      onError(`替换重拍页失败：${String(err)}`);
+    } finally {
+      setRetakingPageId(null);
     }
   };
 
@@ -731,6 +755,25 @@ function FixedIntakeTab({
               <div className="intake-quality-complete">
                 <b>页面质量与正式归属已确认</b>
                 <span>已进入后续识别：{result.mappedGroupCount} 名；需重拍：{result.rejectedGroupCount} 名。未生成分数或发布。</span>
+                {result.rejectedGroupCount > 0 && (
+                  <div className="intake-retake-list">
+                    {groupingEvidence.flatMap((group) => group.pages
+                      .filter((page) => page.qualityResult === "reject")
+                      .map((page) => (
+                        <button
+                          type="button"
+                          key={page.pageId}
+                          disabled={retakingPageId !== null}
+                          onClick={() => replaceRejectedPage(page.pageId)}
+                        >
+                          {retakingPageId === page.pageId
+                            ? "正在归档并替换…"
+                            : `${group.studentNo}号 ${group.studentName} · 第${page.pageNo}页重拍`}
+                        </button>
+                      )),
+                    )}
+                  </div>
+                )}
               </div>
             )}
             <div className="intake-route-grid">

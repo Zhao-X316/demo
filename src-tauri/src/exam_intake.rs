@@ -23,6 +23,9 @@ use module_exam::service::ordered_intake::{
     self, ConfirmOrderedGroupingInput, ImportOrderEntry, NewImportOrderRevision,
     NewMaterialTypeRevision, NewPageTypeRevision, OrderedGroupingInput,
 };
+use module_exam::service::ordered_retake::{
+    self, ReplaceRejectedPageInput, RetakeArtifactInput,
+};
 use module_exam::service::page_cycle;
 use module_exam::service::papers::{self, NewIngestBatch, NewIngestPage};
 
@@ -32,6 +35,7 @@ const ACTOR: &str = "teacher";
 const ORIGINAL_STUDENT_VERSION: &str = "exam-intake-original-student-v1";
 const ORIGINAL_ANSWER_VERSION: &str = "exam-intake-original-answer-v1";
 const PDF_PAGE_VERSION: &str = "exam-intake-pdf-page-v1";
+const RETAKE_STUDENT_VERSION: &str = "exam-intake-retake-student-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -154,6 +158,16 @@ pub struct GroupingConfirmationResult {
 #[serde(rename_all = "camelCase")]
 pub struct GroupingQualityConfirmationResult {
     pub quality_review_completed: bool,
+    pub mapped_group_count: i64,
+    pub rejected_group_count: i64,
+    pub next_action: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupingRetakeResult {
+    pub replacement_page_id: i64,
+    pub activated_student: bool,
     pub mapped_group_count: i64,
     pub rejected_group_count: i64,
     pub next_action: String,
@@ -1374,6 +1388,74 @@ pub(crate) fn confirm_intake_grouping_quality(
     })
 }
 
+/// 老师为一个当前待重拍页选择新的 JPEG。新文件按 hash 归档，数据库在单一事务中
+/// 追加 artifact/page/replacement/quality；该学生最后一张待重拍页补齐时才建立正式归属。
+pub(crate) fn replace_intake_rejected_page(
+    conn: &Connection,
+    data_dir: &Path,
+    batch_id: i64,
+    rejected_page_id: i64,
+    replacement_path: &str,
+) -> CoreResult<GroupingRetakeResult> {
+    let source = prepare_path(replacement_path, false, 0)?;
+    if source.format != SourceFormat::Jpeg {
+        return Err(CoreError::Invalid("单页重拍只支持 JPG 或 JPEG".into()));
+    }
+    let existing = artifacts::get_by_identity(
+        conn,
+        &source.expected_hash,
+        ArtifactKind::Image,
+        None,
+        RETAKE_STUDENT_VERSION,
+    )?;
+    let originals_dir = data_dir.join("archive/exam/originals");
+    let (archived, hash, byte_size) = archive_source(&source, &originals_dir)?;
+    let original_path = source
+        .path
+        .as_deref()
+        .ok_or_else(|| CoreError::Invalid("重拍照片缺少本地路径".into()))?
+        .to_string_lossy()
+        .into_owned();
+    let archived_path = archived.path.to_string_lossy().into_owned();
+    let result = ordered_retake::replace_rejected_page(
+        conn,
+        &ReplaceRejectedPageInput {
+            ingest_batch_id: batch_id,
+            rejected_page_id,
+            artifact: RetakeArtifactInput {
+                sha256: &hash,
+                byte_size,
+                original_name: &source.original_name,
+                original_path: &original_path,
+                archived_path: &archived_path,
+                processing_version: RETAKE_STUDENT_VERSION,
+            },
+            confirmed_by: ACTOR,
+        },
+    );
+    if result.is_err() && existing.is_none() {
+        archived.rollback_new_file();
+    }
+    let result = result?;
+    Ok(GroupingRetakeResult {
+        replacement_page_id: result.replacement.replacement_page_id,
+        activated_student: result.activated_student,
+        mapped_group_count: result.activation.mapped_group_count,
+        rejected_group_count: result.activation.rejected_group_count,
+        next_action: if result.activation.rejected_group_count == 0 {
+            "重拍页已替换，全部学生页面归属现已完成；下一步按资料类型识别题区或答案位置"
+                .into()
+        } else if result.activated_student {
+            format!(
+                "重拍页已替换并恢复该学生；仍有 {} 名学生需要补拍",
+                result.activation.rejected_group_count
+            )
+        } else {
+            "重拍页已替换；该学生还有其他页面需要补拍".into()
+        },
+    })
+}
+
 #[cfg(test)]
 fn prepare_fixed_intake(
     conn: &Connection,
@@ -1813,10 +1895,15 @@ mod tests {
         );
 
         let rejected_page_id = evidence[0].pages[0].page_id;
+        let second_rejected_page_id = evidence[0].pages[1].page_id;
         assert_eq!(evidence[0].pages.len(), 2);
         assert_eq!(evidence[1].pages.len(), 2);
-        let result =
-            confirm_intake_grouping_quality(&conn, prepared.batch_id, &[rejected_page_id]).unwrap();
+        let result = confirm_intake_grouping_quality(
+            &conn,
+            prepared.batch_id,
+            &[rejected_page_id, second_rejected_page_id],
+        )
+        .unwrap();
         assert_eq!(
             (result.mapped_group_count, result.rejected_group_count),
             (1, 1)
@@ -1866,8 +1953,12 @@ mod tests {
             .unwrap();
         assert_eq!(rejected_state, "needs_review");
 
-        let retried =
-            confirm_intake_grouping_quality(&conn, prepared.batch_id, &[rejected_page_id]).unwrap();
+        let retried = confirm_intake_grouping_quality(
+            &conn,
+            prepared.batch_id,
+            &[rejected_page_id, second_rejected_page_id],
+        )
+        .unwrap();
         assert_eq!(retried.mapped_group_count, 1);
         let attempt_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM exam_attempts_v2", [], |row| {
@@ -1875,6 +1966,96 @@ mod tests {
             })
             .unwrap();
         assert_eq!(attempt_count, 1, "相同质量确认重试不得新增 attempt");
+
+        let retake = root.join("IMG_retake_1.jpg");
+        write_jpeg(&retake, b"paper-first-quality-retake");
+        let first_replaced = replace_intake_rejected_page(
+            &conn,
+            &root,
+            prepared.batch_id,
+            rejected_page_id,
+            &retake.to_string_lossy(),
+        )
+        .unwrap();
+        assert!(!first_replaced.activated_student);
+        assert_eq!(
+            (
+                first_replaced.mapped_group_count,
+                first_replaced.rejected_group_count
+            ),
+            (1, 1)
+        );
+        let refreshed = intake_grouping_evidence(&conn, prepared.batch_id).unwrap();
+        assert_eq!(refreshed[0].pages[0].replaced_page_id, Some(rejected_page_id));
+        assert_eq!(
+            refreshed[0].pages[0].page_id,
+            first_replaced.replacement_page_id
+        );
+        assert_eq!(refreshed[0].pages[0].quality_result.as_deref(), Some("pass"));
+        assert_eq!(refreshed[0].pages[0].match_decision, None);
+        assert_eq!(refreshed[0].pages[1].quality_result.as_deref(), Some("reject"));
+
+        let second_retake = root.join("IMG_retake_2.jpg");
+        write_jpeg(&second_retake, b"paper-second-quality-retake");
+        let replaced = replace_intake_rejected_page(
+            &conn,
+            &root,
+            prepared.batch_id,
+            second_rejected_page_id,
+            &second_retake.to_string_lossy(),
+        )
+        .unwrap();
+        assert!(replaced.activated_student);
+        assert_eq!(
+            (replaced.mapped_group_count, replaced.rejected_group_count),
+            (2, 0)
+        );
+        let completed = intake_grouping_evidence(&conn, prepared.batch_id).unwrap();
+        assert_eq!(
+            completed[0].pages[0].match_decision.as_deref(),
+            Some("teacher_confirmed")
+        );
+        assert_eq!(
+            completed[0].pages[1].match_decision.as_deref(),
+            Some("teacher_confirmed")
+        );
+        let states: (String, String, String, String) = conn
+            .query_row(
+                "SELECT
+                   (SELECT state FROM exam_ingest_pages_v2 WHERE id=?1),
+                   (SELECT state FROM exam_ingest_pages_v2 WHERE id=?2),
+                   (SELECT state FROM exam_ingest_pages_v2 WHERE id=?3),
+                   (SELECT state FROM exam_ingest_pages_v2 WHERE id=?4)",
+                [
+                    rejected_page_id,
+                    second_rejected_page_id,
+                    first_replaced.replacement_page_id,
+                    replaced.replacement_page_id,
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            states,
+            (
+                "voided".into(),
+                "voided".into(),
+                "matched".into(),
+                "matched".into()
+            )
+        );
+        let final_counts: (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM exam_attempts_v2),
+                   (SELECT COUNT(*) FROM exam_page_match_revisions_v2 WHERE state='active'),
+                   (SELECT COUNT(*) FROM exam_ordered_grouping_activations_v2),
+                   (SELECT COUNT(*) FROM exam_grade_decisions_v2)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(final_counts, (2, 4, 3, 0));
     }
 
     #[test]

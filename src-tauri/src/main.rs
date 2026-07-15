@@ -101,6 +101,7 @@ fn main() {
             exam_commands::exam_fixed_intake_confirm_grouping,
             exam_commands::exam_fixed_intake_grouping_evidence,
             exam_commands::exam_fixed_intake_confirm_grouping_quality,
+            exam_commands::exam_fixed_intake_replace_rejected_page,
             exam_commands::exam_objective_recognize_region,
         ])
         .run(tauri::generate_context!())

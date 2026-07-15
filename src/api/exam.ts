@@ -271,6 +271,7 @@ export interface GroupedPageEvidence {
   studentName: string;
   pages: Array<{
     pageId: number;
+    replacedPageId: number | null;
     pageNo: number;
     importIndex: number;
     archivedPath: string;
@@ -283,6 +284,14 @@ export interface GroupedPageEvidence {
 
 export interface GroupingQualityConfirmationResult {
   qualityReviewCompleted: true;
+  mappedGroupCount: number;
+  rejectedGroupCount: number;
+  nextAction: string;
+}
+
+export interface GroupingRetakeResult {
+  replacementPageId: number;
+  activatedStudent: boolean;
   mappedGroupCount: number;
   rejectedGroupCount: number;
   nextAction: string;
@@ -383,4 +392,14 @@ export const examFixedIntakeConfirmGroupingQuality = (
 ) => call<GroupingQualityConfirmationResult>("exam_fixed_intake_confirm_grouping_quality", {
   batchId: batch_id,
   rejectedPageIds: rejected_page_ids,
+});
+
+export const examFixedIntakeReplaceRejectedPage = (
+  batch_id: number,
+  rejected_page_id: number,
+  replacement_path: string,
+) => call<GroupingRetakeResult>("exam_fixed_intake_replace_rejected_page", {
+  batchId: batch_id,
+  rejectedPageId: rejected_page_id,
+  replacementPath: replacement_path,
 });

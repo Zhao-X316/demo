@@ -29,6 +29,7 @@ pub struct GroupedPageEvidence {
 #[serde(rename_all = "camelCase")]
 pub struct PageEvidence {
     pub page_id: i64,
+    pub replaced_page_id: Option<i64>,
     pub page_no: i64,
     pub import_index: i64,
     pub archived_path: String,
@@ -155,6 +156,16 @@ pub fn grouping_evidence(
                 .pages
                 .into_iter()
                 .map(|page| {
+                    let effective_page_id = conn
+                        .query_row(
+                            "SELECT replacement_page_id
+                             FROM exam_ordered_page_replacements_v2
+                             WHERE original_page_id=?1 AND state='active'",
+                            [page.page_id],
+                            |row| row.get(0),
+                        )
+                        .optional()?
+                        .unwrap_or(page.page_id);
                     conn.query_row(
                         "SELECT p.import_index,a.archived_path,a.original_name,p.state,
                                 q.result,m.decision
@@ -165,10 +176,12 @@ pub fn grouping_evidence(
                          LEFT JOIN exam_page_match_revisions_v2 m
                            ON m.page_id=p.id AND m.state='active'
                          WHERE p.id=?1 AND p.batch_id=?2",
-                        (page.page_id, ingest_batch_id),
+                        (effective_page_id, ingest_batch_id),
                         |row| {
                             Ok(PageEvidence {
-                                page_id: page.page_id,
+                                page_id: effective_page_id,
+                                replaced_page_id: (effective_page_id != page.page_id)
+                                    .then_some(page.page_id),
                                 page_no: page.page_no,
                                 import_index: row.get(0)?,
                                 archived_path: row.get(1)?,
@@ -181,7 +194,9 @@ pub fn grouping_evidence(
                     )
                     .optional()?
                     .ok_or_else(|| {
-                        CoreError::Invalid(format!("页组中的页面 {} 不属于当前批次", page.page_id))
+                        CoreError::Invalid(format!(
+                            "页组中的当前页面 {effective_page_id} 不属于当前批次"
+                        ))
                     })
                 })
                 .collect::<CoreResult<Vec<_>>>()?;
