@@ -8,7 +8,7 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 
 ## 当前进度
 
-> 2026-07-14：M1 A6b 隔离真机 G01-G16 与 M2-A1 手工客观题纵切均已通过。独立分支 `codex/t2-artifacts` 已完成 T2～T5；T6 在 `de55b34` 固定客观题服务核心、由 `8346753` 接通桌面工作台后，又补上独立 bundle id、固定业务夹具和真 `.app` 数据态验收。真实 OMR provider 仍未接入；所有范围仍未 tag、合并、推送或发布。
+> 2026-07-14：M1 A6b 隔离真机 G01-G16 与 M2-A1 手工客观题纵切均已通过。独立分支 `codex/t2-artifacts` 已完成 T2～T5；T6 已完成服务核心、桌面工作台、独立固定夹具真 `.app` 终审/发布/重启持久化，以及 provider 无关的 OMR 输入输出合同和 `ai_run → observation` 绑定门禁。真实扫描/拍照 provider 与真实黄金集仍未接入；所有范围仍未 tag、合并、推送或发布。
 
 | 部分 | 状态 | 说明 |
 |------|------|------|
@@ -18,20 +18,20 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 | `crates/module-recitation` M1 域 | ✅ 实现 + 单测 | 文件名解析、熟练度 A/B/C、评分编排、识别 ports、rec_contents 仓储 |
 | `crates/module-recitation` M1 服务 | ✅ 实现 + 单测 | import 去重/归档、ASR 可恢复状态机、机器建议、老师终审、补背/到期复习/日切、双向改判 |
 | `crates/module-knowledge` K1 | 🟡 T3 兼容底座 | 教材/知识/考点/能力稳定版本，题目/答案/rubric/link 不可变版本，C0～L4 质量闸门与旧表显式映射；导入、搜索和 UI 尚未接入 |
-| `crates/module-exam` M2 | 🟡 A1 + B0/B1 + M2.5 + B2 桌面纵切 | 手工纵切已真机通过；assessment/attempt、页面证据链、私有候选，以及客观题 observation/suggestion、逐条/严格批量终审、异常人工 revision、显式发布和正式 learning evidence 已落地 |
+| `crates/module-exam` M2 | 🟡 A1 + B0/B1 + M2.5 + B2 桌面纵切 | 手工纵切已真机通过；assessment/attempt、页面证据链、私有候选、客观题终审/发布/evidence，以及 OMR port、脱敏错误合同和 run/题区/artifact 绑定门禁已落地 |
 | Tauri 应用外壳 `src-tauri` | ✅ 实现 + 独立检查 | DB+迁移、M1 终审，以及 T6 工作台/接受建议/人工记分/严格批量/显式发布命令；在线备份恢复、按 hash 归档、凭据掩码与最小 asset scope |
 | 前端 `src` | 🟡 M1/M2 已接入 | 方向 B 模块切换；M1 六区、M2-A1 手工兜底，以及 T6 标准卷按题终审、异常处理、严格批量和整卷发布页面 |
 | 跨平台 CI | ✅ 后端三平台 + 应用 Win/Mac 编译 | `.github/workflows/ci.yml` |
 | 打包 CI（安装包） | ✅ 工作流就绪 | `release.yml`：手动/tag 触发出 `.msi/.exe/.dmg` |
 | 火山 ASR 真接口 | ✅ 标准版 submit+query | 境内端点绕系统代理；processing/ok/failed 可恢复，失败可重试、同 hash 重定位或作废 |
 | 页面与老师终审 | ✅ A6b 真机通过 | 机器只给建议；老师核对录音/ASR/答案版本/评分/备注后终审，副作用才生效 |
-| M2 页面证据链 / OCR | 🟡 T4 契约完成 | 固定夹具已覆盖原图 artifact、页面质量、学生/页码匹配、模板配准、题区裁剪、异常池、重启恢复和完整追溯；真实 OCR/OMR provider 与新 UI 尚未接入 |
+| M2 页面证据链 / OCR | 🟡 T4 契约 + OMR port 完成 | 固定夹具已覆盖原图 artifact、页面质量、学生/页码匹配、模板配准、题区裁剪、异常池、重启恢复和完整追溯；真实 OCR/OMR provider 与真实样本 UI 尚未接入 |
 | M2.5 题目自动沉淀 | 🟡 T5 核心合同完成 | 精确复用当前作业已固定的 K1 版本；否则创建老师私有 C0 候选；冲突/歧义进入待确认，学生卷只允许脱敏文本；相似题语义检索、候选整理 UI 和晋级尚未接入 |
-| M2 标准卷客观题 | 🟡 T6 真 `.app` 数据态纵切完成·待真实 OMR | 固定隔离夹具已验证选择/判断观察、2 条严格批量、4 条异常逐条人工记分、6 份显式发布与 12 条正式学习证据；真实扫描/拍照 OMR 仍未接入 |
+| M2 标准卷客观题 | 🟡 T6 真 `.app` + OMR port 完成·待真实 provider | 固定隔离夹具已验证选择/判断观察、2 条严格批量、4 条异常逐条人工记分、6 份显式发布与 12 条正式学习证据；OMR run 不能跨题区/裁剪绑定，失败元数据必须脱敏；真实扫描/拍照识别仍未接入 |
 | 音频回放 | ✅ app-managed archive | 按 hash 归档；原文件改名、重启和数据库恢复后仍可回放，原路径只兜底 |
 | ffmpeg 转码/时长探测 | ✅ 可选集成 | 装了 ffmpeg 则转 16k 单声道 wav + 探测时长，否则降级 |
 
-当前 T6 已验证：module-exam **33 tests**、workspace **162 tests**、Tauri `--all-targets` **14 tests**（外壳 12 + 隔离夹具 2）、workspace/Tauri 两套 Clippy `-D warnings`、Tauri check、前端 `tsc+vite` 和 `git diff --check` 全通过；`npm run acceptance:t6:build` 生成 bundle id 为 `com.jiaofu.suite.t6fixture` 的独立 `.app`。固定夹具完成 17 个迁移、6 份作答、2 条严格批量、4 条异常人工终审、6 个发布 revision 和 12 条正式学习证据，`integrity_check=ok`、外键违规 0、归档缺失 0。真 `.app` 已完成终审与发布 UI 操作；同一隔离库的进程重启及发布后数据库复核通过，但重启后 GUI 留图仍受 macOS 锁屏阻挡，未包装成完整重启界面验收。正式库未写入。完整 debug DMG 的既有本机打包问题仍未冒充发布完成；真实 OMR provider、扫描/拍照样本和阈值校准仍待完成。
+当前 T6 已验证：module-exam **39 tests**、workspace **168 tests**、Tauri `--all-targets` **14 tests**（外壳 12 + 隔离夹具 2）、workspace/Tauri 两套 Clippy `-D warnings`、Tauri check、前端 `tsc+vite` 和 `git diff --check` 全通过；`npm run acceptance:t6:build` 生成 bundle id 为 `com.jiaofu.suite.t6fixture` 的独立 `.app`。固定夹具完成 17 个迁移、6 份作答、2 条严格批量、4 条异常人工终审、6 个发布 revision 和 12 条正式学习证据，`integrity_check=ok`、外键违规 0、归档缺失 0；重启同一隔离 HOME 后 GUI 仍显示 6/6 已终审和 6/6 已发布，证据裁剪可见。新增 OMR 合同固定题区、裁剪 artifact、模板、provider/model/config/rule 版本、输入/输出 hash、成功/失败状态和脱敏错误映射；合成合同集明确禁止宣称生产准确率。正式库未写入。完整 debug DMG 的既有本机打包问题仍未冒充发布完成；真实 OMR provider、真实扫描/拍照黄金集和阈值校准仍待完成。
 
 > 这些结果不等于授权发布。异模型复核、tag、合并和安装包发布仍需单独放行。
 
@@ -53,7 +53,7 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 │  │  ├─ src/{lib,grader,asr_volcano, domain/{filename,fluency}}.rs
 │  │  └─ migrations/0001_recitation.sql
 │  ├─ module-knowledge/         # K1：教材/知识/题目/答案/rubric/link 版本底座
-│  └─ module-exam/             # M2：页面证据链 + assessment/grade/publication + 私有候选 + 客观题终审/正式证据
+│  └─ module-exam/             # M2：页面证据链 + OMR port + assessment/grade/publication + 私有候选 + 客观题终审/正式证据
 ├─ src-tauri/                  # 桌面外壳与 IPC 命令
 └─ src/                        # React 前端
 ```

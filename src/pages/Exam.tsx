@@ -169,12 +169,16 @@ function displayObservedAnswer(row: ObjectiveWorkbenchRow) {
     const value = JSON.parse(row.observed_answer_json) as {
       selected?: boolean;
       selected_labels?: string[];
+      selected_values?: boolean[];
     };
     if (typeof value.selected === "boolean") {
       return value.selected ? "正确（√）" : "错误（×）";
     }
     if (Array.isArray(value.selected_labels)) {
       return value.selected_labels.join("、") || "—";
+    }
+    if (Array.isArray(value.selected_values)) {
+      return value.selected_values.map((selected) => selected ? "√" : "×").join("、") + "（冲突）";
     }
   } catch {
     return row.observed_answer_json;

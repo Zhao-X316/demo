@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "dataset_id": "objective-omr-synthetic-contract-v1",
+  "production_accuracy_claim_allowed": false,
+  "cases": [
+    {
+      "case_id": "normal-clear",
+      "source_kind": "synthetic_contract",
+      "material_kind": "generated",
+      "question_type": "single",
+      "expected_state": "recognized",
+      "expected_answer": { "kind": "selected_labels", "selected_labels": ["A"] },
+      "artifact_sha256": null,
+      "issue_tags": ["normal"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "blank-region",
+      "source_kind": "synthetic_contract",
+      "material_kind": "generated",
+      "question_type": "single",
+      "expected_state": "blank",
+      "expected_answer": null,
+      "artifact_sha256": null,
+      "issue_tags": ["blank"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "double-selected",
+      "source_kind": "synthetic_contract",
+      "material_kind": "generated",
+      "question_type": "single",
+      "expected_state": "altered",
+      "expected_answer": { "kind": "selected_labels", "selected_labels": ["A", "B"] },
+      "artifact_sha256": null,
+      "issue_tags": ["multiple_marks"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "erased-mark",
+      "source_kind": "synthetic_contract",
+      "material_kind": "generated",
+      "question_type": "single",
+      "expected_state": "altered",
+      "expected_answer": { "kind": "selected_labels", "selected_labels": ["C"] },
+      "artifact_sha256": null,
+      "issue_tags": ["erasure"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "shadowed-photo",
+      "source_kind": "synthetic_contract",
+      "material_kind": "generated",
+      "question_type": "true_false",
+      "expected_state": "low_confidence",
+      "expected_answer": { "kind": "true_false", "selected": true },
+      "artifact_sha256": null,
+      "issue_tags": ["shadow"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "rotated-region",
+      "source_kind": "synthetic_contract",
+      "material_kind": "generated",
+      "question_type": "single",
+      "expected_state": "low_confidence",
+      "expected_answer": { "kind": "selected_labels", "selected_labels": ["D"] },
+      "artifact_sha256": null,
+      "issue_tags": ["rotation"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "blurred-region",
+      "source_kind": "synthetic_contract",
+      "material_kind": "generated",
+      "question_type": "single",
+      "expected_state": "low_confidence",
+      "expected_answer": { "kind": "selected_labels", "selected_labels": ["B"] },
+      "artifact_sha256": null,
+      "issue_tags": ["blur"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "wrong-template",
+      "source_kind": "synthetic_contract",
+      "material_kind": "generated",
+      "question_type": "single",
+      "expected_state": "failed",
+      "expected_answer": null,
+      "artifact_sha256": null,
+      "issue_tags": ["template_mismatch"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    }
+  ]
+}
