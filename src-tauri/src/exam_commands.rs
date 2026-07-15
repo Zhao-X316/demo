@@ -7,6 +7,10 @@ use module_exam::answer_sheet_template_recognition::{
     AnswerSheetTemplateRecognitionErrorCode, AnswerSheetTemplateRecognitionFailure,
     AnswerSheetTemplateRecognizer, ANSWER_SHEET_TEMPLATE_RUN_SCHEMA_VERSION,
 };
+use module_exam::answer_source_recognition::{
+    AnswerSourceErrorCode, AnswerSourceFailure, AnswerSourceRecognizer,
+    ANSWER_SOURCE_SCHEMA_VERSION,
+};
 use module_exam::db::knowledge_points::{self as kp, KnowledgePoint, KpInput};
 use module_exam::db::questions::{self, NewOption, NewQuestion, Question, QuestionOption};
 use module_exam::dictation_recognition::{
@@ -21,6 +25,7 @@ use module_exam::ordinary_paper_recognition::{
     OrdinaryPaperRecognitionErrorCode, OrdinaryPaperRecognitionFailure, OrdinaryPaperRecognizer,
     ORDINARY_PAPER_SCHEMA_VERSION,
 };
+use module_exam::service::answer_source::{self, AnswerSourceReviewSummary};
 use module_exam::service::assessment::{self, GradeDecision, Publication};
 use module_exam::service::dictation_pipeline::{
     self, DictationPageMaterializationResult, DictationTemplateConfirmation,
@@ -38,6 +43,8 @@ use crate::answer_sheet_template_provider::ArkAnswerSheetTemplateRecognizer;
 use crate::answer_sheet_template_run::{
     self, AnswerSheetTemplateRunResult, AnswerSheetTemplateStatus, BeginAnswerSheetTemplateRun,
 };
+use crate::answer_source_provider::ArkAnswerSourceRecognizer;
+use crate::answer_source_run::{self, AnswerSourceAnalysisResult, BeginAnswerSourceRun};
 use crate::dictation_materialization;
 use crate::dictation_provider::{ArkDictationOcrRecognizer, ArkDictationTemplateRecognizer};
 use crate::dictation_run::{
@@ -347,6 +354,108 @@ pub fn exam_fixed_intake_prepare(
     let prepared = exam_intake::prepare_fixed_intake_files(&request).map_err(e)?;
     let conn = lock(&state)?;
     exam_intake::persist_fixed_intake(&conn, &state.data_dir, &request, &prepared).map_err(e)
+}
+
+/// 结构化老师上传的答案图片或文本，并逐题生成带来源锚点的 AI 草稿。
+///
+/// 请求不含学生作答或当前 K1 标准答案；外部调用期间不持 SQLite 锁。成功结果仍须
+/// 老师一次确认，冲突/缺题在固定卷预检中保持 blocked。
+#[tauri::command]
+pub async fn exam_answer_source_analyze(
+    state: State<'_, AppState>,
+    batch_id: i64,
+    idempotency_key: String,
+) -> R<AnswerSourceAnalysisResult> {
+    let creds = secrets::load(&state.data_dir).map_err(e)?;
+    let recognizer = ArkAnswerSourceRecognizer::from_creds(&creds);
+    let descriptor = recognizer.descriptor();
+    let metadata = {
+        let conn = lock(&state)?;
+        answer_source_run::load_metadata(&conn, batch_id).map_err(e)?
+    };
+    let input = std::sync::Arc::new(answer_source_run::load_input(metadata).map_err(e)?);
+    let begin = {
+        let conn = lock(&state)?;
+        answer_source_run::begin(&conn, &input, &descriptor, &idempotency_key).map_err(e)?
+    };
+    if let BeginAnswerSourceRun::Completed(result) = begin {
+        let conn = lock(&state)?;
+        return answer_source_run::materialize_and_review(&conn, *result).map_err(e);
+    }
+    let BeginAnswerSourceRun::Execute { ai_run_id } = begin else {
+        unreachable!("completed returned above")
+    };
+    let worker_input = std::sync::Arc::clone(&input);
+    let provider_result =
+        tauri::async_runtime::spawn_blocking(move || recognizer.recognize(&worker_input.request()))
+            .await
+            .unwrap_or_else(|_| {
+                Err(AnswerSourceFailure {
+                    schema_version: ANSWER_SOURCE_SCHEMA_VERSION,
+                    code: AnswerSourceErrorCode::Internal,
+                    safe_message: "答案结构化任务意外中断，资料已保留等待重试".into(),
+                    retryable: true,
+                })
+            });
+    let conn = lock(&state)?;
+    let result = answer_source_run::finish(&conn, &input, ai_run_id, provider_result).map_err(e)?;
+    answer_source_run::materialize_and_review(&conn, result).map_err(e)
+}
+
+fn refresh_fixed_preflight(conn: &rusqlite::Connection, batch_id: i64) -> R<()> {
+    let expected_pages: i64 = conn
+        .query_row(
+            "SELECT expected_pages_per_attempt FROM exam_ordered_grouping_revisions_v2
+             WHERE ingest_batch_id=?1 AND state='active'",
+            [batch_id],
+            |row| row.get(0),
+        )
+        .map_err(e)?;
+    module_exam::service::fixed_paper::preflight_fixed_paper_batch(
+        conn,
+        &module_exam::service::fixed_paper::FixedPaperPreflightInput {
+            ingest_batch_id: batch_id,
+            expected_pages_per_attempt: expected_pages,
+            created_by_type: "teacher",
+            created_by: Some(LOCAL_TEACHER_ACTOR),
+        },
+    )
+    .map_err(e)?;
+    Ok(())
+}
+
+/// 全部逐题候选与当前作业答案一致时，老师一次确认并复用现有 K1 版本。
+#[tauri::command]
+pub fn exam_answer_source_confirm_matches(
+    state: State<'_, AppState>,
+    batch_id: i64,
+    source_ai_run_id: i64,
+) -> R<AnswerSourceReviewSummary> {
+    let mut conn = lock(&state)?;
+    let result =
+        answer_source::confirm_matches(&mut conn, batch_id, source_ai_run_id, LOCAL_TEACHER_ACTOR)
+            .map_err(e)?;
+    refresh_fixed_preflight(&conn, batch_id)?;
+    Ok(result)
+}
+
+/// 有冲突或缺题时，老师明确选择沿用本次作业已绑定答案；上传草稿被拒绝但保留审计。
+#[tauri::command]
+pub fn exam_answer_source_keep_bound(
+    state: State<'_, AppState>,
+    batch_id: i64,
+    source_ai_run_id: i64,
+) -> R<AnswerSourceReviewSummary> {
+    let mut conn = lock(&state)?;
+    let result = answer_source::keep_bound_answers(
+        &mut conn,
+        batch_id,
+        source_ai_run_id,
+        LOCAL_TEACHER_ACTOR,
+    )
+    .map_err(e)?;
+    refresh_fixed_preflight(&conn, batch_id)?;
+    Ok(result)
 }
 
 #[tauri::command]

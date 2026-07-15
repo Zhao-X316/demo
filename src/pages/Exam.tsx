@@ -3,6 +3,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   AnswerDetail,
+  AnswerSourceAnalysisResult,
   AnswerSheetPageProcessingResult,
   AnswerSheetTemplateRunResult,
   AnswerSheetTemplateStatus,
@@ -22,6 +23,9 @@ import {
   Question,
   QuestionInput,
   examAnswerHumanDecide,
+  examAnswerSourceAnalyze,
+  examAnswerSourceConfirmMatches,
+  examAnswerSourceKeepBound,
   examAnswerSheetAnalyzeTemplate,
   examAnswerSheetConfirmTemplate,
   examAnswerSheetProcessPage,
@@ -105,6 +109,10 @@ const INTAKE_REASON_LABEL: Record<string, string> = {
   ANSWER_CANDIDATE_INVALID: "答案资料需要修正",
   ANSWER_CANDIDATE_DRIFT: "答案版本发生变化",
   ANSWER_SAME_LEVEL_CONFLICT: "答案资料存在分歧",
+  ANSWER_SOURCE_STRUCTURE_PENDING: "答案资料等待自动整理",
+  ANSWER_SOURCE_STRUCTURE_FAILED: "答案资料整理失败",
+  ANSWER_SOURCE_CONFIRMATION_REQUIRED: "答案资料与当前答案一致，等待一次确认",
+  ANSWER_SOURCE_CONFLICT_OR_MISSING: "答案资料存在冲突或缺题",
   ANSWER_REGION_MISSING: "等待定位答题区域",
   ANSWER_REGION_AMBIGUOUS: "答题区域不唯一",
   OBJECTIVE_RESULT_REVIEW_REQUIRED: "识别结果需要老师复核",
@@ -131,6 +139,12 @@ const MATERIAL_TYPE_LABEL: Record<string, string> = {
 
 const STUDENT_FILE_EXTENSIONS = ["jpg", "jpeg", "pdf"];
 const ANSWER_FILE_EXTENSIONS = ["jpg", "jpeg", "pdf", "txt"];
+const ANSWER_SOURCE_REASON_CODES = new Set([
+  "ANSWER_SOURCE_STRUCTURE_PENDING",
+  "ANSWER_SOURCE_STRUCTURE_FAILED",
+  "ANSWER_SOURCE_CONFIRMATION_REQUIRED",
+  "ANSWER_SOURCE_CONFLICT_OR_MISSING",
+]);
 
 function hasExtension(path: string, extensions: string[]) {
   const clean = path.split(/[?#]/, 1)[0].toLowerCase();
@@ -139,6 +153,26 @@ function hasExtension(path: string, extensions: string[]) {
 
 function fileName(path: string) {
   return path.split(/[\\/]/).pop() || path;
+}
+
+function answerJsonLabel(raw: string | null) {
+  if (!raw) return "未识别到答案";
+  try {
+    const value = JSON.parse(raw) as Record<string, unknown>;
+    if (Array.isArray(value.correct_labels)) return value.correct_labels.join("、");
+    if (typeof value.correct === "boolean") return value.correct ? "正确" : "错误";
+    if (Array.isArray(value.slots)) {
+      return value.slots.map((slot) => {
+        const item = slot as Record<string, unknown>;
+        const answers = Array.isArray(item.canonical_answers) ? item.canonical_answers : [];
+        return answers.join("/");
+      }).filter(Boolean).join("；") || "填空答案待复核";
+    }
+    if (typeof value.reference_answer === "string") return value.reference_answer;
+    return raw;
+  } catch {
+    return raw;
+  }
 }
 
 function displayTime(value: string) {
@@ -295,6 +329,9 @@ function FixedIntakeTab({
   const [studentPaths, setStudentPaths] = useState<string[]>([]);
   const [answerPath, setAnswerPath] = useState<string | null>(null);
   const [answerText, setAnswerText] = useState("");
+  const [answerSourceAnalysis, setAnswerSourceAnalysis] = useState<AnswerSourceAnalysisResult | null>(null);
+  const [answerSourceBusy, setAnswerSourceBusy] = useState(false);
+  const [answerSourceError, setAnswerSourceError] = useState("");
   const [expectedPages, setExpectedPages] = useState("1");
   const [pageCycle, setPageCycle] = useState<PageCycleSuggestion | null>(null);
   const [busy, setBusy] = useState(false);
@@ -347,6 +384,9 @@ function FixedIntakeTab({
     setAbsentStudentNos([]);
     setGroupingEvidence([]);
     setRejectedPageIds([]);
+    setAnswerSourceAnalysis(null);
+    setAnswerSourceBusy(false);
+    setAnswerSourceError("");
     setOrdinaryPaperRuns({});
     setAnalyzingPageIds([]);
     setAnswerSheetTemplateStatus(null);
@@ -380,6 +420,9 @@ function FixedIntakeTab({
       setAbsentStudentNos([]);
       setGroupingEvidence([]);
       setRejectedPageIds([]);
+      setAnswerSourceAnalysis(null);
+      setAnswerSourceBusy(false);
+      setAnswerSourceError("");
       setOrdinaryPaperRuns({});
       setAnalyzingPageIds([]);
       setOrdinaryConfirmations({});
@@ -455,12 +498,87 @@ function FixedIntakeTab({
       );
       setAbsentStudentNos([]);
       setRequestKey("");
+      if (prepared.answerDocumentCount > 0) {
+        void analyzeAnswerSource(prepared.batchId);
+      }
     } catch (err) {
       onError(String(err));
     } finally {
       setBusy(false);
     }
   };
+
+  function replaceAnswerSourceReason(reasonCode: string | null) {
+    setResult((current) => {
+      if (!current) return current;
+      const reasonCodes = current.reasonCodes.filter((code) => !ANSWER_SOURCE_REASON_CODES.has(code));
+      if (reasonCode) reasonCodes.push(reasonCode);
+      return { ...current, reasonCodes };
+    });
+  }
+
+  async function analyzeAnswerSource(batchId: number, retry = false) {
+    setAnswerSourceBusy(true);
+    setAnswerSourceError("");
+    try {
+      const analysis = await examAnswerSourceAnalyze(
+        batchId,
+        retry
+          ? `answer-source:${batchId}:retry:${crypto.randomUUID()}`
+          : `answer-source:${batchId}:structure:v1`,
+      );
+      setAnswerSourceAnalysis(analysis);
+      if (analysis.run.status === "failed") {
+        replaceAnswerSourceReason("ANSWER_SOURCE_STRUCTURE_FAILED");
+      } else if (analysis.review?.route === "ready_to_confirm") {
+        replaceAnswerSourceReason("ANSWER_SOURCE_CONFIRMATION_REQUIRED");
+      } else if (analysis.review?.route === "blocked") {
+        replaceAnswerSourceReason("ANSWER_SOURCE_CONFLICT_OR_MISSING");
+      }
+    } catch (err) {
+      const message = String(err);
+      setAnswerSourceError(message);
+      onError(`答案资料暂未完成整理：${message}`);
+    } finally {
+      setAnswerSourceBusy(false);
+    }
+  }
+
+  async function confirmMatchingAnswerSource() {
+    const review = answerSourceAnalysis?.review;
+    if (!result || !review) return;
+    setAnswerSourceBusy(true);
+    try {
+      const confirmed = await examAnswerSourceConfirmMatches(
+        result.batchId,
+        review.sourceAiRunId,
+      );
+      setAnswerSourceAnalysis({ ...answerSourceAnalysis, review: confirmed });
+      replaceAnswerSourceReason(null);
+    } catch (err) {
+      onError(`确认答案资料失败：${String(err)}`);
+    } finally {
+      setAnswerSourceBusy(false);
+    }
+  }
+
+  async function keepCurrentBoundAnswers() {
+    const review = answerSourceAnalysis?.review;
+    if (!result || !review) return;
+    setAnswerSourceBusy(true);
+    try {
+      const confirmed = await examAnswerSourceKeepBound(
+        result.batchId,
+        review.sourceAiRunId,
+      );
+      setAnswerSourceAnalysis({ ...answerSourceAnalysis, review: confirmed });
+      replaceAnswerSourceReason(null);
+    } catch (err) {
+      onError(`沿用当前答案失败：${String(err)}`);
+    } finally {
+      setAnswerSourceBusy(false);
+    }
+  }
 
   const confirmGrouping = async () => {
     if (!result || !groupingStartNo) return;
@@ -1095,6 +1213,84 @@ function FixedIntakeTab({
               </span>
               <span>资料类型：{MATERIAL_TYPE_LABEL[result.materialType] || result.materialType} · 预计 {result.studentGroupCount} 名学生</span>
             </div>
+            {result.answerDocumentCount > 0 && (
+              <div className="intake-analysis-card">
+                <div className="intake-quality-head">
+                  <div>
+                    <b>答案资料核对</b>
+                    <span>系统只按题整理上传答案，并与这份作业已确认的答案比较；不会静默替换。</span>
+                  </div>
+                  <strong>
+                    {answerSourceBusy
+                      ? "正在整理"
+                      : answerSourceAnalysis?.review?.route === "confirmed"
+                        ? "已确认一致"
+                        : answerSourceAnalysis?.review?.route === "kept_bound"
+                          ? "已沿用当前答案"
+                          : "等待核对"}
+                  </strong>
+                </div>
+                {answerSourceBusy && (
+                  <div className="empty-state compact">正在按题号整理答案，并保留页码或图片区域来源…</div>
+                )}
+                {!answerSourceBusy && answerSourceError && (
+                  <div className="intake-analysis-issues">
+                    <span>{answerSourceError}</span>
+                  </div>
+                )}
+                {!answerSourceBusy && answerSourceAnalysis?.run.status === "failed" && (
+                  <div className="intake-analysis-issues">
+                    <span>{answerSourceAnalysis.run.failure?.safe_message || "答案资料暂时无法整理。"}</span>
+                  </div>
+                )}
+                {answerSourceAnalysis?.review && (
+                  <>
+                    <div className="intake-analysis-summary">
+                      <span className="ready">一致 {answerSourceAnalysis.review.matchedCount}</span>
+                      <span className="review">冲突 {answerSourceAnalysis.review.conflictCount}</span>
+                      <span className="blocked">缺题 {answerSourceAnalysis.review.missingCount}</span>
+                    </div>
+                    {answerSourceAnalysis.review.route === "blocked" && (
+                      <div className="intake-analysis-issues">
+                        {answerSourceAnalysis.review.items
+                          .filter((item) => item.matchState !== "matched")
+                          .slice(0, 5)
+                          .map((item) => (
+                            <span key={item.assessmentItemId}>
+                              第 {item.questionNo} 题 · 当前：{answerJsonLabel(item.boundAnswerJson)} · 上传：{answerJsonLabel(item.candidateAnswerJson)}
+                            </span>
+                          ))}
+                        {answerSourceAnalysis.review.conflictCount + answerSourceAnalysis.review.missingCount > 5 && (
+                          <span>另有 {answerSourceAnalysis.review.conflictCount + answerSourceAnalysis.review.missingCount - 5} 题需要处理。</span>
+                        )}
+                      </div>
+                    )}
+                    {answerSourceAnalysis.review.route === "blocked" && (
+                      <div className="muted">
+                        当前纵切不会用冲突答案改写既有作业；如暂不采纳上传资料，可一次沿用当前已确认答案继续。
+                      </div>
+                    )}
+                  </>
+                )}
+                <div className="intake-analysis-actions">
+                  {!answerSourceBusy && answerSourceAnalysis?.review?.route === "ready_to_confirm" && (
+                    <button onClick={() => void confirmMatchingAnswerSource()}>
+                      确认这些答案与当前作业一致
+                    </button>
+                  )}
+                  {!answerSourceBusy && answerSourceAnalysis?.review?.route === "blocked" && (
+                    <button onClick={() => void keepCurrentBoundAnswers()}>
+                      沿用当前作业答案继续
+                    </button>
+                  )}
+                  {!answerSourceBusy && (answerSourceError || answerSourceAnalysis?.run.failure?.retryable) && (
+                    <button className="secondary" onClick={() => void analyzeAnswerSource(result.batchId, true)}>
+                      重试整理答案
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
             {result.materialTypeNeedsConfirmation && (
               <div className="intake-material-confirm">
                 <b>只确认一次，这批是什么？</b>

@@ -236,6 +236,49 @@ export interface FixedIntakeResult {
   nextAction: string;
 }
 
+export interface AnswerSourceReviewItem {
+  assessmentItemId: number;
+  orderIndex: number;
+  questionNo: string;
+  questionType: string;
+  questionStem: string;
+  boundAnswerKeyVersionId: number;
+  boundAnswerJson: string;
+  candidateId: number | null;
+  candidateAnswerJson: string | null;
+  sourceAnchorJson: string | null;
+  matchState: "matched" | "conflict" | "missing";
+}
+
+export interface AnswerSourceReviewSummary {
+  ingestBatchId: number;
+  sourceAiRunId: number;
+  sourceState: "ready" | "needs_review" | "blocked";
+  route: "ready_to_confirm" | "blocked" | "confirmed" | "kept_bound";
+  matchedCount: number;
+  conflictCount: number;
+  missingCount: number;
+  resolution: "confirmed_matches" | "kept_bound" | null;
+  items: AnswerSourceReviewItem[];
+}
+
+export interface AnswerSourceAnalysisResult {
+  run: {
+    ai_run_id: number;
+    status: "succeeded" | "failed";
+    output: {
+      state: "ready" | "needs_review" | "blocked";
+      confidence: number;
+      issue_codes: string[];
+    } | null;
+    failure: {
+      safe_message: string;
+      retryable: boolean;
+    } | null;
+  };
+  review: AnswerSourceReviewSummary | null;
+}
+
 export interface PageCycleSuggestion {
   expectedPagesPerAttempt: number;
   confidence: number;
@@ -597,6 +640,24 @@ export const examFixedIntakeInferPageCycle = (student_paths: string[]) =>
 
 export const examFixedIntakePrepare = (request: FixedIntakeRequest) =>
   call<FixedIntakeResult>("exam_fixed_intake_prepare", { request });
+
+export const examAnswerSourceAnalyze = (batch_id: number, idempotency_key: string) =>
+  call<AnswerSourceAnalysisResult>("exam_answer_source_analyze", {
+    batchId: batch_id,
+    idempotencyKey: idempotency_key,
+  });
+
+export const examAnswerSourceConfirmMatches = (batch_id: number, source_ai_run_id: number) =>
+  call<AnswerSourceReviewSummary>("exam_answer_source_confirm_matches", {
+    batchId: batch_id,
+    sourceAiRunId: source_ai_run_id,
+  });
+
+export const examAnswerSourceKeepBound = (batch_id: number, source_ai_run_id: number) =>
+  call<AnswerSourceReviewSummary>("exam_answer_source_keep_bound", {
+    batchId: batch_id,
+    sourceAiRunId: source_ai_run_id,
+  });
 
 export const examFixedIntakeConfirmMaterialType = (
   batch_id: number,

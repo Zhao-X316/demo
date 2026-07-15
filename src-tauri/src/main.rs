@@ -4,6 +4,8 @@
 mod answer_sheet_materialization;
 mod answer_sheet_template_provider;
 mod answer_sheet_template_run;
+mod answer_source_provider;
+mod answer_source_run;
 mod archive;
 mod asr;
 mod audio;
@@ -111,6 +113,9 @@ fn main() {
             exam_commands::exam_fixed_intake_grouping_evidence,
             exam_commands::exam_fixed_intake_confirm_grouping_quality,
             exam_commands::exam_fixed_intake_replace_rejected_page,
+            exam_commands::exam_answer_source_analyze,
+            exam_commands::exam_answer_source_confirm_matches,
+            exam_commands::exam_answer_source_keep_bound,
             exam_commands::exam_objective_recognize_region,
             exam_commands::exam_ordinary_paper_analyze_page,
             exam_commands::exam_ordinary_paper_confirm_page_structure,

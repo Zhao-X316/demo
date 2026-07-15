@@ -14,6 +14,8 @@ use suite_core::domain::{hashing, ids, time};
 use suite_core::error::{CoreError, CoreResult};
 use suite_core::models::{ArchiveStatus, ArtifactKind, AuditActorType, PrivacyClass};
 
+use super::answer_source::{self, AnswerSourcePreflightGate};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FixedInputDocument {
     pub id: i64,
@@ -973,6 +975,11 @@ fn preflight_fixed_paper_batch_impl(
         build_groups(&pages, input.expected_pages_per_attempt, &mut reasons);
     let (authorities, authority_summary) =
         select_authorities(conn, input.ingest_batch_id, &items, &mut reasons)?;
+    let (answer_source_gate, answer_source_reason) =
+        answer_source::latest_preflight_gate(conn, input.ingest_batch_id)?;
+    if let Some(reason) = answer_source_reason {
+        reasons.insert(reason.into());
+    }
     let missing_authority = authorities.len() != items.len();
     let global_review = reasons.contains("PAGE_QUALITY_REVIEW_REQUIRED");
 
@@ -983,11 +990,16 @@ fn preflight_fixed_paper_batch_impl(
     let mut completed_count = 0_i64;
     for attempt_id in &attempts {
         for item in &items {
-            if global_group_blocked
+            if answer_source_gate == AnswerSourcePreflightGate::Blocked
+                || global_group_blocked
                 || blocked_attempts.contains(attempt_id)
                 || !authorities.contains_key(&item.item_id)
             {
                 blocked_count += 1;
+                continue;
+            }
+            if answer_source_gate == AnswerSourcePreflightGate::ReviewRequired {
+                review_count += 1;
                 continue;
             }
             let region_count =
@@ -1043,9 +1055,16 @@ fn preflight_fixed_paper_batch_impl(
         target_count,
         ready_count + review_count + blocked_count + completed_count
     );
-    let route = if global_group_blocked || missing_authority || blocked_count > 0 {
+    let route = if answer_source_gate == AnswerSourcePreflightGate::Blocked
+        || global_group_blocked
+        || missing_authority
+        || blocked_count > 0
+    {
         "blocked"
-    } else if global_review || review_count > 0 {
+    } else if answer_source_gate == AnswerSourcePreflightGate::ReviewRequired
+        || global_review
+        || review_count > 0
+    {
         "review_required"
     } else {
         "ready_for_batch_confirm"

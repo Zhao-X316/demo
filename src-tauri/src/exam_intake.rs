@@ -23,9 +23,7 @@ use module_exam::service::ordered_intake::{
     self, ConfirmOrderedGroupingInput, ImportOrderEntry, NewImportOrderRevision,
     NewMaterialTypeRevision, NewPageTypeRevision, OrderedGroupingInput,
 };
-use module_exam::service::ordered_retake::{
-    self, ReplaceRejectedPageInput, RetakeArtifactInput,
-};
+use module_exam::service::ordered_retake::{self, ReplaceRejectedPageInput, RetakeArtifactInput};
 use module_exam::service::page_cycle;
 use module_exam::service::papers::{self, NewIngestBatch, NewIngestPage};
 
@@ -1452,8 +1450,7 @@ pub(crate) fn replace_intake_rejected_page(
         mapped_group_count: result.activation.mapped_group_count,
         rejected_group_count: result.activation.rejected_group_count,
         next_action: if result.activation.rejected_group_count == 0 {
-            "重拍页已替换，全部学生页面归属现已完成；下一步按资料类型识别题区或答案位置"
-                .into()
+            "重拍页已替换，全部学生页面归属现已完成；下一步按资料类型识别题区或答案位置".into()
         } else if result.activated_student {
             format!(
                 "重拍页已替换并恢复该学生；仍有 {} 名学生需要补拍",
@@ -1603,11 +1600,15 @@ mod tests {
         assert_eq!(result.student_document_count, 1);
         assert_eq!(result.student_page_count, 1);
         assert_eq!(result.answer_document_count, 1);
-        assert_eq!(result.route, "review_required");
+        assert_eq!(result.route, "blocked");
         assert!(result
             .reason_codes
             .iter()
             .any(|code| code == "PAGE_QUALITY_REVIEW_REQUIRED"));
+        assert!(result
+            .reason_codes
+            .iter()
+            .any(|code| code == "ANSWER_SOURCE_STRUCTURE_PENDING"));
         let privacy: Vec<String> = conn
             .prepare("SELECT privacy_class FROM artifacts ORDER BY id")
             .unwrap()
@@ -1995,14 +1996,23 @@ mod tests {
             (1, 1)
         );
         let refreshed = intake_grouping_evidence(&conn, prepared.batch_id).unwrap();
-        assert_eq!(refreshed[0].pages[0].replaced_page_id, Some(rejected_page_id));
+        assert_eq!(
+            refreshed[0].pages[0].replaced_page_id,
+            Some(rejected_page_id)
+        );
         assert_eq!(
             refreshed[0].pages[0].page_id,
             first_replaced.replacement_page_id
         );
-        assert_eq!(refreshed[0].pages[0].quality_result.as_deref(), Some("pass"));
+        assert_eq!(
+            refreshed[0].pages[0].quality_result.as_deref(),
+            Some("pass")
+        );
         assert_eq!(refreshed[0].pages[0].match_decision, None);
-        assert_eq!(refreshed[0].pages[1].quality_result.as_deref(), Some("reject"));
+        assert_eq!(
+            refreshed[0].pages[1].quality_result.as_deref(),
+            Some("reject")
+        );
 
         let second_retake = root.join("IMG_retake_2.jpg");
         write_jpeg(&second_retake, b"paper-second-quality-retake");

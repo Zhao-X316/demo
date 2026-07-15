@@ -5,6 +5,7 @@
 
 pub mod answer_sheet_recognition;
 pub mod answer_sheet_template_recognition;
+pub mod answer_source_recognition;
 pub mod db;
 pub mod dictation;
 pub mod dictation_recognition;
@@ -84,6 +85,10 @@ static MIGRATIONS: &[Migration] = &[
     Migration {
         id: "exam_0017",
         sql: include_str!("../migrations/0017_dictation_pipeline.sql"),
+    },
+    Migration {
+        id: "exam_0018",
+        sql: include_str!("../migrations/0018_answer_source_structuring.sql"),
     },
 ];
 
