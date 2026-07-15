@@ -5,6 +5,7 @@
 
 pub mod db;
 pub mod objective_recognition;
+pub mod ordinary_paper_recognition;
 pub mod service;
 pub mod vlm;
 
