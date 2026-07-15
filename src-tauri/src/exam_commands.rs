@@ -1,7 +1,7 @@
 //! 改作业模块 Tauri 命令：知识点树 / 题库 / 豆包视觉预分析。
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Manager, State};
 
 use module_exam::db::knowledge_points::{self as kp, KnowledgePoint, KpInput};
 use module_exam::db::questions::{self, NewOption, NewQuestion, Question, QuestionOption};
@@ -18,13 +18,14 @@ use module_exam::vlm::{self as exam_vlm, AnalyzedQuestion};
 
 use crate::exam_intake::{
     self, FixedIntakeOption, FixedIntakeRequest, FixedIntakeResult, GroupingConfirmationResult,
-    MaterialTypeConfirmationResult, PageCycleSuggestion,
+    GroupingQualityConfirmationResult, MaterialTypeConfirmationResult, PageCycleSuggestion,
 };
 use crate::objective_provider::ArkObjectiveRecognizer;
 use crate::objective_run::{self, BeginObjectiveRun};
 use crate::secrets;
 use crate::state::AppState;
 use crate::vlm;
+use module_exam::service::ordered_activation::GroupedPageEvidence;
 
 type R<T> = Result<T, String>;
 const LOCAL_TEACHER_ACTOR: &str = "teacher";
@@ -336,6 +337,41 @@ pub fn exam_fixed_intake_confirm_grouping(
     let conn = lock(&state)?;
     exam_intake::confirm_intake_grouping(&conn, batch_id, &first_student_no, &absent_student_nos)
         .map_err(e)
+}
+
+/// 返回当前老师已确认页组的原图路径，并只把这些数据库登记过的精确路径加入 asset 白名单。
+#[tauri::command]
+pub fn exam_fixed_intake_grouping_evidence(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    batch_id: i64,
+) -> R<Vec<GroupedPageEvidence>> {
+    let evidence = {
+        let conn = lock(&state)?;
+        exam_intake::intake_grouping_evidence(&conn, batch_id).map_err(e)?
+    };
+    let scope = app.asset_protocol_scope();
+    for group in &evidence {
+        for page in &group.pages {
+            let path = std::path::Path::new(&page.archived_path);
+            if !path.is_file() {
+                return Err(format!("页面原图不存在：page#{}", page.page_id));
+            }
+            scope.allow_file(path).map_err(e)?;
+        }
+    }
+    Ok(evidence)
+}
+
+/// 老师看过联系表后一次确认质量；模糊页所在学生组被扣住，其他组原子建立正式归属。
+#[tauri::command]
+pub fn exam_fixed_intake_confirm_grouping_quality(
+    state: State<'_, AppState>,
+    batch_id: i64,
+    rejected_page_ids: Vec<i64>,
+) -> R<GroupingQualityConfirmationResult> {
+    let conn = lock(&state)?;
+    exam_intake::confirm_intake_grouping_quality(&conn, batch_id, &rejected_page_ids).map_err(e)
 }
 
 /// 对一条已完成老师确认、且已有明确答题格坐标的客观题区域执行真实视觉识别。

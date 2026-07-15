@@ -16,6 +16,9 @@ use suite_core::models::{ArchiveStatus, Artifact, ArtifactKind, PrivacyClass};
 use module_exam::service::fixed_paper::{
     self, FixedPaperPreflightInput, FixedPaperPreflightRevision, NewFixedInputDocument,
 };
+use module_exam::service::ordered_activation::{
+    self, ConfirmGroupingQualityInput, GroupedPageEvidence,
+};
 use module_exam::service::ordered_intake::{
     self, ConfirmOrderedGroupingInput, ImportOrderEntry, NewImportOrderRevision,
     NewMaterialTypeRevision, NewPageTypeRevision, OrderedGroupingInput,
@@ -107,6 +110,9 @@ pub struct FixedIntakeResult {
     pub grouping_confirmed: bool,
     pub grouping_first_student_no: Option<String>,
     pub grouping_last_student_no: Option<String>,
+    pub quality_review_completed: bool,
+    pub mapped_group_count: i64,
+    pub rejected_group_count: i64,
     pub next_action: String,
 }
 
@@ -141,6 +147,15 @@ pub struct GroupingConfirmationResult {
     pub grouping_confirmed: bool,
     pub grouping_first_student_no: String,
     pub grouping_last_student_no: String,
+    pub next_action: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupingQualityConfirmationResult {
+    pub quality_review_completed: bool,
+    pub mapped_group_count: i64,
+    pub rejected_group_count: i64,
     pub next_action: String,
 }
 
@@ -1139,6 +1154,7 @@ pub(crate) fn persist_fixed_intake(
     let grouping_decision = ordered_intake::current_grouping_decision(conn, batch.id)?;
     let (grouping_confirmed, grouping_first_student_no, grouping_last_student_no) =
         grouping_scope_summary(grouping_decision.as_ref())?;
+    let grouping_activation = ordered_activation::current_activation(conn, batch.id)?;
 
     let preflight = fixed_paper::preflight_fixed_paper_batch(
         conn,
@@ -1158,6 +1174,8 @@ pub(crate) fn persist_fixed_intake(
         "先处理缺页、重复页或页型周期异常，后续学生不能自动顺移"
     } else if !grouping_confirmed {
         "确认本批从哪位学生开始；如有人缺交，只勾选缺交学生"
+    } else if grouping_activation.is_none() {
+        "查看按学生归组的照片；清楚的页面一次确认，模糊页只标记需重拍"
     } else {
         next_action(&preflight.route)
     };
@@ -1194,6 +1212,15 @@ pub(crate) fn persist_fixed_intake(
         grouping_confirmed,
         grouping_first_student_no,
         grouping_last_student_no,
+        quality_review_completed: grouping_activation.is_some(),
+        mapped_group_count: grouping_activation
+            .as_ref()
+            .map(|value| value.mapped_group_count)
+            .unwrap_or_default(),
+        rejected_group_count: grouping_activation
+            .as_ref()
+            .map(|value| value.rejected_group_count)
+            .unwrap_or_default(),
         next_action: next_action.into(),
     })
 }
@@ -1304,7 +1331,46 @@ pub(crate) fn confirm_intake_grouping(
         grouping_confirmed: true,
         grouping_first_student_no: first.into(),
         grouping_last_student_no: last.into(),
-        next_action: "照片与学生顺序已确认；下一步先做页面质量检查，再生成页面匹配建议".into(),
+        next_action: "照片与学生顺序已确认；请查看缩略图，清楚的页面一次确认，模糊页点选需重拍"
+            .into(),
+    })
+}
+
+pub(crate) fn intake_grouping_evidence(
+    conn: &Connection,
+    batch_id: i64,
+) -> CoreResult<Vec<GroupedPageEvidence>> {
+    ordered_activation::grouping_evidence(conn, batch_id)
+}
+
+pub(crate) fn confirm_intake_grouping_quality(
+    conn: &Connection,
+    batch_id: i64,
+    rejected_page_ids: &[i64],
+) -> CoreResult<GroupingQualityConfirmationResult> {
+    let activation = ordered_activation::confirm_grouping_quality(
+        conn,
+        &ConfirmGroupingQualityInput {
+            ingest_batch_id: batch_id,
+            rejected_page_ids,
+            confirmed_by: ACTOR,
+        },
+    )?;
+    Ok(GroupingQualityConfirmationResult {
+        quality_review_completed: true,
+        mapped_group_count: activation.mapped_group_count,
+        rejected_group_count: activation.rejected_group_count,
+        next_action: if activation.rejected_group_count > 0 {
+            format!(
+                "已建立 {} 名学生的正式页面归属；{} 名学生需重拍，只扣住对应页组",
+                activation.mapped_group_count, activation.rejected_group_count
+            )
+        } else {
+            format!(
+                "{} 名学生的页面质量和归属已确认；下一步按资料类型识别题区或答案位置",
+                activation.mapped_group_count
+            )
+        },
     })
 }
 
@@ -1706,6 +1772,140 @@ mod tests {
             )
             .unwrap();
         assert_eq!(material_revisions, 1);
+    }
+
+    #[test]
+    fn quality_confirmation_maps_clear_groups_and_only_blocks_the_retake_group() {
+        let root = test_root("quality-map");
+        let fourth = root.join("IMG_4.jpg");
+        let second = root.join("IMG_2.jpg");
+        let third = root.join("IMG_3.jpg");
+        let first = root.join("IMG_1.jpg");
+        write_jpeg(&fourth, b"paper-fourth-quality");
+        write_jpeg(&second, b"paper-second-quality");
+        write_jpeg(&third, b"paper-third-quality");
+        write_jpeg(&first, b"paper-first-quality");
+        let conn = seed();
+        let request = FixedIntakeRequest {
+            assessment_version_id: 1,
+            student_paths: vec![
+                fourth.to_string_lossy().into_owned(),
+                second.to_string_lossy().into_owned(),
+                third.to_string_lossy().into_owned(),
+                first.to_string_lossy().into_owned(),
+            ],
+            answer_path: None,
+            answer_text: None,
+            expected_pages_per_attempt: 2,
+            material_type: Some("ordinary_paper".into()),
+            idempotency_key: "quality-map-intake".into(),
+        };
+        let prepared = prepare_fixed_intake(&conn, &root, &request).unwrap();
+        confirm_intake_grouping(&conn, prepared.batch_id, "1", &["2".to_string()]).unwrap();
+        let evidence = intake_grouping_evidence(&conn, prepared.batch_id).unwrap();
+        assert_eq!(evidence.len(), 2);
+        assert_eq!(
+            evidence
+                .iter()
+                .map(|group| group.student_no.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1", "10"]
+        );
+
+        let rejected_page_id = evidence[0].pages[0].page_id;
+        assert_eq!(evidence[0].pages.len(), 2);
+        assert_eq!(evidence[1].pages.len(), 2);
+        let result =
+            confirm_intake_grouping_quality(&conn, prepared.batch_id, &[rejected_page_id]).unwrap();
+        assert_eq!(
+            (result.mapped_group_count, result.rejected_group_count),
+            (1, 1)
+        );
+        let counts: (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM exam_page_quality_revisions_v2),
+                   (SELECT COUNT(*) FROM exam_attempts_v2),
+                   (SELECT COUNT(*) FROM exam_page_match_revisions_v2),
+                   (SELECT COUNT(*) FROM exam_grade_decisions_v2)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (4, 1, 2, 0));
+        let mapped_student_no: String = conn
+            .query_row(
+                "SELECT s.student_no FROM exam_page_match_revisions_v2 m
+                 JOIN exam_attempts_v2 a ON a.id=m.attempt_id
+                 JOIN students s ON s.id=a.student_id
+                 WHERE m.state='active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mapped_student_no, "10");
+        let rejected_group_match_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM exam_page_match_revisions_v2 m
+                 JOIN exam_ingest_pages_v2 p ON p.id=m.page_id
+                 WHERE p.id IN (?1,?2)",
+                [evidence[0].pages[0].page_id, evidence[0].pages[1].page_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            rejected_group_match_count, 0,
+            "同一学生任一页需重拍时，该学生整组都不能建立正式归属"
+        );
+        let rejected_state: String = conn
+            .query_row(
+                "SELECT state FROM exam_ingest_pages_v2 WHERE id=?1",
+                [rejected_page_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rejected_state, "needs_review");
+
+        let retried =
+            confirm_intake_grouping_quality(&conn, prepared.batch_id, &[rejected_page_id]).unwrap();
+        assert_eq!(retried.mapped_group_count, 1);
+        let attempt_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM exam_attempts_v2", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(attempt_count, 1, "相同质量确认重试不得新增 attempt");
+    }
+
+    #[test]
+    fn invalid_retake_page_rolls_back_without_quality_or_identity_facts() {
+        let root = test_root("quality-invalid");
+        let student = root.join("IMG_1.jpg");
+        write_jpeg(&student, b"paper-quality-invalid");
+        let conn = seed();
+        let request = FixedIntakeRequest {
+            assessment_version_id: 1,
+            student_paths: vec![student.to_string_lossy().into_owned()],
+            answer_path: None,
+            answer_text: None,
+            expected_pages_per_attempt: 1,
+            material_type: Some("ordinary_paper".into()),
+            idempotency_key: "quality-invalid-intake".into(),
+        };
+        let prepared = prepare_fixed_intake(&conn, &root, &request).unwrap();
+        confirm_intake_grouping(&conn, prepared.batch_id, "1", &[]).unwrap();
+        assert!(confirm_intake_grouping_quality(&conn, prepared.batch_id, &[999]).is_err());
+        let counts: (i64, i64, i64) = conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM exam_page_quality_revisions_v2),
+                   (SELECT COUNT(*) FROM exam_attempts_v2),
+                   (SELECT COUNT(*) FROM exam_page_match_revisions_v2)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (0, 0, 0));
     }
 
     #[cfg(target_os = "macos")]

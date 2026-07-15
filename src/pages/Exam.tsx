@@ -5,6 +5,7 @@ import {
   AnswerDetail,
   FixedIntakeOption,
   FixedIntakeResult,
+  GroupedPageEvidence,
   PageCycleSuggestion,
   KnowledgePoint,
   ObjectiveWorkbench,
@@ -15,6 +16,8 @@ import {
   examAnswerSuggest,
   examAnswersList,
   examFixedIntakeConfirmGrouping,
+  examFixedIntakeConfirmGroupingQuality,
+  examFixedIntakeGroupingEvidence,
   examFixedIntakeInferPageCycle,
   examFixedIntakeOptions,
   examFixedIntakeConfirmMaterialType,
@@ -260,6 +263,10 @@ function FixedIntakeTab({
   const [busy, setBusy] = useState(false);
   const [confirmingType, setConfirmingType] = useState(false);
   const [confirmingGrouping, setConfirmingGrouping] = useState(false);
+  const [groupingEvidence, setGroupingEvidence] = useState<GroupedPageEvidence[]>([]);
+  const [rejectedPageIds, setRejectedPageIds] = useState<number[]>([]);
+  const [loadingEvidence, setLoadingEvidence] = useState(false);
+  const [confirmingQuality, setConfirmingQuality] = useState(false);
   const [groupingStartNo, setGroupingStartNo] = useState("");
   const [absentStudentNos, setAbsentStudentNos] = useState<string[]>([]);
   const [result, setResult] = useState<FixedIntakeResult | null>(null);
@@ -282,6 +289,8 @@ function FixedIntakeTab({
     setResult(null);
     setGroupingStartNo("");
     setAbsentStudentNos([]);
+    setGroupingEvidence([]);
+    setRejectedPageIds([]);
   };
 
   const pickStudentPapers = async () => {
@@ -299,6 +308,8 @@ function FixedIntakeTab({
       setResult(null);
       setGroupingStartNo("");
       setAbsentStudentNos([]);
+      setGroupingEvidence([]);
+      setRejectedPageIds([]);
       const inferred = await examFixedIntakeInferPageCycle(paths);
       setPageCycle(inferred);
       setExpectedPages(String(inferred.expectedPagesPerAttempt));
@@ -375,10 +386,56 @@ function FixedIntakeTab({
         absentStudentNos,
       );
       setResult({ ...result, ...confirmed });
+      setGroupingEvidence([]);
+      setRejectedPageIds([]);
     } catch (err) {
       onError(String(err));
     } finally {
       setConfirmingGrouping(false);
+    }
+  };
+
+  const groupingEvidenceBatchId = result?.groupingConfirmed ? result.batchId : null;
+
+  useEffect(() => {
+    if (!groupingEvidenceBatchId) return;
+    let cancelled = false;
+    setLoadingEvidence(true);
+    examFixedIntakeGroupingEvidence(groupingEvidenceBatchId)
+      .then((evidence) => {
+        if (!cancelled) setGroupingEvidence(evidence);
+      })
+      .catch((err) => {
+        if (!cancelled) onError(`读取归组照片失败：${String(err)}`);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingEvidence(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [groupingEvidenceBatchId]);
+
+  const toggleRejectedPage = (pageId: number) => {
+    if (result?.qualityReviewCompleted) return;
+    setRejectedPageIds((current) => current.includes(pageId)
+      ? current.filter((value) => value !== pageId)
+      : [...current, pageId]);
+  };
+
+  const confirmGroupingQuality = async () => {
+    if (!result) return;
+    setConfirmingQuality(true);
+    try {
+      const confirmed = await examFixedIntakeConfirmGroupingQuality(
+        result.batchId,
+        rejectedPageIds,
+      );
+      setResult({ ...result, ...confirmed });
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setConfirmingQuality(false);
     }
   };
 
@@ -619,6 +676,63 @@ function FixedIntakeTab({
                 <span>{result.groupingFirstStudentNo}号至 {result.groupingLastStudentNo}号，共 {result.studentGroupCount} 名；后续页面质量异常只影响对应页组。</span>
               </div>
             )}
+            {result.groupingConfirmed && !result.qualityReviewCompleted && (
+              <div className="intake-quality-review">
+                <div className="intake-quality-head">
+                  <div>
+                    <b>看一眼照片是否清楚</b>
+                    <span>默认全部合格；模糊、反光或缺边的页面点一下标记“需重拍”。</span>
+                  </div>
+                  <strong>{rejectedPageIds.length ? `${rejectedPageIds.length} 页需重拍` : "全部清楚"}</strong>
+                </div>
+                {loadingEvidence ? (
+                  <div className="empty-state compact">正在生成按学生排列的照片联系表…</div>
+                ) : (
+                  <div className="intake-contact-sheet">
+                    {groupingEvidence.map((group) => (
+                      <div className="intake-contact-group" key={group.groupIndex}>
+                        <div className="intake-contact-student">
+                          <b>{group.studentNo}号</b>
+                          <span>{group.studentName}</span>
+                        </div>
+                        <div className="intake-contact-pages">
+                          {group.pages.map((page) => {
+                            const rejected = rejectedPageIds.includes(page.pageId);
+                            return (
+                              <button
+                                type="button"
+                                key={page.pageId}
+                                className={`intake-page-thumb ${rejected ? "rejected" : ""}`}
+                                onClick={() => toggleRejectedPage(page.pageId)}
+                              >
+                                <img src={convertFileSrc(page.archivedPath)} alt={`${group.studentName} 第 ${page.pageNo} 页`} />
+                                <span>第 {page.pageNo} 页 · {rejected ? "需重拍" : "清楚"}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <button
+                  disabled={confirmingQuality || loadingEvidence || !groupingEvidence.length}
+                  onClick={confirmGroupingQuality}
+                >
+                  {confirmingQuality
+                    ? "正在原子建立页面归属…"
+                    : rejectedPageIds.length
+                      ? `确认清楚页面，扣住 ${rejectedPageIds.length} 页重拍`
+                      : "照片都清楚，确认并建立归属"}
+                </button>
+              </div>
+            )}
+            {result.qualityReviewCompleted && (
+              <div className="intake-quality-complete">
+                <b>页面质量与正式归属已确认</b>
+                <span>已进入后续识别：{result.mappedGroupCount} 名；需重拍：{result.rejectedGroupCount} 名。未生成分数或发布。</span>
+              </div>
+            )}
             <div className="intake-route-grid">
               <div className={result.route === "ready_for_batch_confirm" ? "active ready" : ""}>
                 <span>可批量确认</span>
@@ -651,7 +765,7 @@ function FixedIntakeTab({
             <div className="intake-next">
               <span>下一步</span>
               <b>{result.nextAction}</b>
-              <button disabled={result.route === "blocked" || result.groupingRoute === "blocked" || result.materialTypeNeedsConfirmation || !result.groupingConfirmed} onClick={onOpenReview}>进入批改终审</button>
+              <button disabled={result.route === "blocked" || result.groupingRoute === "blocked" || result.materialTypeNeedsConfirmation || !result.groupingConfirmed || !result.qualityReviewCompleted} onClick={onOpenReview}>进入批改终审</button>
             </div>
           </>
         )}

@@ -230,6 +230,9 @@ export interface FixedIntakeResult {
   groupingConfirmed: boolean;
   groupingFirstStudentNo: string | null;
   groupingLastStudentNo: string | null;
+  qualityReviewCompleted: boolean;
+  mappedGroupCount: number;
+  rejectedGroupCount: number;
   nextAction: string;
 }
 
@@ -258,6 +261,30 @@ export interface GroupingConfirmationResult {
   groupingConfirmed: true;
   groupingFirstStudentNo: string;
   groupingLastStudentNo: string;
+  nextAction: string;
+}
+
+export interface GroupedPageEvidence {
+  groupIndex: number;
+  studentId: number;
+  studentNo: string;
+  studentName: string;
+  pages: Array<{
+    pageId: number;
+    pageNo: number;
+    importIndex: number;
+    archivedPath: string;
+    originalName: string | null;
+    pageState: string;
+    qualityResult: "pass" | "needs_review" | "reject" | null;
+    matchDecision: "suggested" | "teacher_confirmed" | "rejected" | "unmatched" | null;
+  }>;
+}
+
+export interface GroupingQualityConfirmationResult {
+  qualityReviewCompleted: true;
+  mappedGroupCount: number;
+  rejectedGroupCount: number;
   nextAction: string;
 }
 
@@ -345,4 +372,15 @@ export const examFixedIntakeConfirmGrouping = (
   batchId: batch_id,
   firstStudentNo: first_student_no,
   absentStudentNos: absent_student_nos,
+});
+
+export const examFixedIntakeGroupingEvidence = (batch_id: number) =>
+  call<GroupedPageEvidence[]>("exam_fixed_intake_grouping_evidence", { batchId: batch_id });
+
+export const examFixedIntakeConfirmGroupingQuality = (
+  batch_id: number,
+  rejected_page_ids: number[],
+) => call<GroupingQualityConfirmationResult>("exam_fixed_intake_confirm_grouping_quality", {
+  batchId: batch_id,
+  rejectedPageIds: rejected_page_ids,
 });
