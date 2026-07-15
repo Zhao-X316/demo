@@ -234,13 +234,13 @@ pub(crate) struct PreparedFixedIntake {
     page_cycle: PageCycleSuggestion,
 }
 
-struct ArchivedFile {
-    path: PathBuf,
+pub(crate) struct ArchivedFile {
+    pub(crate) path: PathBuf,
     created: bool,
 }
 
 impl ArchivedFile {
-    fn rollback_new_file(&self) {
+    pub(crate) fn rollback_new_file(&self) {
         if self.created {
             let _ = std::fs::remove_file(&self.path);
         }
@@ -564,7 +564,7 @@ pub(crate) fn infer_page_cycle_paths(paths: &[String]) -> CoreResult<PageCycleSu
     Ok(infer_prepared_page_cycle(&sources))
 }
 
-fn archive_bytes(
+pub(crate) fn archive_bytes(
     bytes: &[u8],
     hash: &str,
     extension: &str,
@@ -622,7 +622,7 @@ fn archive_source(source: &PreparedSource, dir: &Path) -> CoreResult<(ArchivedFi
 }
 
 #[allow(clippy::too_many_arguments)]
-fn register_artifact(
+pub(crate) fn register_artifact(
     conn: &Connection,
     archived: &ArchivedFile,
     hash: &str,

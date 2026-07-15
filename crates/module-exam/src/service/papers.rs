@@ -1006,6 +1006,16 @@ pub fn record_page_alignment(
     conn: &Connection,
     input: &NewPageAlignmentRevision<'_>,
 ) -> CoreResult<PageAlignmentRevision> {
+    let tx = conn.unchecked_transaction()?;
+    let result = record_page_alignment_in(&tx, input)?;
+    tx.commit()?;
+    Ok(result)
+}
+
+pub(crate) fn record_page_alignment_in(
+    conn: &Connection,
+    input: &NewPageAlignmentRevision<'_>,
+) -> CoreResult<PageAlignmentRevision> {
     required(input.template_version, "模板版本")?;
     validate_transform(input.transform_json)?;
     if !valid_unit(input.confidence) {
@@ -1075,27 +1085,26 @@ pub fn record_page_alignment(
         }
     }
 
-    let tx = conn.unchecked_transaction()?;
-    let revision: i64 = tx.query_row(
+    let revision: i64 = conn.query_row(
         "SELECT COALESCE(MAX(revision),0)+1 FROM exam_page_alignment_revisions_v2
          WHERE page_id=?1",
         [input.page_id],
         |row| row.get(0),
     )?;
     // 新配准会改变坐标系，旧题区必须同时失效。
-    tx.execute(
+    conn.execute(
         "UPDATE exam_answer_region_revisions_v2 SET state='superseded'
          WHERE page_id=?1 AND state='active'",
         [input.page_id],
     )?;
-    tx.execute(
+    conn.execute(
         "UPDATE exam_page_alignment_revisions_v2 SET state='superseded'
          WHERE page_id=?1 AND state='active'",
         [input.page_id],
     )?;
     let public_id = ids::new_public_id();
     let now = time::utc_now_rfc3339();
-    tx.execute(
+    conn.execute(
         "INSERT INTO exam_page_alignment_revisions_v2
          (public_id, page_id, revision, match_revision_id, template_version,
           transform_json, confidence, aligned_artifact_id, decision, reason_code,
@@ -1116,9 +1125,9 @@ pub fn record_page_alignment(
             &now,
         ),
     )?;
-    let id = tx.last_insert_rowid();
+    let id = conn.last_insert_rowid();
     resolve_open_issue(
-        &tx,
+        conn,
         "page",
         &page.public_id,
         "PAGE_ALIGNMENT_REVIEW",
@@ -1137,7 +1146,7 @@ pub fn record_page_alignment(
             })
             .to_string();
             open_issue(
-                &tx,
+                conn,
                 "page",
                 &page.public_id,
                 "PAGE_ALIGNMENT_REVIEW",
@@ -1148,13 +1157,13 @@ pub fn record_page_alignment(
             "needs_review"
         }
     };
-    tx.execute(
+    conn.execute(
         "UPDATE exam_ingest_pages_v2 SET state=?1, updated_at=?2 WHERE id=?3",
         (page_state, &now, input.page_id),
     )?;
-    refresh_batch_state(&tx, page.batch_id, &now)?;
+    refresh_batch_state(conn, page.batch_id, &now)?;
     append_audit(
-        &tx,
+        conn,
         &AuditInput {
             key: &format!("exam:page-alignment:{public_id}:active"),
             actor_type: if input.decision == "teacher_confirmed" {
@@ -1170,7 +1179,6 @@ pub fn record_page_alignment(
             now: &now,
         },
     )?;
-    tx.commit()?;
     get_alignment(conn, id)?.ok_or_else(|| CoreError::NotFound("刚创建的页面配准".into()))
 }
 
@@ -1207,6 +1215,16 @@ fn get_region(conn: &Connection, id: i64) -> CoreResult<Option<AnswerRegionRevis
 }
 
 pub fn record_answer_region(
+    conn: &Connection,
+    input: &NewAnswerRegionRevision<'_>,
+) -> CoreResult<AnswerRegionRevision> {
+    let tx = conn.unchecked_transaction()?;
+    let result = record_answer_region_in(&tx, input)?;
+    tx.commit()?;
+    Ok(result)
+}
+
+pub(crate) fn record_answer_region_in(
     conn: &Connection,
     input: &NewAnswerRegionRevision<'_>,
 ) -> CoreResult<AnswerRegionRevision> {
@@ -1286,21 +1304,20 @@ pub fn record_answer_region(
         }
     }
 
-    let tx = conn.unchecked_transaction()?;
-    let revision: i64 = tx.query_row(
+    let revision: i64 = conn.query_row(
         "SELECT COALESCE(MAX(revision),0)+1 FROM exam_answer_region_revisions_v2
          WHERE page_id=?1 AND assessment_item_id=?2 AND region_index=?3",
         (input.page_id, input.assessment_item_id, input.region_index),
         |row| row.get(0),
     )?;
-    tx.execute(
+    conn.execute(
         "UPDATE exam_answer_region_revisions_v2 SET state='superseded'
          WHERE page_id=?1 AND assessment_item_id=?2 AND region_index=?3 AND state='active'",
         (input.page_id, input.assessment_item_id, input.region_index),
     )?;
     let public_id = ids::new_public_id();
     let now = time::utc_now_rfc3339();
-    tx.execute(
+    conn.execute(
         "INSERT INTO exam_answer_region_revisions_v2
          (public_id, page_id, assessment_item_id, region_index, revision,
           alignment_revision_id, bbox_json, crop_artifact_id, mapping_confidence,
@@ -1322,13 +1339,13 @@ pub fn record_answer_region(
             &now,
         ),
     )?;
-    let id = tx.last_insert_rowid();
+    let id = conn.last_insert_rowid();
     let issue_code = format!(
         "ANSWER_REGION_REVIEW:{}:{}",
         input.assessment_item_id, input.region_index
     );
     resolve_open_issue(
-        &tx,
+        conn,
         "page",
         &page_public_id,
         &issue_code,
@@ -1350,7 +1367,7 @@ pub fn record_answer_region(
             })
             .to_string();
             open_issue(
-                &tx,
+                conn,
                 "page",
                 &page_public_id,
                 &issue_code,
@@ -1361,7 +1378,7 @@ pub fn record_answer_region(
             "needs_review"
         }
     };
-    let other_blocking: i64 = tx.query_row(
+    let other_blocking: i64 = conn.query_row(
         "SELECT COUNT(*) FROM exam_pipeline_issues_v2
          WHERE target_type='page' AND target_public_id=?1
            AND severity='blocking' AND state='open'",
@@ -1373,13 +1390,13 @@ pub fn record_answer_region(
     } else {
         proposed_state
     };
-    tx.execute(
+    conn.execute(
         "UPDATE exam_ingest_pages_v2 SET state=?1, updated_at=?2 WHERE id=?3",
         (page_state, &now, input.page_id),
     )?;
-    refresh_batch_state(&tx, batch_id, &now)?;
+    refresh_batch_state(conn, batch_id, &now)?;
     append_audit(
-        &tx,
+        conn,
         &AuditInput {
             key: &format!("exam:answer-region:{public_id}:active"),
             actor_type: if input.decision == "teacher_confirmed" {
@@ -1395,7 +1412,6 @@ pub fn record_answer_region(
             now: &now,
         },
     )?;
-    tx.commit()?;
     get_region(conn, id)?.ok_or_else(|| CoreError::NotFound("刚创建的答案区域".into()))
 }
 

@@ -316,8 +316,8 @@ fn result_from_run(
 #[cfg(test)]
 mod tests {
     use module_exam::ordinary_paper_recognition::{
-        NormalizedRect, OrdinaryPaperAlignment, OrdinaryPaperQuality, OrdinaryPaperQualityResult,
-        OrdinaryPaperRecognitionState, OrdinaryPaperRegionProposal,
+        NormalizedRect, OrdinaryPaperAlignment, OrdinaryPaperMarkCell, OrdinaryPaperQuality,
+        OrdinaryPaperQualityResult, OrdinaryPaperRecognitionState, OrdinaryPaperRegionProposal,
     };
     use suite_core::db::repo::artifacts;
     use suite_core::db::{open_in_memory, run_migrations, CORE_MIGRATIONS};
@@ -411,7 +411,26 @@ mod tests {
                     height: 0.3,
                 },
                 mapping_confidence: 0.99,
-                mark_cells: vec![],
+                mark_cells: vec![
+                    OrdinaryPaperMarkCell {
+                        label: "A".into(),
+                        rect: NormalizedRect {
+                            x: 0.05,
+                            y: 0.1,
+                            width: 0.2,
+                            height: 0.3,
+                        },
+                    },
+                    OrdinaryPaperMarkCell {
+                        label: "B".into(),
+                        rect: NormalizedRect {
+                            x: 0.35,
+                            y: 0.1,
+                            width: 0.2,
+                            height: 0.3,
+                        },
+                    },
+                ],
             }],
             confidence: 0.99,
             issue_codes: vec![],

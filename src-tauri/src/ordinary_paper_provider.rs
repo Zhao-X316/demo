@@ -19,8 +19,8 @@ use crate::secrets::VolcanoCreds;
 use crate::vlm::{ARK_URL, DEFAULT_MODEL};
 
 const MODEL_VERSION: &str = "ark-chat-completions-v3";
-const CONFIG_VERSION: &str = "ordinary-paper-page-v1";
-const RULE_VERSION: &str = "ordinary-paper-vision-json-v1";
+const CONFIG_VERSION: &str = "ordinary-paper-page-v2";
+const RULE_VERSION: &str = "ordinary-paper-vision-json-v2";
 
 pub struct ArkOrdinaryPaperRecognizer {
     api_key: String,
@@ -227,9 +227,10 @@ fn build_prompt(request: &OrdinaryPaperRecognitionRequest<'_>) -> String {
          quality: {{blur_score,glare_score,brightness_score,perspective_score,rotation_degrees,crop_complete,result,issue_codes}}，result 为 pass|needs_review|reject；\n\
          alignment: null 或 {{template_version,matrix:[9个数],confidence}}；\n\
          regions: [{{assessment_item_id,region_index,bbox:{{x,y,width,height}},mapping_confidence,mark_cells:[{{label,rect:{{x,y,width,height}}}}]}}]；\n\
-         confidence: 0到1；issue_codes: 字符串数组。所有坐标按整页 0~1 归一化。\n\
+         confidence: 0到1；issue_codes: 字符串数组。bbox 按整页 0~1 归一化，mark_cells.rect 按各自 bbox 裁图 0~1 归一化；\n\
          不得新增清单外题目；无法可靠定位时必须 needs_review/blocked 并给问题码；\n\
-         只有质量通过、配准与全部题区齐全且各置信度不低于 0.95 时才能 ready。",
+         每个客观题必须给出至少两个答题格，判断题必须且只能给 TRUE/FALSE；\n\
+         只有质量通过、配准、全部题区和答题格齐全且各置信度不低于 0.95 时才能 ready。",
         request.expected_page_no,
         request.template_version.trim(),
         items
@@ -335,7 +336,10 @@ mod tests {
                 "region_index": 0,
                 "bbox": {"x":0.1,"y":0.2,"width":0.8,"height":0.3},
                 "mapping_confidence": 0.99,
-                "mark_cells": []
+                "mark_cells": [
+                    {"label":"A","rect":{"x":0.05,"y":0.1,"width":0.2,"height":0.3}},
+                    {"label":"B","rect":{"x":0.35,"y":0.1,"width":0.2,"height":0.3}}
+                ]
             }],
             "confidence": 0.99,
             "issue_codes": []

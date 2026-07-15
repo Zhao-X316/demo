@@ -7,6 +7,10 @@ pub mod objective;
 pub mod ordered_activation;
 pub mod ordered_intake;
 pub mod ordered_retake;
+pub mod ordinary_structure;
 pub mod page_cycle;
 pub mod papers;
 pub mod question_ingest;
+
+#[cfg(test)]
+mod ordinary_structure_tests;

@@ -7,6 +7,7 @@ import {
   FixedIntakeResult,
   GroupedPageEvidence,
   OrdinaryPaperRunResult,
+  OrdinaryStructureConfirmationResult,
   PageCycleSuggestion,
   KnowledgePoint,
   ObjectiveWorkbench,
@@ -25,6 +26,7 @@ import {
   examFixedIntakePrepare,
   examFixedIntakeReplaceRejectedPage,
   examOrdinaryPaperAnalyzePage,
+  examOrdinaryPaperConfirmPageStructure,
   examObjectiveAccept,
   examObjectiveCorrect,
   examObjectivePublishAttempt,
@@ -273,6 +275,8 @@ function FixedIntakeTab({
   const [retakingPageId, setRetakingPageId] = useState<number | null>(null);
   const [ordinaryPaperRuns, setOrdinaryPaperRuns] = useState<Record<number, OrdinaryPaperRunResult>>({});
   const [analyzingPageIds, setAnalyzingPageIds] = useState<number[]>([]);
+  const [ordinaryConfirmations, setOrdinaryConfirmations] = useState<Record<number, OrdinaryStructureConfirmationResult>>({});
+  const [confirmingOrdinaryPageIds, setConfirmingOrdinaryPageIds] = useState<number[]>([]);
   const [groupingStartNo, setGroupingStartNo] = useState("");
   const [absentStudentNos, setAbsentStudentNos] = useState<string[]>([]);
   const [result, setResult] = useState<FixedIntakeResult | null>(null);
@@ -320,6 +324,8 @@ function FixedIntakeTab({
       setRejectedPageIds([]);
       setOrdinaryPaperRuns({});
       setAnalyzingPageIds([]);
+      setOrdinaryConfirmations({});
+      setConfirmingOrdinaryPageIds([]);
       const inferred = await examFixedIntakeInferPageCycle(paths);
       setPageCycle(inferred);
       setExpectedPages(String(inferred.expectedPagesPerAttempt));
@@ -400,6 +406,8 @@ function FixedIntakeTab({
       setRejectedPageIds([]);
       setOrdinaryPaperRuns({});
       setAnalyzingPageIds([]);
+      setOrdinaryConfirmations({});
+      setConfirmingOrdinaryPageIds([]);
     } catch (err) {
       onError(String(err));
     } finally {
@@ -539,6 +547,43 @@ function FixedIntakeTab({
     }
   }
 
+  async function confirmReadyOrdinaryPages() {
+    const ready = Object.values(ordinaryPaperRuns).filter((run) =>
+      run.status === "succeeded"
+      && run.output?.state === "ready"
+      && !ordinaryConfirmations[run.output.page_id],
+    );
+    if (!ready.length) return;
+    setConfirmingOrdinaryPageIds(ready.map((run) => run.output!.page_id));
+    const failures: string[] = [];
+    let recognizedRegions = 0;
+    for (const run of ready) {
+      const pageId = run.output!.page_id;
+      try {
+        const confirmed = await examOrdinaryPaperConfirmPageStructure(pageId, run.ai_run_id);
+        setOrdinaryConfirmations((current) => ({ ...current, [pageId]: confirmed }));
+        for (const region of confirmed.regions) {
+          try {
+            await examObjectiveRecognizeRegion(
+              region.id,
+              `ordinary-objective:${region.id}:v1`,
+            );
+            recognizedRegions += 1;
+          } catch (err) {
+            failures.push(`第${run.output!.expected_page_no}页第${region.region_index + 1}区：${String(err)}`);
+          }
+        }
+      } catch (err) {
+        failures.push(`第${run.output!.expected_page_no}页：${String(err)}`);
+      } finally {
+        setConfirmingOrdinaryPageIds((current) => current.filter((value) => value !== pageId));
+      }
+    }
+    if (failures.length) {
+      onError(`已完成 ${recognizedRegions} 个题区识别，另有 ${failures.length} 项需重试。${failures[0]}`);
+    }
+  }
+
   if (!options.length) {
     return (
       <div className="exam-card objective-empty">
@@ -563,7 +608,10 @@ function FixedIntakeTab({
     page.qualityResult === "pass" && page.matchDecision === "teacher_confirmed"
   ).length;
   const ordinaryRunValues = Object.values(ordinaryPaperRuns);
-  const ordinaryReadyCount = ordinaryRunValues.filter((run) => run.output?.state === "ready").length;
+  const ordinaryUnconfirmedReadyCount = ordinaryRunValues.filter((run) =>
+    run.output?.state === "ready" && !ordinaryConfirmations[run.output.page_id]
+  ).length;
+  const ordinaryConfirmedCount = Object.keys(ordinaryConfirmations).length;
   const ordinaryReviewCount = ordinaryRunValues.filter((run) => run.output?.state === "needs_review").length;
   const ordinaryBlockedCount = ordinaryRunValues.filter((run) =>
     run.status === "failed" || run.output?.state === "blocked"
@@ -850,7 +898,8 @@ function FixedIntakeTab({
                   <strong>{analyzingPageIds.length ? `正在处理 ${analyzingPageIds.length} 页` : `已处理 ${ordinaryRunValues.length}/${ordinaryEligiblePageCount} 页`}</strong>
                 </div>
                 <div className="intake-analysis-summary">
-                  <span className="ready">可继续 {ordinaryReadyCount}</span>
+                  <span className="ready">可确认 {ordinaryUnconfirmedReadyCount}</span>
+                  <span>已确认 {ordinaryConfirmedCount}</span>
                   <span className="review">需复核 {ordinaryReviewCount}</span>
                   <span className="blocked">受阻 {ordinaryBlockedCount}</span>
                   <span>待处理 {ordinaryPendingCount}</span>
@@ -863,6 +912,16 @@ function FixedIntakeTab({
                   </div>
                 )}
                 <div className="intake-analysis-actions">
+                  {ordinaryUnconfirmedReadyCount > 0 && (
+                    <button
+                      disabled={analyzingPageIds.length > 0 || confirmingOrdinaryPageIds.length > 0}
+                      onClick={() => void confirmReadyOrdinaryPages()}
+                    >
+                      {confirmingOrdinaryPageIds.length
+                        ? `正在确认并识别 ${confirmingOrdinaryPageIds.length} 页…`
+                        : `确认 ${ordinaryUnconfirmedReadyCount} 页并开始批改`}
+                    </button>
+                  )}
                   {ordinaryPendingCount > 0 && (
                     <button disabled={analyzingPageIds.length > 0} onClick={() => void analyzeOrdinaryPages()}>
                       {analyzingPageIds.length ? "正在自动识别…" : `继续识别 ${ordinaryPendingCount} 页`}

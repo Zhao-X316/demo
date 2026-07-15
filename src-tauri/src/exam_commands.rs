@@ -18,6 +18,7 @@ use module_exam::service::grading::{self, AnswerDetail};
 use module_exam::service::objective::{
     self, ObjectiveObservationResult, ObjectiveReviewBatch, ObjectiveWorkbench, StrictBatchReview,
 };
+use module_exam::service::ordinary_structure::OrdinaryStructureConfirmationResult;
 use module_exam::vlm::{self as exam_vlm, AnalyzedQuestion};
 
 use crate::exam_intake::{
@@ -27,6 +28,7 @@ use crate::exam_intake::{
 };
 use crate::objective_provider::ArkObjectiveRecognizer;
 use crate::objective_run::{self, BeginObjectiveRun};
+use crate::ordinary_paper_materialization;
 use crate::ordinary_paper_provider::ArkOrdinaryPaperRecognizer;
 use crate::ordinary_paper_run::{self, BeginOrdinaryPaperRun, OrdinaryPaperRunResult};
 use crate::secrets;
@@ -480,6 +482,26 @@ pub async fn exam_ordinary_paper_analyze_page(
             });
     let conn = lock(&state)?;
     ordinary_paper_run::finish(&conn, &input, ai_run_id, provider_result).map_err(e)
+}
+
+/// 老师确认一张 ready 普通试卷的整页结构，并一次性生成配准、题区和本地裁图。
+///
+/// 该动作不产生分数或发布；返回的题区仍需逐题视觉识别，再由老师在批改台终审。
+#[tauri::command]
+pub fn exam_ordinary_paper_confirm_page_structure(
+    state: State<'_, AppState>,
+    page_id: i64,
+    ai_run_id: i64,
+) -> R<OrdinaryStructureConfirmationResult> {
+    let conn = lock(&state)?;
+    ordinary_paper_materialization::confirm_page_structure(
+        &conn,
+        &state.data_dir,
+        page_id,
+        ai_run_id,
+        LOCAL_TEACHER_ACTOR,
+    )
+    .map_err(e)
 }
 
 // ───────────────────────── 豆包视觉：题目预分析 ─────────────────────────

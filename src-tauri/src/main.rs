@@ -10,6 +10,7 @@ mod exam_commands;
 mod exam_intake;
 mod objective_provider;
 mod objective_run;
+mod ordinary_paper_materialization;
 mod ordinary_paper_provider;
 mod ordinary_paper_run;
 mod pdf_pages;
@@ -106,6 +107,7 @@ fn main() {
             exam_commands::exam_fixed_intake_replace_rejected_page,
             exam_commands::exam_objective_recognize_region,
             exam_commands::exam_ordinary_paper_analyze_page,
+            exam_commands::exam_ordinary_paper_confirm_page_structure,
         ])
         .run(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");

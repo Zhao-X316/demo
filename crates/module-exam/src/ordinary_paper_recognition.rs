@@ -308,8 +308,12 @@ impl OrdinaryPaperRegionProposal {
                 ));
             }
         }
+        if labels.len() < 2 {
+            return Err(CoreError::Invalid(
+                "普通试卷客观题必须至少定位两个题区内答题格".into(),
+            ));
+        }
         if question_type == OrdinaryPaperQuestionType::TrueFalse
-            && !labels.is_empty()
             && labels != BTreeSet::from(["FALSE".to_string(), "TRUE".to_string()])
         {
             return Err(CoreError::Invalid(
@@ -580,7 +584,26 @@ mod tests {
                     region_index: 0,
                     bbox: rect(0.1),
                     mapping_confidence: 0.99,
-                    mark_cells: vec![],
+                    mark_cells: vec![
+                        OrdinaryPaperMarkCell {
+                            label: "A".into(),
+                            rect: NormalizedRect {
+                                x: 0.1,
+                                y: 0.1,
+                                width: 0.2,
+                                height: 0.3,
+                            },
+                        },
+                        OrdinaryPaperMarkCell {
+                            label: "B".into(),
+                            rect: NormalizedRect {
+                                x: 0.6,
+                                y: 0.1,
+                                width: 0.2,
+                                height: 0.3,
+                            },
+                        },
+                    ],
                 },
                 OrdinaryPaperRegionProposal {
                     assessment_item_id: 12,
@@ -665,6 +688,15 @@ mod tests {
         let request = build_request(&items);
         let mut output = ready_output(&request);
         output.regions[0].assessment_item_id = 999;
+        assert!(output.validate_against(&request).is_err());
+    }
+
+    #[test]
+    fn ready_objective_region_cannot_omit_mark_cells() {
+        let items = items();
+        let request = build_request(&items);
+        let mut output = ready_output(&request);
+        output.regions[0].mark_cells.clear();
         assert!(output.validate_against(&request).is_err());
     }
 

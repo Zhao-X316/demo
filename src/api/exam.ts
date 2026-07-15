@@ -326,6 +326,28 @@ export interface OrdinaryPaperRunResult {
   } | null;
 }
 
+export interface OrdinaryStructureConfirmationResult {
+  confirmation: {
+    id: number;
+    ai_run_id: number;
+    page_id: number;
+    alignment_revision_id: number;
+    region_revision_ids: number[];
+    confirmed_by: string;
+    created_at: string;
+  };
+  alignment: {
+    id: number;
+    decision: "teacher_confirmed";
+  };
+  regions: Array<{
+    id: number;
+    assessment_item_id: number;
+    region_index: number;
+    decision: "teacher_confirmed";
+  }>;
+}
+
 export const kpList = () => call<KnowledgePoint[]>("kp_list");
 export const kpCreate = (name: string, code: string | null, parent_id: number | null) =>
   call<KnowledgePoint>("kp_create", { subjectId: null, parentId: parent_id, code, name });
@@ -440,3 +462,11 @@ export const examOrdinaryPaperAnalyzePage = (
   pageId: page_id,
   idempotencyKey: idempotency_key,
 });
+
+export const examOrdinaryPaperConfirmPageStructure = (
+  page_id: number,
+  ai_run_id: number,
+) => call<OrdinaryStructureConfirmationResult>(
+  "exam_ordinary_paper_confirm_page_structure",
+  { pageId: page_id, aiRunId: ai_run_id },
+);
