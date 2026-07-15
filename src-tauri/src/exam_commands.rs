@@ -9,6 +9,10 @@ use module_exam::objective_recognition::{
     ObjectiveRecognitionErrorCode, ObjectiveRecognitionFailure, ObjectiveRecognizer,
     OBJECTIVE_RECOGNITION_SCHEMA_VERSION,
 };
+use module_exam::ordinary_paper_recognition::{
+    OrdinaryPaperRecognitionErrorCode, OrdinaryPaperRecognitionFailure, OrdinaryPaperRecognizer,
+    ORDINARY_PAPER_SCHEMA_VERSION,
+};
 use module_exam::service::assessment::{self, GradeDecision, Publication};
 use module_exam::service::grading::{self, AnswerDetail};
 use module_exam::service::objective::{
@@ -23,6 +27,8 @@ use crate::exam_intake::{
 };
 use crate::objective_provider::ArkObjectiveRecognizer;
 use crate::objective_run::{self, BeginObjectiveRun};
+use crate::ordinary_paper_provider::ArkOrdinaryPaperRecognizer;
+use crate::ordinary_paper_run::{self, BeginOrdinaryPaperRun, OrdinaryPaperRunResult};
 use crate::secrets;
 use crate::state::AppState;
 use crate::vlm;
@@ -433,6 +439,47 @@ pub async fn exam_objective_recognize_region(
             });
     let conn = lock(&state)?;
     objective_run::finish(&conn, ai_run_id, &idempotency_key, provider_result).map_err(e)
+}
+
+/// 对一张已完成评分前身份/质量确认、材料为普通试卷的页面执行整页结构分析。
+///
+/// 外部调用期间不持 SQLite 锁；结果只写不可变 ai_run，当前批不自动覆盖老师质量、
+/// 不确认配准/题区，也不创建分数、发布或学习证据。
+#[tauri::command]
+pub async fn exam_ordinary_paper_analyze_page(
+    state: State<'_, AppState>,
+    page_id: i64,
+    idempotency_key: String,
+) -> R<OrdinaryPaperRunResult> {
+    let creds = secrets::load(&state.data_dir).map_err(e)?;
+    let recognizer = ArkOrdinaryPaperRecognizer::from_creds(&creds);
+    let descriptor = recognizer.descriptor();
+    let metadata = {
+        let conn = lock(&state)?;
+        ordinary_paper_run::load_metadata(&conn, page_id).map_err(e)?
+    };
+    let input = std::sync::Arc::new(ordinary_paper_run::load_input(metadata).map_err(e)?);
+    let ai_run_id = {
+        let conn = lock(&state)?;
+        match ordinary_paper_run::begin(&conn, &input, &descriptor, &idempotency_key).map_err(e)? {
+            BeginOrdinaryPaperRun::Execute { ai_run_id } => ai_run_id,
+            BeginOrdinaryPaperRun::Completed(result) => return Ok(*result),
+        }
+    };
+    let worker_input = std::sync::Arc::clone(&input);
+    let provider_result =
+        tauri::async_runtime::spawn_blocking(move || recognizer.recognize(&worker_input.request()))
+            .await
+            .unwrap_or_else(|_| {
+                Err(OrdinaryPaperRecognitionFailure {
+                    schema_version: ORDINARY_PAPER_SCHEMA_VERSION,
+                    code: OrdinaryPaperRecognitionErrorCode::Internal,
+                    safe_message: "普通试卷分析任务意外中断，已保留记录等待重试".into(),
+                    retryable: true,
+                })
+            });
+    let conn = lock(&state)?;
+    ordinary_paper_run::finish(&conn, &input, ai_run_id, provider_result).map_err(e)
 }
 
 // ───────────────────────── 豆包视觉：题目预分析 ─────────────────────────
