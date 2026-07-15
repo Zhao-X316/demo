@@ -8,7 +8,7 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 
 ## 当前进度
 
-> 2026-07-15：独立分支 `codex/t2-artifacts@d9bcbec` 已完成 T2～T6、B3a0、B3a1 普通卷纵切、B3a2 固定答题卡核心处理纵切，并启动 M2-C0 固定格式默写。普通卷由老师确认结构后识别；固定答题卡绑定空白模板和题号格位，使用四锚点透视与本地 OMR；默写已新增不可变 template/policy/transcription/point observation 数据契约和安全精确比较，OCR 未命中时只进入复核，标准答案不能反向改写 OCR。所有链均不能自动发布或生成正式学习证据。答题卡首次建模 UI、无稳定锚点答题卡、真实照片阈值、默写区域物化/OCR/工作台、答案结构化与三类黄金集仍未完成。未 tag、合并、推送或发布。
+> 2026-07-15：独立分支 `codex/t2-artifacts@f7ae178` 已完成 T2～T6、B3a0、B3a1 普通卷纵切、B3a2 固定答题卡核心处理与首次空白模板入口，并启动 M2-C0 固定格式默写。普通卷由老师确认结构后识别；稳定四锚点答题卡可选择一张空白卡生成严格候选，老师只确认一次，之后整批按题号格位完成透视校正与本地 OMR；默写已新增不可变 template/policy/transcription/point observation 数据契约和安全精确比较，OCR 未命中时只进入复核，标准答案不能反向改写 OCR。所有链均不能自动发布或生成正式学习证据。无稳定锚点答题卡、主观区、真实照片阈值、多页答题卡逐页模板体验、默写区域物化/OCR/工作台、答案结构化与三类黄金集仍未完成。未 tag、合并、推送或发布。
 
 | 部分 | 状态 | 说明 |
 |------|------|------|
@@ -18,21 +18,21 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 | `crates/module-recitation` M1 域 | ✅ 实现 + 单测 | 文件名解析、熟练度 A/B/C、评分编排、识别 ports、rec_contents 仓储 |
 | `crates/module-recitation` M1 服务 | ✅ 实现 + 单测 | import 去重/归档、ASR 可恢复状态机、机器建议、老师终审、补背/到期复习/日切、双向改判 |
 | `crates/module-knowledge` K1 | 🟡 T3 兼容底座 | 教材/知识/考点/能力稳定版本，题目/答案/rubric/link 不可变版本，C0～L4 质量闸门与旧表显式映射；导入、搜索和 UI 尚未接入 |
-| `crates/module-exam` M2 | 🟡 A1 + B0/B1 + M2.5 + B2 + B3a1/B3a2 + M2-C0 契约 | 手工纵切已真机通过；普通卷、固定答题卡核心链和固定格式默写版本化数据/安全比较合同已落；默写 OCR 与工作台尚未接入 |
+| `crates/module-exam` M2 | 🟡 A1 + B0/B1 + M2.5 + B2 + B3a1/B3a2 + M2-C0 契约 | 手工纵切已真机通过；普通卷、稳定四锚点答题卡首建/复用链和固定格式默写版本化数据/安全比较合同已落；默写 OCR 与工作台尚未接入 |
 | Tauri 应用外壳 `src-tauri` | ✅ 实现 + 独立检查 | DB+迁移、M1 终审，以及 T6 工作台/接受建议/人工记分/严格批量/显式发布、T6.1b 固定卷上传归档/PDF 真拆页和 Ark 题区识别 run；在线备份恢复、按 hash 归档、凭据掩码与最小 asset scope |
 | 前端 `src` | 🟡 M1/M2 已接入 | 方向 B 模块切换；M1 六区、M2-A1 手工兜底，以及“上传批改”单入口、T6 标准卷按题终审、异常处理、严格批量和整卷发布页面 |
 | 跨平台 CI | ✅ 后端三平台 + 应用 Win/Mac 编译 | `.github/workflows/ci.yml` |
 | 打包 CI（安装包） | ✅ 工作流就绪 | `release.yml`：手动/tag 触发出 `.msi/.exe/.dmg` |
 | 火山 ASR 真接口 | ✅ 标准版 submit+query | 境内端点绕系统代理；processing/ok/failed 可恢复，失败可重试、同 hash 重定位或作废 |
 | 页面与老师终审 | ✅ A6b 真机通过 | 机器只给建议；老师核对录音/ASR/答案版本/评分/备注后终审，副作用才生效 |
-| M2 页面证据链 / OCR | 🟡 普通卷和固定答题卡核心链已接 | 普通卷按 `structure run → teacher confirmation → alignment/region/crop → observation`；固定答题卡按 `blank template → four-anchor alignment → deterministic crop/OMR → observation`。结果仍须老师逐题终审；答题卡建模 UI、默写 OCR 和真实照片准确率未验证 |
+| M2 页面证据链 / OCR | 🟡 普通卷和稳定四锚点答题卡纵切已接 | 普通卷按 `structure run → teacher confirmation → alignment/region/crop → observation`；答题卡按 `blank image → template run → one-time teacher confirmation → four-anchor alignment → deterministic crop/OMR → observation`。结果仍须老师逐题终审；默写 OCR、无稳定锚点答题卡、主观区和真实照片准确率未验证 |
 | M2.5 题目自动沉淀 | 🟡 T5 核心合同完成 | 精确复用当前作业已固定的 K1 版本；否则创建老师私有 C0 候选；冲突/歧义进入待确认，学生卷只允许脱敏文本；相似题语义检索、候选整理 UI 和晋级尚未接入 |
-| M2 拍照批改 | 🟡 普通卷/固定答题卡核心纵切 + 默写契约 | 自然排序和学生归组共用；普通卷走结构确认，固定答题卡走四锚点/题格/OMR，默写已分开未写、无法辨认、识别失败、涂改终态和真实不匹配。答题卡首建 UI 与默写 OCR/工作台尚未完成 |
-| M2 傻瓜式固定卷预检 | 🟡 两类固定卷核心后台已贯通 | “上传批改”仍是唯一主入口；普通卷走视觉结构候选，固定答题卡走几何配准与 OMR，最终共用异常终审。答案自动结构化、真实照片 GUI/阈值验收、答题卡首次建模和默写专用链仍待施工 |
+| M2 拍照批改 | 🟡 普通卷/固定答题卡纵切 + 默写契约 | 自然排序和学生归组共用；普通卷走结构确认，稳定四锚点答题卡走空白卡一次确认/题格/OMR，默写已分开未写、无法辨认、识别失败、涂改终态和真实不匹配。默写 OCR/工作台尚未完成 |
+| M2 傻瓜式固定卷预检 | 🟡 两类固定卷首建与复用已贯通 | “上传批改”仍是唯一主入口；普通卷走视觉结构候选，稳定四锚点答题卡在缺模板时只要求选择空白卡并确认一次，之后自动几何配准与 OMR，最终共用异常终审。答案自动结构化、真实照片 GUI/阈值验收、无稳定锚点答题卡和默写专用链仍待施工 |
 | 音频回放 | ✅ app-managed archive | 按 hash 归档；原文件改名、重启和数据库恢复后仍可回放，原路径只兜底 |
 | ffmpeg 转码/时长探测 | ✅ 可选集成 | 装了 ffmpeg 则转 16k 单声道 wav + 探测时长，否则降级 |
 
-当前已验证：module-exam **77 tests**、workspace **206 tests**、Tauri 应用 **37 tests**、两套 Clippy `-D warnings`、Tauri check、前端 build 和 `git diff --check` 全通过；exam 迁移已到 `exam_0016`。新增默写回归证明精确答案/老师确认变体可复现，未命中 OCR 不会被标准答案自动修正，未写/无法辨认/识别失败/涂改终态不产生机器分数。真实答题卡/默写照片、阈值、首次模板建立 GUI、默写 OCR/区域/工作台、真实 provider 凭据和三类黄金集尚未验证；正式库未写入。
+当前已验证：module-exam **79 tests**、workspace **208 tests**、Tauri 应用 **39 tests**、两套 Clippy `-D warnings`、Tauri check、前端 build 和 `git diff --check` 全通过；exam 迁移已到 `exam_0016`。新增答题卡回归覆盖严格候选合同、失败 run 幂等及不泄露本机路径；默写回归证明精确答案/老师确认变体可复现，未命中 OCR 不会被标准答案自动修正，未写/无法辨认/识别失败/涂改终态不产生机器分数。真实答题卡/默写照片、阈值、上传页 GUI、无稳定锚点/主观区、多页逐页模板体验、默写 OCR/区域/工作台、真实 provider 凭据和三类黄金集尚未验证；正式库未写入。
 
 > 这些结果不等于授权发布。异模型复核、tag、合并和安装包发布仍需单独放行。
 
