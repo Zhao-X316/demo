@@ -18,6 +18,7 @@ import {
   examObjectiveAccept,
   examObjectiveCorrect,
   examObjectivePublishAttempt,
+  examObjectiveRecognizeRegion,
   examObjectiveStrictBatchAccept,
   examObjectiveWorkbench,
   kpCreate,
@@ -614,6 +615,21 @@ function ObjectiveReviewTab({
     }
   };
 
+  const retryRecognition = async (row: ObjectiveWorkbenchRow) => {
+    setBusy(true);
+    try {
+      await examObjectiveRecognizeRegion(
+        row.answer_region_revision_id,
+        `objective-omr-${row.answer_region_revision_id}-${crypto.randomUUID()}`,
+      );
+      onDone(`已重新整理 ${row.student_name} 的第 ${row.order_index} 题；机器结果仍需老师确认`);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const publishAttempt = async (attemptId: number, studentName: string) => {
     if (!window.confirm(`确认发布 ${studentName} 的本次整卷成绩？发布只采用当前老师终审 revision。`)) return;
     setBusy(true);
@@ -631,7 +647,7 @@ function ObjectiveReviewTab({
     return (
       <div className="empty-state objective-empty">
         <b>还没有可终审的标准卷客观题。</b>
-        <span>当前只读取已完成页面匹配、配准、答案区域确认和固定夹具观察的数据；真实 OMR 识别尚未接入。</span>
+        <span>真实视觉识别只处理已完成学生匹配、页面配准、答案区域和答题格确认的数据；上传后仍有异常时会先留给老师确认。</span>
         <span>需要临时录入时可继续使用“快速批改”兜底。</span>
       </div>
     );
@@ -698,6 +714,9 @@ function ObjectiveReviewTab({
                 </div>
               </div>
               <div className="objective-actions">
+                {row.observation_state === "failed" && !row.current_suggestion_confirmed && (
+                  <button disabled={busy} onClick={() => retryRecognition(row)}>重新整理本题</button>
+                )}
                 <button className={canAccept ? "primary" : ""} disabled={busy || !canAccept} onClick={() => acceptOne(row)}>
                   {row.current_suggestion_confirmed ? "已确认" : row.suggested_score == null ? "机器无法计分" : "接受本条建议"}
                 </button>

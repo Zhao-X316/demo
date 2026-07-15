@@ -5,14 +5,20 @@ use tauri::State;
 
 use module_exam::db::knowledge_points::{self as kp, KnowledgePoint, KpInput};
 use module_exam::db::questions::{self, NewOption, NewQuestion, Question, QuestionOption};
+use module_exam::objective_recognition::{
+    ObjectiveRecognitionErrorCode, ObjectiveRecognitionFailure, ObjectiveRecognizer,
+    OBJECTIVE_RECOGNITION_SCHEMA_VERSION,
+};
 use module_exam::service::assessment::{self, GradeDecision, Publication};
 use module_exam::service::grading::{self, AnswerDetail};
 use module_exam::service::objective::{
-    self, ObjectiveReviewBatch, ObjectiveWorkbench, StrictBatchReview,
+    self, ObjectiveObservationResult, ObjectiveReviewBatch, ObjectiveWorkbench, StrictBatchReview,
 };
 use module_exam::vlm::{self as exam_vlm, AnalyzedQuestion};
 
 use crate::exam_intake::{self, FixedIntakeOption, FixedIntakeRequest, FixedIntakeResult};
+use crate::objective_provider::ArkObjectiveRecognizer;
+use crate::objective_run::{self, BeginObjectiveRun};
 use crate::secrets;
 use crate::state::AppState;
 use crate::vlm;
@@ -299,6 +305,47 @@ pub fn exam_fixed_intake_prepare(
     let prepared = exam_intake::prepare_fixed_intake_files(&request).map_err(e)?;
     let conn = lock(&state)?;
     exam_intake::persist_fixed_intake(&conn, &state.data_dir, &request, &prepared).map_err(e)
+}
+
+/// 对一条已完成老师确认、且已有明确答题格坐标的客观题区域执行真实视觉识别。
+///
+/// 外部网络调用期间不持有 SQLite 锁；结果只形成 observation/机器评分建议，仍需
+/// 老师终审并显式发布。失败也会写脱敏 run 与待复核记录，便于用新幂等键重试。
+#[tauri::command]
+pub async fn exam_objective_recognize_region(
+    state: State<'_, AppState>,
+    answer_region_revision_id: i64,
+    idempotency_key: String,
+) -> R<ObjectiveObservationResult> {
+    let creds = secrets::load(&state.data_dir).map_err(e)?;
+    let recognizer = ArkObjectiveRecognizer::from_creds(&creds);
+    let descriptor = recognizer.descriptor();
+    let metadata = {
+        let conn = lock(&state)?;
+        objective_run::load_metadata(&conn, answer_region_revision_id).map_err(e)?
+    };
+    let input = objective_run::load_input(metadata).map_err(e)?;
+    let ai_run_id = {
+        let conn = lock(&state)?;
+        match objective_run::begin(&conn, &input, &descriptor, &idempotency_key).map_err(e)? {
+            BeginObjectiveRun::Execute { ai_run_id } => ai_run_id,
+            BeginObjectiveRun::Completed(result) => return Ok(*result),
+        }
+    };
+
+    let provider_result =
+        tauri::async_runtime::spawn_blocking(move || recognizer.recognize(&input.request()))
+            .await
+            .unwrap_or_else(|_| {
+                Err(ObjectiveRecognitionFailure {
+                    schema_version: OBJECTIVE_RECOGNITION_SCHEMA_VERSION,
+                    code: ObjectiveRecognitionErrorCode::Internal,
+                    safe_message: "客观题识别任务意外中断，已保留记录等待重试".into(),
+                    retryable: true,
+                })
+            });
+    let conn = lock(&state)?;
+    objective_run::finish(&conn, ai_run_id, &idempotency_key, provider_result).map_err(e)
 }
 
 // ───────────────────────── 豆包视觉：题目预分析 ─────────────────────────

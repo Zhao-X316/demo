@@ -8,8 +8,8 @@ use serde_json::{json, Value};
 
 use crate::secrets::VolcanoCreds;
 
-const ARK_URL: &str = "https://ark.cn-beijing.volces.com/api/v3/chat/completions";
-const DEFAULT_MODEL: &str = "doubao-1.5-vision-pro";
+pub(crate) const ARK_URL: &str = "https://ark.cn-beijing.volces.com/api/v3/chat/completions";
+pub(crate) const DEFAULT_MODEL: &str = "doubao-1.5-vision-pro";
 
 fn mime_of(path: &str) -> &'static str {
     match std::path::Path::new(path)

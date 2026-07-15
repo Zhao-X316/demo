@@ -257,6 +257,14 @@ export const examObjectiveStrictBatchAccept = (
 export const examObjectivePublishAttempt = (attempt_id: number) =>
   call<GradePublication>("exam_objective_publish_attempt", { attemptId: attempt_id });
 
+export const examObjectiveRecognizeRegion = (
+  answer_region_revision_id: number,
+  idempotency_key: string,
+) => call<unknown>("exam_objective_recognize_region", {
+  answerRegionRevisionId: answer_region_revision_id,
+  idempotencyKey: idempotency_key,
+});
+
 export const examFixedIntakeOptions = () =>
   call<FixedIntakeOption[]>("exam_fixed_intake_options");
 

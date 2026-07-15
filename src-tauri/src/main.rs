@@ -8,6 +8,8 @@ mod backup;
 mod commands;
 mod exam_commands;
 mod exam_intake;
+mod objective_provider;
+mod objective_run;
 mod pdf_pages;
 mod secrets;
 mod state;
@@ -94,6 +96,7 @@ fn main() {
             exam_commands::exam_objective_publish_attempt,
             exam_commands::exam_fixed_intake_options,
             exam_commands::exam_fixed_intake_prepare,
+            exam_commands::exam_objective_recognize_region,
         ])
         .run(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");
