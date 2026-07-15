@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use suite_core::db::repo::artifacts::{self, NewArtifact};
 use suite_core::domain::hashing;
@@ -15,6 +15,10 @@ use suite_core::models::{ArchiveStatus, Artifact, ArtifactKind, PrivacyClass};
 
 use module_exam::service::fixed_paper::{
     self, FixedPaperPreflightInput, FixedPaperPreflightRevision, NewFixedInputDocument,
+};
+use module_exam::service::ordered_intake::{
+    self, ImportOrderEntry, NewImportOrderRevision, NewMaterialTypeRevision, NewPageTypeRevision,
+    OrderedGroupingInput,
 };
 use module_exam::service::papers::{self, NewIngestBatch, NewIngestPage};
 
@@ -46,6 +50,8 @@ pub struct FixedIntakeRequest {
     pub answer_path: Option<String>,
     pub answer_text: Option<String>,
     pub expected_pages_per_attempt: i64,
+    #[serde(default)]
+    pub material_type: Option<String>,
     pub idempotency_key: String,
 }
 
@@ -58,7 +64,7 @@ pub struct FixedIntakeDocumentSummary {
     pub page_count: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FixedIntakeResult {
     pub batch_id: i64,
@@ -74,6 +80,28 @@ pub struct FixedIntakeResult {
     pub blocked_count: i64,
     pub completed_count: i64,
     pub reason_codes: Vec<String>,
+    pub order_policy: String,
+    pub order_confidence: f64,
+    pub order_conflict_codes: Vec<String>,
+    pub material_type: String,
+    pub material_type_decision: String,
+    pub material_type_confidence: f64,
+    pub material_type_needs_confirmation: bool,
+    pub grouping_route: String,
+    pub student_group_count: i64,
+    pub grouping_issue_codes: Vec<String>,
+    pub next_action: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaterialTypeConfirmationResult {
+    pub material_type: String,
+    pub material_type_decision: String,
+    pub material_type_confidence: f64,
+    pub grouping_route: String,
+    pub student_group_count: i64,
+    pub grouping_issue_codes: Vec<String>,
     pub next_action: String,
 }
 
@@ -124,11 +152,17 @@ struct PreparedSource {
     bytes: Option<Vec<u8>>,
     expected_hash: String,
     pdf_pages: Vec<Vec<u8>>,
+    original_request_index: i64,
+    capture_time: Option<String>,
+    file_created_ms: Option<i64>,
+    file_modified_ms: Option<i64>,
 }
 
 pub(crate) struct PreparedFixedIntake {
     student_sources: Vec<PreparedSource>,
     answer_source: Option<PreparedSource>,
+    order_confidence: f64,
+    order_conflict_codes: Vec<String>,
 }
 
 struct ArchivedFile {
@@ -176,7 +210,144 @@ fn split_pdf_pages(path: &Path) -> CoreResult<Vec<Vec<u8>>> {
     pdf_pages::split_to_single_page_pdfs(path)
 }
 
-fn prepare_path(path: &str, allow_text: bool) -> CoreResult<PreparedSource> {
+fn system_time_ms(value: std::io::Result<std::time::SystemTime>) -> Option<i64> {
+    value
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+}
+
+#[derive(Clone, Copy)]
+enum TiffEndian {
+    Little,
+    Big,
+}
+
+fn tiff_u16(bytes: &[u8], offset: usize, endian: TiffEndian) -> Option<u16> {
+    let raw = bytes.get(offset..offset + 2)?;
+    Some(match endian {
+        TiffEndian::Little => u16::from_le_bytes([raw[0], raw[1]]),
+        TiffEndian::Big => u16::from_be_bytes([raw[0], raw[1]]),
+    })
+}
+
+fn tiff_u32(bytes: &[u8], offset: usize, endian: TiffEndian) -> Option<u32> {
+    let raw = bytes.get(offset..offset + 4)?;
+    Some(match endian {
+        TiffEndian::Little => u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
+        TiffEndian::Big => u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]),
+    })
+}
+
+fn tiff_ifd_entry(
+    bytes: &[u8],
+    ifd_offset: usize,
+    wanted_tag: u16,
+    endian: TiffEndian,
+) -> Option<(u16, u32, usize)> {
+    let count = usize::from(tiff_u16(bytes, ifd_offset, endian)?);
+    for index in 0..count {
+        let offset = ifd_offset.checked_add(2 + index * 12)?;
+        if tiff_u16(bytes, offset, endian)? == wanted_tag {
+            return Some((
+                tiff_u16(bytes, offset + 2, endian)?,
+                tiff_u32(bytes, offset + 4, endian)?,
+                offset + 8,
+            ));
+        }
+    }
+    None
+}
+
+fn tiff_ascii_tag(bytes: &[u8], ifd_offset: usize, tag: u16, endian: TiffEndian) -> Option<String> {
+    let (value_type, count, value_offset) = tiff_ifd_entry(bytes, ifd_offset, tag, endian)?;
+    if value_type != 2 || count == 0 {
+        return None;
+    }
+    let count = usize::try_from(count).ok()?;
+    let start = if count <= 4 {
+        value_offset
+    } else {
+        usize::try_from(tiff_u32(bytes, value_offset, endian)?).ok()?
+    };
+    let value = std::str::from_utf8(bytes.get(start..start.checked_add(count)?)?)
+        .ok()?
+        .trim_matches(char::from(0))
+        .trim()
+        .to_string();
+    let raw = value.as_bytes();
+    let plausible = raw.len() >= 19
+        && [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18]
+            .iter()
+            .all(|index| raw.get(*index).is_some_and(u8::is_ascii_digit))
+        && raw.get(4) == Some(&b':')
+        && raw.get(7) == Some(&b':')
+        && raw.get(10) == Some(&b' ')
+        && raw.get(13) == Some(&b':')
+        && raw.get(16) == Some(&b':');
+    plausible.then_some(value)
+}
+
+fn exif_capture_time_from_tiff(bytes: &[u8]) -> Option<String> {
+    let endian = match bytes.get(0..2)? {
+        b"II" => TiffEndian::Little,
+        b"MM" => TiffEndian::Big,
+        _ => return None,
+    };
+    if tiff_u16(bytes, 2, endian)? != 42 {
+        return None;
+    }
+    let ifd0 = usize::try_from(tiff_u32(bytes, 4, endian)?).ok()?;
+    let original = tiff_ifd_entry(bytes, ifd0, 0x8769, endian)
+        .and_then(|(value_type, count, offset)| {
+            (value_type == 4 && count == 1)
+                .then(|| usize::try_from(tiff_u32(bytes, offset, endian)?).ok())?
+        })
+        .and_then(|exif_ifd| tiff_ascii_tag(bytes, exif_ifd, 0x9003, endian));
+    original.or_else(|| tiff_ascii_tag(bytes, ifd0, 0x0132, endian))
+}
+
+fn jpeg_capture_time(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.get(0..2)? != [0xff, 0xd8] {
+        return None;
+    }
+    let mut offset = 2_usize;
+    while offset + 4 <= bytes.len() {
+        if bytes[offset] != 0xff {
+            offset += 1;
+            continue;
+        }
+        let marker = bytes[offset + 1];
+        offset += 2;
+        if matches!(marker, 0xd8 | 0xd9) || (0xd0..=0xd7).contains(&marker) {
+            continue;
+        }
+        let length = usize::from(u16::from_be_bytes([
+            *bytes.get(offset)?,
+            *bytes.get(offset + 1)?,
+        ]));
+        if length < 2 || offset + length > bytes.len() {
+            return None;
+        }
+        let payload = &bytes[offset + 2..offset + length];
+        if marker == 0xe1 && payload.starts_with(b"Exif\0\0") {
+            return exif_capture_time_from_tiff(&payload[6..]);
+        }
+        if marker == 0xda {
+            break;
+        }
+        offset += length;
+    }
+    None
+}
+
+fn prepare_path(
+    path: &str,
+    allow_text: bool,
+    original_request_index: i64,
+) -> CoreResult<PreparedSource> {
     let path = PathBuf::from(path);
     if !path.is_file() {
         return Err(CoreError::Io(format!("文件不存在：{}", path.display())));
@@ -188,6 +359,10 @@ fn prepare_path(path: &str, allow_text: bool) -> CoreResult<PreparedSource> {
         .unwrap_or("未命名资料")
         .to_string();
     let expected_hash = hashing::sha256_file(&path)?;
+    let metadata = std::fs::metadata(&path).map_err(|error| io_error("读取文件时间失败", error))?;
+    let capture_time = (format == SourceFormat::Jpeg)
+        .then(|| jpeg_capture_time(&path))
+        .flatten();
     let pdf_pages = if format == SourceFormat::Pdf {
         split_pdf_pages(&path)?
     } else {
@@ -200,6 +375,10 @@ fn prepare_path(path: &str, allow_text: bool) -> CoreResult<PreparedSource> {
         bytes: None,
         expected_hash,
         pdf_pages,
+        original_request_index,
+        capture_time,
+        file_created_ms: system_time_ms(metadata.created()),
+        file_modified_ms: system_time_ms(metadata.modified()),
     })
 }
 
@@ -213,6 +392,10 @@ fn prepare_text(text: &str) -> CoreResult<PreparedSource> {
         expected_hash: hashing::sha256_hex(&bytes),
         bytes: Some(bytes),
         pdf_pages: Vec::new(),
+        original_request_index: 0,
+        capture_time: None,
+        file_created_ms: None,
+        file_modified_ms: None,
     })
 }
 
@@ -376,6 +559,14 @@ pub(crate) fn prepare_fixed_intake_files(
     if request.student_paths.is_empty() {
         return Err(CoreError::Invalid("请至少选择一份学生试卷".into()));
     }
+    if request.material_type.as_deref().is_some_and(|value| {
+        !matches!(
+            value,
+            "auto" | "ordinary_paper" | "answer_sheet" | "dictation"
+        )
+    }) {
+        return Err(CoreError::Invalid("材料类型非法".into()));
+    }
     if request
         .answer_path
         .as_deref()
@@ -389,10 +580,11 @@ pub(crate) fn prepare_fixed_intake_files(
     }
 
     // 所有外部文件先完成格式和 PDF 结构校验，避免发现坏文件前已写入部分批次事实。
-    let student_sources = request
+    let mut student_sources = request
         .student_paths
         .iter()
-        .map(|path| prepare_path(path, false))
+        .enumerate()
+        .map(|(index, path)| prepare_path(path, false, index as i64))
         .collect::<CoreResult<Vec<_>>>()?;
     let unique_student_hashes = student_sources
         .iter()
@@ -403,6 +595,48 @@ pub(crate) fn prepare_fixed_intake_files(
             "检测到内容完全相同的重复试卷，请移除重复文件".into(),
         ));
     }
+    student_sources.sort_by(|left, right| {
+        ordered_intake::natural_name_cmp(&left.original_name, &right.original_name).then_with(
+            || {
+                left.original_request_index
+                    .cmp(&right.original_request_index)
+            },
+        )
+    });
+    let mut order_conflict_codes = Vec::new();
+    if student_sources.windows(2).any(|pair| {
+        ordered_intake::natural_name_cmp(&pair[0].original_name, &pair[1].original_name)
+            == std::cmp::Ordering::Equal
+    }) {
+        order_conflict_codes.push("FILENAME_NATURAL_TIE".into());
+    }
+    let capture_times = student_sources
+        .iter()
+        .filter_map(|source| source.capture_time.as_deref())
+        .collect::<Vec<_>>();
+    let capture_conflict =
+        capture_times.len() >= 2 && capture_times.windows(2).any(|pair| pair[0] > pair[1]);
+    if capture_conflict {
+        order_conflict_codes.push("CAPTURE_TIME_ORDER_CONFLICT".into());
+    }
+    let file_times = student_sources
+        .iter()
+        .filter_map(|source| source.file_created_ms.or(source.file_modified_ms))
+        .collect::<Vec<_>>();
+    let file_time_conflict =
+        file_times.len() >= 2 && file_times.windows(2).any(|pair| pair[0] > pair[1]);
+    if file_time_conflict {
+        order_conflict_codes.push("FILE_TIME_ORDER_CONFLICT".into());
+    }
+    let order_confidence = if !order_conflict_codes.is_empty() {
+        0.6
+    } else if capture_times.len() >= 2 {
+        0.98
+    } else if file_times.len() >= 2 {
+        0.9
+    } else {
+        0.8
+    };
     let answer_source = match (
         request
             .answer_path
@@ -413,7 +647,7 @@ pub(crate) fn prepare_fixed_intake_files(
             .as_deref()
             .filter(|value| !value.trim().is_empty()),
     ) {
-        (Some(path), None) => Some(prepare_path(path, true)?),
+        (Some(path), None) => Some(prepare_path(path, true, 0)?),
         (None, Some(text)) => Some(prepare_text(text)?),
         (None, None) => None,
         (Some(_), Some(_)) => unreachable!("validated"),
@@ -421,6 +655,8 @@ pub(crate) fn prepare_fixed_intake_files(
     Ok(PreparedFixedIntake {
         student_sources,
         answer_source,
+        order_confidence,
+        order_conflict_codes,
     })
 }
 
@@ -445,6 +681,7 @@ pub(crate) fn persist_fixed_intake(
     let originals_dir = data_dir.join("archive/exam/originals");
     let pages_dir = data_dir.join("archive/exam/pages");
     let mut summaries = Vec::new();
+    let mut order_entries = Vec::new();
     let mut import_index = 0_i64;
 
     for (source_index, source) in student_sources.iter().enumerate() {
@@ -484,6 +721,16 @@ pub(crate) fn persist_fixed_intake(
                 created_by: ACTOR,
             },
         )?;
+        order_entries.push(ImportOrderEntry {
+            source_artifact_id: artifact.id,
+            original_name: source.original_name.clone(),
+            original_request_index: source.original_request_index,
+            sorted_index: source_index as i64,
+            page_count,
+            capture_time: source.capture_time.clone(),
+            file_created_ms: source.file_created_ms,
+            file_modified_ms: source.file_modified_ms,
+        });
 
         if source.format == SourceFormat::Pdf {
             for (page_index, bytes) in source.pdf_pages.iter().enumerate() {
@@ -527,7 +774,7 @@ pub(crate) fn persist_fixed_intake(
                         PrivacyClass::StudentSensitive,
                     )?
                 };
-                papers::register_ingest_page(
+                let page = papers::register_ingest_page(
                     conn,
                     &NewIngestPage {
                         batch_id: batch.id,
@@ -538,16 +785,47 @@ pub(crate) fn persist_fixed_intake(
                         ),
                     },
                 )?;
+                ordered_intake::record_page_type(
+                    conn,
+                    &NewPageTypeRevision {
+                        page_id: page.id,
+                        page_type_key: &format!("page_{}", page_index + 1),
+                        confidence: 1.0,
+                        evidence_json: r#"{"schema_version":1,"source":"pdf_page_index"}"#,
+                        decision: "suggested",
+                        created_by_type: "system",
+                        created_by: None,
+                        confirmed_by: None,
+                    },
+                )?;
                 import_index += 1;
             }
         } else {
-            papers::register_ingest_page(
+            let page = papers::register_ingest_page(
                 conn,
                 &NewIngestPage {
                     batch_id: batch.id,
                     source_artifact_id: artifact.id,
                     import_index,
                     expected_page_no: Some(import_index % request.expected_pages_per_attempt + 1),
+                },
+            )?;
+            let single_page = request.expected_pages_per_attempt == 1;
+            ordered_intake::record_page_type(
+                conn,
+                &NewPageTypeRevision {
+                    page_id: page.id,
+                    page_type_key: if single_page { "page_1" } else { "unknown" },
+                    confidence: if single_page { 1.0 } else { 0.0 },
+                    evidence_json: if single_page {
+                        r#"{"schema_version":1,"source":"single_page_contract"}"#
+                    } else {
+                        r#"{"schema_version":1,"source":"awaiting_visual_page_classifier"}"#
+                    },
+                    decision: if single_page { "suggested" } else { "unknown" },
+                    created_by_type: "system",
+                    created_by: None,
+                    confirmed_by: None,
                 },
             )?;
             import_index += 1;
@@ -604,6 +882,75 @@ pub(crate) fn persist_fixed_intake(
         answer_document_count = 1;
     }
 
+    let order_revision = ordered_intake::record_import_order(
+        conn,
+        &NewImportOrderRevision {
+            ingest_batch_id: batch.id,
+            sort_policy: "filename_natural_exif_filetime_crosscheck_v1",
+            order_confidence: prepared.order_confidence,
+            entries: &order_entries,
+            conflict_codes: &prepared.order_conflict_codes,
+            created_by_type: "system",
+            created_by: None,
+        },
+    )?;
+    let source_names = student_sources
+        .iter()
+        .map(|source| source.original_name.clone())
+        .collect::<Vec<_>>();
+    let explicit_material = request
+        .material_type
+        .as_deref()
+        .filter(|value| *value != "auto");
+    let material_revision = if let Some(material_type) = explicit_material {
+        ordered_intake::record_material_type(
+            conn,
+            &NewMaterialTypeRevision {
+                ingest_batch_id: batch.id,
+                material_type,
+                confidence: 1.0,
+                evidence_json: r#"{"schema_version":1,"source":"teacher_upload_choice"}"#,
+                decision: "teacher_confirmed",
+                created_by_type: "teacher",
+                created_by: Some(ACTOR),
+                confirmed_by: Some(ACTOR),
+            },
+        )?
+    } else {
+        let suggestion = ordered_intake::suggest_material_type(&source_names);
+        ordered_intake::record_material_type(
+            conn,
+            &NewMaterialTypeRevision {
+                ingest_batch_id: batch.id,
+                material_type: suggestion.material_type,
+                confidence: suggestion.confidence,
+                evidence_json: &serde_json::json!({
+                    "schema_version": 1,
+                    "source": "filename_heuristic",
+                    "rule": suggestion.rule
+                })
+                .to_string(),
+                decision: "suggested",
+                created_by_type: "system",
+                created_by: None,
+                confirmed_by: None,
+            },
+        )?
+    };
+    let grouping = ordered_intake::preview_ordered_grouping(
+        conn,
+        &OrderedGroupingInput {
+            ingest_batch_id: batch.id,
+            expected_pages_per_attempt: request.expected_pages_per_attempt,
+            created_by_type: "system",
+            created_by: None,
+        },
+    )?;
+    let order_conflict_codes =
+        ordered_intake::parse_codes(&order_revision.conflict_codes_json, "导入顺序冲突")?;
+    let grouping_issue_codes =
+        ordered_intake::parse_codes(&grouping.issue_codes_json, "连续拍摄分组原因")?;
+
     let preflight = fixed_paper::preflight_fixed_paper_batch(
         conn,
         &FixedPaperPreflightInput {
@@ -614,6 +961,17 @@ pub(crate) fn persist_fixed_intake(
         },
     )?;
     let reason_codes = parse_reason_codes(&preflight)?;
+    let material_type_needs_confirmation =
+        material_revision.decision != "teacher_confirmed" && material_revision.confidence < 0.85;
+    let next_action = if material_type_needs_confirmation {
+        "确认一次资料类型：普通试卷、答题卡或默写"
+    } else if grouping.route == "blocked" {
+        "先处理缺页、重复页或页型周期异常，后续学生不能自动顺移"
+    } else if grouping.route == "review_required" {
+        "确认本批学生范围、缺交学生或多页页型周期"
+    } else {
+        next_action(&preflight.route)
+    };
     Ok(FixedIntakeResult {
         batch_id: batch.id,
         batch_public_id: batch.public_id,
@@ -628,7 +986,72 @@ pub(crate) fn persist_fixed_intake(
         blocked_count: preflight.blocked_count,
         completed_count: preflight.completed_count,
         reason_codes,
-        next_action: next_action(&preflight.route).into(),
+        order_policy: order_revision.sort_policy,
+        order_confidence: order_revision.order_confidence,
+        order_conflict_codes,
+        material_type: material_revision.material_type,
+        material_type_decision: material_revision.decision,
+        material_type_confidence: material_revision.confidence,
+        material_type_needs_confirmation,
+        grouping_route: grouping.route,
+        student_group_count: grouping.student_group_count,
+        grouping_issue_codes,
+        next_action: next_action.into(),
+    })
+}
+
+pub(crate) fn confirm_intake_material_type(
+    conn: &Connection,
+    batch_id: i64,
+    material_type: &str,
+) -> CoreResult<MaterialTypeConfirmationResult> {
+    if !matches!(
+        material_type,
+        "ordinary_paper" | "answer_sheet" | "dictation"
+    ) {
+        return Err(CoreError::Invalid("请选择普通试卷、答题卡或默写".into()));
+    }
+    let expected_pages: i64 = conn
+        .query_row(
+            "SELECT expected_pages_per_attempt
+             FROM exam_ordered_grouping_revisions_v2
+             WHERE ingest_batch_id=?1 AND state='active'",
+            [batch_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| CoreError::NotFound("本批连续拍摄分组快照".into()))?;
+    let material = ordered_intake::confirm_material_type(conn, batch_id, material_type, ACTOR)?;
+    let grouping = ordered_intake::preview_ordered_grouping(
+        conn,
+        &OrderedGroupingInput {
+            ingest_batch_id: batch_id,
+            expected_pages_per_attempt: expected_pages,
+            created_by_type: "teacher",
+            created_by: Some(ACTOR),
+        },
+    )?;
+    let grouping_issue_codes =
+        ordered_intake::parse_codes(&grouping.issue_codes_json, "连续拍摄分组原因")?;
+    let next_action = if grouping.route == "blocked" {
+        "先处理缺页、重复页或页型周期异常，后续学生不能自动顺移"
+    } else if grouping.route == "review_required" {
+        "资料类型已确认；继续确认本批学生范围、缺交学生或多页页型周期"
+    } else {
+        match material_type {
+            "answer_sheet" => "已进入答题卡识别路线，等待定位客观题涂写区",
+            "dictation" => "已进入默写识别路线，等待按空位对照答案并复核专名",
+            _ => "已进入普通试卷路线，等待识别题目与学生答案区域",
+        }
+    };
+    Ok(MaterialTypeConfirmationResult {
+        material_type: material.material_type,
+        material_type_decision: material.decision,
+        material_type_confidence: material.confidence,
+        grouping_route: grouping.route,
+        student_group_count: grouping.student_group_count,
+        grouping_issue_codes,
+        next_action: next_action.into(),
     })
 }
 
@@ -704,6 +1127,31 @@ mod tests {
     }
 
     #[test]
+    fn exif_datetime_original_is_read_without_trusting_filename() {
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(b"II");
+        tiff.extend_from_slice(&42_u16.to_le_bytes());
+        tiff.extend_from_slice(&8_u32.to_le_bytes());
+        tiff.extend_from_slice(&1_u16.to_le_bytes());
+        tiff.extend_from_slice(&0x8769_u16.to_le_bytes());
+        tiff.extend_from_slice(&4_u16.to_le_bytes());
+        tiff.extend_from_slice(&1_u32.to_le_bytes());
+        tiff.extend_from_slice(&26_u32.to_le_bytes());
+        tiff.extend_from_slice(&0_u32.to_le_bytes());
+        tiff.extend_from_slice(&1_u16.to_le_bytes());
+        tiff.extend_from_slice(&0x9003_u16.to_le_bytes());
+        tiff.extend_from_slice(&2_u16.to_le_bytes());
+        tiff.extend_from_slice(&20_u32.to_le_bytes());
+        tiff.extend_from_slice(&44_u32.to_le_bytes());
+        tiff.extend_from_slice(&0_u32.to_le_bytes());
+        tiff.extend_from_slice(b"2026:07:15 02:25:00\0");
+        assert_eq!(
+            exif_capture_time_from_tiff(&tiff).as_deref(),
+            Some("2026:07:15 02:25:00")
+        );
+    }
+
+    #[test]
     fn options_only_include_confirmed_objective_assessments() {
         let conn = seed();
         let options = list_options(&conn).unwrap();
@@ -724,6 +1172,7 @@ mod tests {
             answer_path: None,
             answer_text: Some("1. 正确".into()),
             expected_pages_per_attempt: 1,
+            material_type: None,
             idempotency_key: "jpeg-intake".into(),
         };
         let result = prepare_fixed_intake(&conn, &root, &request).unwrap();
@@ -763,6 +1212,7 @@ mod tests {
             answer_path: None,
             answer_text: None,
             expected_pages_per_attempt: 1,
+            material_type: None,
             idempotency_key: "same-intake".into(),
         };
         let first = prepare_fixed_intake(&conn, &root, &request).unwrap();
@@ -773,6 +1223,10 @@ mod tests {
             "exam_fixed_input_documents_v2",
             "exam_ingest_pages_v2",
             "exam_fixed_preflight_revisions_v2",
+            "exam_import_order_revisions_v2",
+            "exam_material_type_revisions_v2",
+            "exam_page_type_revisions_v2",
+            "exam_ordered_grouping_revisions_v2",
         ] {
             let count: i64 = conn
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -781,6 +1235,88 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 1, "{table}");
         }
+    }
+
+    #[test]
+    fn photo_files_are_persisted_in_natural_filename_order_with_order_snapshot() {
+        let root = test_root("natural-order");
+        let ten = root.join("IMG_10.jpg");
+        let two = root.join("IMG_2.jpg");
+        let one = root.join("IMG_1.jpg");
+        write_jpeg(&ten, b"paper-ten");
+        write_jpeg(&two, b"paper-two");
+        write_jpeg(&one, b"paper-one");
+        let conn = seed();
+        let request = FixedIntakeRequest {
+            assessment_version_id: 1,
+            student_paths: vec![
+                ten.to_string_lossy().into_owned(),
+                two.to_string_lossy().into_owned(),
+                one.to_string_lossy().into_owned(),
+            ],
+            answer_path: None,
+            answer_text: None,
+            expected_pages_per_attempt: 1,
+            material_type: Some("ordinary_paper".into()),
+            idempotency_key: "natural-order-intake".into(),
+        };
+        let result = prepare_fixed_intake(&conn, &root, &request).unwrap();
+        let names = result
+            .documents
+            .iter()
+            .filter(|document| document.role == "student_work")
+            .map(|document| document.original_name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["IMG_1.jpg", "IMG_2.jpg", "IMG_10.jpg"]);
+        assert_eq!(
+            result.order_policy,
+            "filename_natural_exif_filetime_crosscheck_v1"
+        );
+        assert_eq!(result.material_type_decision, "teacher_confirmed");
+        let snapshot: String = conn
+            .query_row(
+                "SELECT ordered_sources_json FROM exam_import_order_revisions_v2
+                 WHERE state='active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        assert_eq!(value["entries"][0]["original_request_index"], 2);
+        assert_eq!(value["entries"][2]["original_request_index"], 0);
+    }
+
+    #[test]
+    fn low_confidence_material_type_is_confirmed_once_with_new_revision() {
+        let root = test_root("material-confirm");
+        let student = root.join("IMG_1.jpg");
+        write_jpeg(&student, b"paper-material-confirm");
+        let conn = seed();
+        let request = FixedIntakeRequest {
+            assessment_version_id: 1,
+            student_paths: vec![student.to_string_lossy().into_owned()],
+            answer_path: None,
+            answer_text: None,
+            expected_pages_per_attempt: 1,
+            material_type: Some("auto".into()),
+            idempotency_key: "material-confirm-intake".into(),
+        };
+        let result = prepare_fixed_intake(&conn, &root, &request).unwrap();
+        assert!(result.material_type_needs_confirmation);
+        let confirmed =
+            confirm_intake_material_type(&conn, result.batch_id, "dictation").unwrap();
+        assert_eq!(confirmed.material_type, "dictation");
+        assert_eq!(confirmed.material_type_decision, "teacher_confirmed");
+        let rows: Vec<(i64, String)> = conn
+            .prepare(
+                "SELECT revision,state FROM exam_material_type_revisions_v2 ORDER BY revision",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows, vec![(1, "superseded".into()), (2, "active".into())]);
     }
 
     #[cfg(target_os = "macos")]
@@ -796,6 +1332,7 @@ mod tests {
             answer_path: None,
             answer_text: None,
             expected_pages_per_attempt: 2,
+            material_type: None,
             idempotency_key: "pdf-intake".into(),
         };
         let first = prepare_fixed_intake(&conn, &root, &request).unwrap();
@@ -835,6 +1372,7 @@ mod tests {
             answer_path: None,
             answer_text: None,
             expected_pages_per_attempt: 1,
+            material_type: None,
             idempotency_key: "duplicate-intake".into(),
         };
         let error = prepare_fixed_intake(&conn, &root, &request)
@@ -861,6 +1399,7 @@ mod tests {
             answer_path: None,
             answer_text: None,
             expected_pages_per_attempt: 1,
+            material_type: None,
             idempotency_key: "invalid-intake".into(),
         };
         assert!(prepare_fixed_intake(&conn, &root, &request).is_err());

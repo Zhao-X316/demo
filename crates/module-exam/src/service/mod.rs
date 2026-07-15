@@ -4,5 +4,6 @@ pub mod assessment;
 pub mod fixed_paper;
 pub mod grading;
 pub mod objective;
+pub mod ordered_intake;
 pub mod papers;
 pub mod question_ingest;

@@ -16,7 +16,10 @@ use module_exam::service::objective::{
 };
 use module_exam::vlm::{self as exam_vlm, AnalyzedQuestion};
 
-use crate::exam_intake::{self, FixedIntakeOption, FixedIntakeRequest, FixedIntakeResult};
+use crate::exam_intake::{
+    self, FixedIntakeOption, FixedIntakeRequest, FixedIntakeResult,
+    MaterialTypeConfirmationResult,
+};
 use crate::objective_provider::ArkObjectiveRecognizer;
 use crate::objective_run::{self, BeginObjectiveRun};
 use crate::secrets;
@@ -305,6 +308,16 @@ pub fn exam_fixed_intake_prepare(
     let prepared = exam_intake::prepare_fixed_intake_files(&request).map_err(e)?;
     let conn = lock(&state)?;
     exam_intake::persist_fixed_intake(&conn, &state.data_dir, &request, &prepared).map_err(e)
+}
+
+#[tauri::command]
+pub fn exam_fixed_intake_confirm_material_type(
+    state: State<'_, AppState>,
+    batch_id: i64,
+    material_type: String,
+) -> R<MaterialTypeConfirmationResult> {
+    let conn = lock(&state)?;
+    exam_intake::confirm_intake_material_type(&conn, batch_id, &material_type).map_err(e)
 }
 
 /// 对一条已完成老师确认、且已有明确答题格坐标的客观题区域执行真实视觉识别。

@@ -14,6 +14,7 @@ import {
   examAnswerSuggest,
   examAnswersList,
   examFixedIntakeOptions,
+  examFixedIntakeConfirmMaterialType,
   examFixedIntakePrepare,
   examObjectiveAccept,
   examObjectiveCorrect,
@@ -80,6 +81,23 @@ const INTAKE_REASON_LABEL: Record<string, string> = {
   OBJECTIVE_RESULT_REVIEW_REQUIRED: "识别结果需要老师复核",
   ANSWER_VERSION_DRIFT: "识别使用的答案版本已变化",
   REVIEW_INPUT_PRESENT: "本批存在需复核资料",
+  DUPLICATE_PAGE_ARTIFACT: "检测到重复页面",
+  STUDENT_GROUP_EXCEEDS_ROSTER: "照片组数超过班级人数",
+  STUDENT_RANGE_OR_ABSENCE_CONFIRMATION_REQUIRED: "需确认本批学号范围或缺交学生",
+  MATERIAL_TYPE_CONFIRMATION_REQUIRED: "需确认普通试卷、答题卡或默写",
+  PAGE_TYPE_CYCLE_UNVERIFIED: "多页卷需要确认页面周期",
+  PAGE_TYPE_CYCLE_MISMATCH: "页面周期中疑似缺页或错序",
+  ORDER_EVIDENCE_CONFLICT: "文件名顺序与拍摄时间存在分歧",
+  CAPTURE_TIME_ORDER_CONFLICT: "拍摄时间与文件名顺序冲突",
+  FILE_TIME_ORDER_CONFLICT: "文件时间与文件名顺序冲突",
+  FILENAME_NATURAL_TIE: "存在无法单靠文件名区分的照片",
+};
+
+const MATERIAL_TYPE_LABEL: Record<string, string> = {
+  ordinary_paper: "普通试卷",
+  answer_sheet: "答题卡",
+  dictation: "默写",
+  unknown: "待确认",
 };
 
 const STUDENT_FILE_EXTENSIONS = ["jpg", "jpeg", "pdf"];
@@ -236,6 +254,7 @@ function FixedIntakeTab({
   const [answerText, setAnswerText] = useState("");
   const [expectedPages, setExpectedPages] = useState("1");
   const [busy, setBusy] = useState(false);
+  const [confirmingType, setConfirmingType] = useState(false);
   const [result, setResult] = useState<FixedIntakeResult | null>(null);
   const [requestKey, setRequestKey] = useState("");
 
@@ -313,6 +332,7 @@ function FixedIntakeTab({
         answerPath,
         answerText: answerText.trim() || null,
         expectedPagesPerAttempt: pageCount,
+        materialType: "auto",
         idempotencyKey: currentKey,
       });
       setResult(prepared);
@@ -321,6 +341,25 @@ function FixedIntakeTab({
       onError(String(err));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const confirmMaterialType = async (
+    materialType: "ordinary_paper" | "answer_sheet" | "dictation",
+  ) => {
+    if (!result) return;
+    setConfirmingType(true);
+    try {
+      const confirmed = await examFixedIntakeConfirmMaterialType(result.batchId, materialType);
+      setResult({
+        ...result,
+        ...confirmed,
+        materialTypeNeedsConfirmation: false,
+      });
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setConfirmingType(false);
     }
   };
 
@@ -451,7 +490,20 @@ function FixedIntakeTab({
             <div className="intake-import-summary">
               <b>已归档 {result.studentDocumentCount} 份学生卷，共 {result.studentPageCount} 页</b>
               <span>{result.answerDocumentCount ? "答案资料已归档，等待识别或确认" : "沿用作业已确认答案"}</span>
+              <span>已按文件名自然顺序整理，并用拍摄/文件时间交叉核对 · 顺序可信度 {Math.round(result.orderConfidence * 100)}%</span>
+              <span>资料类型：{MATERIAL_TYPE_LABEL[result.materialType] || result.materialType} · 预计 {result.studentGroupCount} 名学生</span>
             </div>
+            {result.materialTypeNeedsConfirmation && (
+              <div className="intake-material-confirm">
+                <b>只确认一次，这批是什么？</b>
+                <span>系统无法仅凭文件名可靠区分，不会直接进入错误识别路线。</span>
+                <div>
+                  <button disabled={confirmingType} onClick={() => confirmMaterialType("ordinary_paper")}>普通试卷</button>
+                  <button disabled={confirmingType} onClick={() => confirmMaterialType("answer_sheet")}>答题卡</button>
+                  <button disabled={confirmingType} onClick={() => confirmMaterialType("dictation")}>默写</button>
+                </div>
+              </div>
+            )}
             <div className="intake-route-grid">
               <div className={result.route === "ready_for_batch_confirm" ? "active ready" : ""}>
                 <span>可批量确认</span>
@@ -473,10 +525,18 @@ function FixedIntakeTab({
                 ))}
               </div>
             )}
+            {(result.orderConflictCodes.length > 0 || result.groupingIssueCodes.length > 0) && (
+              <div className="intake-reasons">
+                {[...result.orderConflictCodes, ...result.groupingIssueCodes]
+                  .filter((code, index, all) => all.indexOf(code) === index)
+                  .slice(0, 4)
+                  .map((code) => <span key={code}>{INTAKE_REASON_LABEL[code] || code}</span>)}
+              </div>
+            )}
             <div className="intake-next">
               <span>下一步</span>
               <b>{result.nextAction}</b>
-              <button disabled={result.route === "blocked"} onClick={onOpenReview}>进入标准卷终审</button>
+              <button disabled={result.route === "blocked" || result.groupingRoute === "blocked" || result.materialTypeNeedsConfirmation} onClick={onOpenReview}>进入批改终审</button>
             </div>
           </>
         )}

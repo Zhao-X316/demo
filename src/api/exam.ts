@@ -181,6 +181,7 @@ export interface FixedIntakeRequest {
   answerPath: string | null;
   answerText: string | null;
   expectedPagesPerAttempt: number;
+  materialType?: "auto" | "ordinary_paper" | "answer_sheet" | "dictation";
   idempotencyKey: string;
 }
 
@@ -205,6 +206,26 @@ export interface FixedIntakeResult {
   blockedCount: number;
   completedCount: number;
   reasonCodes: string[];
+  orderPolicy: string;
+  orderConfidence: number;
+  orderConflictCodes: string[];
+  materialType: "ordinary_paper" | "answer_sheet" | "dictation" | "unknown";
+  materialTypeDecision: "suggested" | "teacher_confirmed" | "rejected";
+  materialTypeConfidence: number;
+  materialTypeNeedsConfirmation: boolean;
+  groupingRoute: "preview_ready" | "review_required" | "blocked";
+  studentGroupCount: number;
+  groupingIssueCodes: string[];
+  nextAction: string;
+}
+
+export interface MaterialTypeConfirmationResult {
+  materialType: "ordinary_paper" | "answer_sheet" | "dictation";
+  materialTypeDecision: "teacher_confirmed";
+  materialTypeConfidence: number;
+  groupingRoute: "preview_ready" | "review_required" | "blocked";
+  studentGroupCount: number;
+  groupingIssueCodes: string[];
   nextAction: string;
 }
 
@@ -270,3 +291,11 @@ export const examFixedIntakeOptions = () =>
 
 export const examFixedIntakePrepare = (request: FixedIntakeRequest) =>
   call<FixedIntakeResult>("exam_fixed_intake_prepare", { request });
+
+export const examFixedIntakeConfirmMaterialType = (
+  batch_id: number,
+  material_type: "ordinary_paper" | "answer_sheet" | "dictation",
+) => call<MaterialTypeConfirmationResult>("exam_fixed_intake_confirm_material_type", {
+  batchId: batch_id,
+  materialType: material_type,
+});
