@@ -297,6 +297,35 @@ export interface GroupingRetakeResult {
   nextAction: string;
 }
 
+export interface OrdinaryPaperRunResult {
+  ai_run_id: number;
+  status: "succeeded" | "failed";
+  output: {
+    schema_version: number;
+    page_id: number;
+    expected_page_no: number;
+    state: "ready" | "needs_review" | "blocked";
+    quality: {
+      result: "pass" | "needs_review" | "reject";
+      issue_codes: string[];
+    };
+    alignment: { confidence: number } | null;
+    regions: Array<{
+      assessment_item_id: number;
+      region_index: number;
+      mapping_confidence: number;
+      mark_cells: Array<{ label: string }>;
+    }>;
+    confidence: number;
+    issue_codes: string[];
+  } | null;
+  failure: {
+    code: string;
+    safe_message: string;
+    retryable: boolean;
+  } | null;
+}
+
 export const kpList = () => call<KnowledgePoint[]>("kp_list");
 export const kpCreate = (name: string, code: string | null, parent_id: number | null) =>
   call<KnowledgePoint>("kp_create", { subjectId: null, parentId: parent_id, code, name });
@@ -402,4 +431,12 @@ export const examFixedIntakeReplaceRejectedPage = (
   batchId: batch_id,
   rejectedPageId: rejected_page_id,
   replacementPath: replacement_path,
+});
+
+export const examOrdinaryPaperAnalyzePage = (
+  page_id: number,
+  idempotency_key: string,
+) => call<OrdinaryPaperRunResult>("exam_ordinary_paper_analyze_page", {
+  pageId: page_id,
+  idempotencyKey: idempotency_key,
 });

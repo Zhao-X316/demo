@@ -6,6 +6,7 @@ import {
   FixedIntakeOption,
   FixedIntakeResult,
   GroupedPageEvidence,
+  OrdinaryPaperRunResult,
   PageCycleSuggestion,
   KnowledgePoint,
   ObjectiveWorkbench,
@@ -23,6 +24,7 @@ import {
   examFixedIntakeConfirmMaterialType,
   examFixedIntakePrepare,
   examFixedIntakeReplaceRejectedPage,
+  examOrdinaryPaperAnalyzePage,
   examObjectiveAccept,
   examObjectiveCorrect,
   examObjectivePublishAttempt,
@@ -269,6 +271,8 @@ function FixedIntakeTab({
   const [loadingEvidence, setLoadingEvidence] = useState(false);
   const [confirmingQuality, setConfirmingQuality] = useState(false);
   const [retakingPageId, setRetakingPageId] = useState<number | null>(null);
+  const [ordinaryPaperRuns, setOrdinaryPaperRuns] = useState<Record<number, OrdinaryPaperRunResult>>({});
+  const [analyzingPageIds, setAnalyzingPageIds] = useState<number[]>([]);
   const [groupingStartNo, setGroupingStartNo] = useState("");
   const [absentStudentNos, setAbsentStudentNos] = useState<string[]>([]);
   const [result, setResult] = useState<FixedIntakeResult | null>(null);
@@ -293,6 +297,8 @@ function FixedIntakeTab({
     setAbsentStudentNos([]);
     setGroupingEvidence([]);
     setRejectedPageIds([]);
+    setOrdinaryPaperRuns({});
+    setAnalyzingPageIds([]);
   };
 
   const pickStudentPapers = async () => {
@@ -312,6 +318,8 @@ function FixedIntakeTab({
       setAbsentStudentNos([]);
       setGroupingEvidence([]);
       setRejectedPageIds([]);
+      setOrdinaryPaperRuns({});
+      setAnalyzingPageIds([]);
       const inferred = await examFixedIntakeInferPageCycle(paths);
       setPageCycle(inferred);
       setExpectedPages(String(inferred.expectedPagesPerAttempt));
@@ -390,6 +398,8 @@ function FixedIntakeTab({
       setResult({ ...result, ...confirmed });
       setGroupingEvidence([]);
       setRejectedPageIds([]);
+      setOrdinaryPaperRuns({});
+      setAnalyzingPageIds([]);
     } catch (err) {
       onError(String(err));
     } finally {
@@ -434,7 +444,11 @@ function FixedIntakeTab({
         rejectedPageIds,
       );
       setResult({ ...result, ...confirmed });
-      setGroupingEvidence(await examFixedIntakeGroupingEvidence(result.batchId));
+      const evidence = await examFixedIntakeGroupingEvidence(result.batchId);
+      setGroupingEvidence(evidence);
+      if (result.materialType === "ordinary_paper") {
+        void analyzeOrdinaryPages(evidence);
+      }
     } catch (err) {
       onError(String(err));
     } finally {
@@ -455,7 +469,11 @@ function FixedIntakeTab({
         rejectedGroupCount: replaced.rejectedGroupCount,
         nextAction: replaced.nextAction,
       });
-      setGroupingEvidence(await examFixedIntakeGroupingEvidence(result.batchId));
+      const evidence = await examFixedIntakeGroupingEvidence(result.batchId);
+      setGroupingEvidence(evidence);
+      if (result.materialType === "ordinary_paper" && replaced.activatedStudent) {
+        void analyzeOrdinaryPages(evidence);
+      }
     } catch (err) {
       onError(`替换重拍页失败：${String(err)}`);
     } finally {
@@ -488,6 +506,39 @@ function FixedIntakeTab({
     }
   };
 
+  async function analyzeOrdinaryPages(
+    evidence: GroupedPageEvidence[] = groupingEvidence,
+    retryFailed = false,
+  ) {
+    const pages = evidence.flatMap((group) => group.pages).filter((page) =>
+      page.qualityResult === "pass"
+      && page.matchDecision === "teacher_confirmed"
+      && (retryFailed ? ordinaryPaperRuns[page.pageId]?.status === "failed" : !ordinaryPaperRuns[page.pageId]),
+    );
+    if (!pages.length) return;
+    setAnalyzingPageIds((current) => Array.from(new Set([
+      ...current,
+      ...pages.map((page) => page.pageId),
+    ])));
+    const failures: string[] = [];
+    for (const page of pages) {
+      const key = retryFailed
+        ? `ordinary-paper:${page.pageId}:retry:${crypto.randomUUID()}`
+        : `ordinary-paper:${page.pageId}:structure:v1`;
+      try {
+        const run = await examOrdinaryPaperAnalyzePage(page.pageId, key);
+        setOrdinaryPaperRuns((current) => ({ ...current, [page.pageId]: run }));
+      } catch (err) {
+        failures.push(`第${page.pageNo}页：${String(err)}`);
+      } finally {
+        setAnalyzingPageIds((current) => current.filter((value) => value !== page.pageId));
+      }
+    }
+    if (failures.length) {
+      onError(`有 ${failures.length} 页未能启动普通卷分析；其余页面已继续处理。${failures[0]}`);
+    }
+  }
+
   if (!options.length) {
     return (
       <div className="exam-card objective-empty">
@@ -508,6 +559,19 @@ function FixedIntakeTab({
   const groupingAbsenceCandidates = groupingStartIndex >= 0
     ? result?.groupingRoster.slice(groupingStartIndex + 1) ?? []
     : [];
+  const ordinaryEligiblePageCount = groupingEvidence.flatMap((group) => group.pages).filter((page) =>
+    page.qualityResult === "pass" && page.matchDecision === "teacher_confirmed"
+  ).length;
+  const ordinaryRunValues = Object.values(ordinaryPaperRuns);
+  const ordinaryReadyCount = ordinaryRunValues.filter((run) => run.output?.state === "ready").length;
+  const ordinaryReviewCount = ordinaryRunValues.filter((run) => run.output?.state === "needs_review").length;
+  const ordinaryBlockedCount = ordinaryRunValues.filter((run) =>
+    run.status === "failed" || run.output?.state === "blocked"
+  ).length;
+  const ordinaryPendingCount = Math.max(
+    0,
+    ordinaryEligiblePageCount - ordinaryRunValues.length,
+  );
 
   return (
     <div className="intake-layout">
@@ -774,6 +838,42 @@ function FixedIntakeTab({
                     )}
                   </div>
                 )}
+              </div>
+            )}
+            {result.qualityReviewCompleted && result.materialType === "ordinary_paper" && (
+              <div className="intake-analysis-card">
+                <div className="intake-quality-head">
+                  <div>
+                    <b>普通试卷正在自动识别</b>
+                    <span>逐页检查版面、配准和题区；有分歧的页面留给老师，不会在这里自动计分。</span>
+                  </div>
+                  <strong>{analyzingPageIds.length ? `正在处理 ${analyzingPageIds.length} 页` : `已处理 ${ordinaryRunValues.length}/${ordinaryEligiblePageCount} 页`}</strong>
+                </div>
+                <div className="intake-analysis-summary">
+                  <span className="ready">可继续 {ordinaryReadyCount}</span>
+                  <span className="review">需复核 {ordinaryReviewCount}</span>
+                  <span className="blocked">受阻 {ordinaryBlockedCount}</span>
+                  <span>待处理 {ordinaryPendingCount}</span>
+                </div>
+                {ordinaryRunValues.some((run) => run.failure) && (
+                  <div className="intake-analysis-issues">
+                    {ordinaryRunValues.filter((run) => run.failure).slice(0, 3).map((run) => (
+                      <span key={run.ai_run_id}>{run.failure?.safe_message}</span>
+                    ))}
+                  </div>
+                )}
+                <div className="intake-analysis-actions">
+                  {ordinaryPendingCount > 0 && (
+                    <button disabled={analyzingPageIds.length > 0} onClick={() => void analyzeOrdinaryPages()}>
+                      {analyzingPageIds.length ? "正在自动识别…" : `继续识别 ${ordinaryPendingCount} 页`}
+                    </button>
+                  )}
+                  {ordinaryRunValues.some((run) => run.status === "failed" && run.failure?.retryable) && (
+                    <button className="secondary" disabled={analyzingPageIds.length > 0} onClick={() => void analyzeOrdinaryPages(groupingEvidence, true)}>
+                      重试可恢复页面
+                    </button>
+                  )}
+                </div>
               </div>
             )}
             <div className="intake-route-grid">
