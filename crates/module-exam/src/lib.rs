@@ -70,6 +70,10 @@ static MIGRATIONS: &[Migration] = &[
         id: "exam_0014",
         sql: include_str!("../migrations/0014_answer_sheet_templates.sql"),
     },
+    Migration {
+        id: "exam_0015",
+        sql: include_str!("../migrations/0015_answer_sheet_page_materialization.sql"),
+    },
 ];
 
 /// 模块迁移（供外壳/测试在 core 迁移之后运行）。

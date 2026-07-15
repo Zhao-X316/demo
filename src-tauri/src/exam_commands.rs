@@ -21,6 +21,7 @@ use module_exam::service::objective::{
 use module_exam::service::ordinary_structure::OrdinaryStructureConfirmationResult;
 use module_exam::vlm::{self as exam_vlm, AnalyzedQuestion};
 
+use crate::answer_sheet_materialization::{self, AnswerSheetPageProcessingResult};
 use crate::exam_intake::{
     self, FixedIntakeOption, FixedIntakeRequest, FixedIntakeResult, GroupingConfirmationResult,
     GroupingQualityConfirmationResult, GroupingRetakeResult, MaterialTypeConfirmationResult,
@@ -499,6 +500,25 @@ pub fn exam_ordinary_paper_confirm_page_structure(
         &state.data_dir,
         page_id,
         ai_run_id,
+        LOCAL_TEACHER_ACTOR,
+    )
+    .map_err(e)
+}
+
+/// 老师把当前 active 固定答题卡模板应用到一张已确认学生页面。
+///
+/// 本地完成四角校正、题区裁剪与像素差分 OMR；清晰结果和异常都只进入客观题建议，
+/// 不自动确认分数，也不自动发布成绩。
+#[tauri::command]
+pub fn exam_answer_sheet_process_page(
+    state: State<'_, AppState>,
+    page_id: i64,
+) -> R<AnswerSheetPageProcessingResult> {
+    let conn = lock(&state)?;
+    answer_sheet_materialization::process_page(
+        &conn,
+        &state.data_dir,
+        page_id,
         LOCAL_TEACHER_ACTOR,
     )
     .map_err(e)

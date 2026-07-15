@@ -348,6 +348,38 @@ export interface OrdinaryStructureConfirmationResult {
   }>;
 }
 
+export interface AnswerSheetPageProcessingResult {
+  structure: {
+    materialization: {
+      id: number;
+      page_id: number;
+      template_revision_id: number;
+      alignment_revision_id: number;
+      region_revision_ids: number[];
+    };
+    regions: Array<{
+      id: number;
+      assessment_item_id: number;
+      region_index: number;
+      decision: "teacher_confirmed";
+    }>;
+  };
+  observations: Array<{
+    observation: {
+      id: number;
+      answer_region_revision_id: number;
+      result_state: "recognized" | "blank" | "altered" | "low_confidence" | "failed";
+      confidence: number | null;
+    };
+    suggestion: {
+      id: number;
+      outcome: "correct" | "incorrect" | "unscored";
+      batch_eligible: boolean;
+      exclusion_reason: string | null;
+    };
+  }>;
+}
+
 export const kpList = () => call<KnowledgePoint[]>("kp_list");
 export const kpCreate = (name: string, code: string | null, parent_id: number | null) =>
   call<KnowledgePoint>("kp_create", { subjectId: null, parentId: parent_id, code, name });
@@ -470,3 +502,8 @@ export const examOrdinaryPaperConfirmPageStructure = (
   "exam_ordinary_paper_confirm_page_structure",
   { pageId: page_id, aiRunId: ai_run_id },
 );
+
+export const examAnswerSheetProcessPage = (page_id: number) =>
+  call<AnswerSheetPageProcessingResult>("exam_answer_sheet_process_page", {
+    pageId: page_id,
+  });

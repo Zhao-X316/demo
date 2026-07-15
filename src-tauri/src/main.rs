@@ -3,6 +3,7 @@
 
 mod asr;
 mod archive;
+mod answer_sheet_materialization;
 mod audio;
 mod backup;
 mod commands;
@@ -108,6 +109,7 @@ fn main() {
             exam_commands::exam_objective_recognize_region,
             exam_commands::exam_ordinary_paper_analyze_page,
             exam_commands::exam_ordinary_paper_confirm_page_structure,
+            exam_commands::exam_answer_sheet_process_page,
         ])
         .run(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");

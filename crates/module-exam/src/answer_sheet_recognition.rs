@@ -211,6 +211,26 @@ pub struct AnswerSheetAlignmentResult {
     pub aligned_jpeg: Vec<u8>,
 }
 
+/// 空白答题卡必须就是模板定义的标准画布，避免本地像素差分在隐式缩放后错位。
+pub fn validate_blank_template_canvas(
+    definition: &AnswerSheetTemplateDefinition,
+    blank_image_bytes: &[u8],
+) -> CoreResult<()> {
+    definition.validate()?;
+    let blank = image::load_from_memory(blank_image_bytes)
+        .map_err(|error| CoreError::Parse(format!("答题卡空白模板无法解码：{error}")))?;
+    if blank.width() != definition.canvas_width || blank.height() != definition.canvas_height {
+        return Err(CoreError::Invalid(format!(
+            "答题卡空白模板尺寸应为 {}x{}，当前为 {}x{}",
+            definition.canvas_width,
+            definition.canvas_height,
+            blank.width(),
+            blank.height()
+        )));
+    }
+    Ok(())
+}
+
 /// 使用固定四角锚点把拍照答题卡校正到模板画布。
 ///
 /// 这里不猜题号或答案；锚点不足、顺序翻转或页面裁切都会直接失败，避免把正确涂点
@@ -478,6 +498,7 @@ fn bilinear_sample(image: &RgbImage, x: f64, y: f64) -> Option<Rgb<u8>> {
 /// 在页面配准和题区裁剪完成后，对单题裁剪做本地模板差分。
 pub struct LocalAnswerSheetOmr {
     blank_crop_bytes: Vec<u8>,
+    blank_crop_hash: String,
     policy: LocalOmrPolicy,
 }
 
@@ -490,8 +511,10 @@ impl LocalAnswerSheetOmr {
         decode_gray(&blank_crop_bytes).map_err(|failure| {
             CoreError::Invalid(format!("答题卡空白模板不可解码：{}", failure.safe_message))
         })?;
+        let blank_crop_hash = hashing::sha256_hex(&blank_crop_bytes);
         Ok(Self {
             blank_crop_bytes,
+            blank_crop_hash,
             policy,
         })
     }
@@ -504,7 +527,8 @@ impl ObjectiveRecognizer for LocalAnswerSheetOmr {
             model_name: "answer-sheet-pixel-diff-omr".into(),
             model_version: "1".into(),
             config_version: format!(
-                "blank-{:.4}-marked-{:.4}-delta-{}-inset-{:.3}",
+                "blank-hash-{}-blank-{:.4}-marked-{:.4}-delta-{}-inset-{:.3}",
+                self.blank_crop_hash,
                 self.policy.blank_max_ratio,
                 self.policy.marked_min_ratio,
                 self.policy.pixel_delta_threshold,

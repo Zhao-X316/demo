@@ -1,6 +1,7 @@
 //! M2 业务服务。
 
 pub mod answer_sheet;
+pub mod answer_sheet_page;
 pub mod assessment;
 pub mod fixed_paper;
 pub mod grading;
@@ -15,3 +16,6 @@ pub mod question_ingest;
 
 #[cfg(test)]
 mod ordinary_structure_tests;
+
+#[cfg(test)]
+mod answer_sheet_page_tests;
