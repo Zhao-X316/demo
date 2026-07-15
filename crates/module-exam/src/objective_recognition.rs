@@ -50,7 +50,7 @@ pub struct ObjectiveMarkCell {
 }
 
 impl ObjectiveMarkCell {
-    fn validate(&self) -> CoreResult<()> {
+    pub fn validate(&self) -> CoreResult<()> {
         if self.label.trim().is_empty() {
             return Err(CoreError::Invalid("OMR 标记单元标签不能为空".into()));
         }

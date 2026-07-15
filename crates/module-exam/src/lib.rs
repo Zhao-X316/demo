@@ -3,6 +3,7 @@
 //! 依赖 `core`，复用 学生/提交/任务/判定/设置；只实现批改特有部分：
 //! 知识点树、题库（含逐选项解析+知识点）、作答对比、错题、掌握度聚合，以及豆包视觉大模型接入。
 
+pub mod answer_sheet_recognition;
 pub mod db;
 pub mod objective_recognition;
 pub mod ordinary_paper_recognition;
@@ -64,6 +65,10 @@ static MIGRATIONS: &[Migration] = &[
     Migration {
         id: "exam_0013",
         sql: include_str!("../migrations/0013_ordinary_structure_confirmation.sql"),
+    },
+    Migration {
+        id: "exam_0014",
+        sql: include_str!("../migrations/0014_answer_sheet_templates.sql"),
     },
 ];
 

@@ -1,5 +1,6 @@
 //! M2 业务服务。
 
+pub mod answer_sheet;
 pub mod assessment;
 pub mod fixed_paper;
 pub mod grading;
