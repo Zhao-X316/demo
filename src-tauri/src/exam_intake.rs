@@ -669,7 +669,16 @@ pub fn list_options(conn: &Connection) -> CoreResult<Vec<FixedIntakeOption>> {
          JOIN classes c ON c.id=a.class_id
          JOIN exam_assessment_items_v2 i ON i.assessment_version_id=v.id AND i.state='active'
          JOIN k1_question_versions q ON q.id=i.question_version_id
-         WHERE v.state='confirmed' AND q.question_type IN ('single','multiple','true_false')
+         WHERE v.state='confirmed'
+           AND q.question_type IN ('single','multiple','true_false','fill_blank','short_answer')
+           AND NOT EXISTS (
+             SELECT 1 FROM exam_assessment_items_v2 unsupported
+             JOIN k1_question_versions uq ON uq.id=unsupported.question_version_id
+             WHERE unsupported.assessment_version_id=v.id AND unsupported.state='active'
+               AND uq.question_type NOT IN (
+                 'single','multiple','true_false','fill_blank','short_answer'
+               )
+           )
          GROUP BY c.id,c.name,a.id,v.id,a.title,v.revision,v.template_version
          HAVING COUNT(i.id)>0
          ORDER BY c.id,a.id,v.revision DESC",

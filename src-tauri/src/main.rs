@@ -1,14 +1,17 @@
 // 发布构建时隐藏 Windows 控制台窗口
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod asr;
-mod archive;
 mod answer_sheet_materialization;
 mod answer_sheet_template_provider;
 mod answer_sheet_template_run;
+mod archive;
+mod asr;
 mod audio;
 mod backup;
 mod commands;
+mod dictation_materialization;
+mod dictation_provider;
+mod dictation_run;
 mod exam_commands;
 mod exam_intake;
 mod objective_provider;
@@ -115,6 +118,13 @@ fn main() {
             exam_commands::exam_answer_sheet_template_status,
             exam_commands::exam_answer_sheet_analyze_template,
             exam_commands::exam_answer_sheet_confirm_template,
+            exam_commands::exam_dictation_template_status,
+            exam_commands::exam_dictation_analyze_template,
+            exam_commands::exam_dictation_confirm_template,
+            exam_commands::exam_dictation_process_page,
+            exam_commands::exam_dictation_recognize_region,
+            exam_commands::exam_dictation_workbench,
+            exam_commands::exam_dictation_correct_transcription,
         ])
         .run(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");

@@ -3,6 +3,7 @@
 pub mod answer_sheet;
 pub mod answer_sheet_page;
 pub mod assessment;
+pub mod dictation_pipeline;
 pub mod fixed_paper;
 pub mod grading;
 pub mod objective;
@@ -19,3 +20,6 @@ mod ordinary_structure_tests;
 
 #[cfg(test)]
 mod answer_sheet_page_tests;
+
+#[cfg(test)]
+mod dictation_pipeline_tests;

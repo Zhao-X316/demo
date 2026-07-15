@@ -9,6 +9,10 @@ use module_exam::answer_sheet_template_recognition::{
 };
 use module_exam::db::knowledge_points::{self as kp, KnowledgePoint, KpInput};
 use module_exam::db::questions::{self, NewOption, NewQuestion, Question, QuestionOption};
+use module_exam::dictation_recognition::{
+    DictationErrorCode, DictationFailure, DictationOcrRecognizer, DictationTemplateRecognizer,
+    DICTATION_OCR_SCHEMA_VERSION, DICTATION_TEMPLATE_SCHEMA_VERSION,
+};
 use module_exam::objective_recognition::{
     ObjectiveRecognitionErrorCode, ObjectiveRecognitionFailure, ObjectiveRecognizer,
     OBJECTIVE_RECOGNITION_SCHEMA_VERSION,
@@ -18,6 +22,10 @@ use module_exam::ordinary_paper_recognition::{
     ORDINARY_PAPER_SCHEMA_VERSION,
 };
 use module_exam::service::assessment::{self, GradeDecision, Publication};
+use module_exam::service::dictation_pipeline::{
+    self, DictationPageMaterializationResult, DictationTemplateConfirmation,
+    DictationTranscriptionResult, DictationWorkbenchRow,
+};
 use module_exam::service::grading::{self, AnswerDetail};
 use module_exam::service::objective::{
     self, ObjectiveObservationResult, ObjectiveReviewBatch, ObjectiveWorkbench, StrictBatchReview,
@@ -29,6 +37,12 @@ use crate::answer_sheet_materialization::{self, AnswerSheetPageProcessingResult}
 use crate::answer_sheet_template_provider::ArkAnswerSheetTemplateRecognizer;
 use crate::answer_sheet_template_run::{
     self, AnswerSheetTemplateRunResult, AnswerSheetTemplateStatus, BeginAnswerSheetTemplateRun,
+};
+use crate::dictation_materialization;
+use crate::dictation_provider::{ArkDictationOcrRecognizer, ArkDictationTemplateRecognizer};
+use crate::dictation_run::{
+    self, BeginDictationOcrRun, BeginDictationTemplateRun, DictationTemplateRunResult,
+    DictationTemplateStatus,
 };
 use crate::exam_intake::{
     self, FixedIntakeOption, FixedIntakeRequest, FixedIntakeResult, GroupingConfirmationResult,
@@ -523,13 +537,8 @@ pub fn exam_answer_sheet_process_page(
     page_id: i64,
 ) -> R<AnswerSheetPageProcessingResult> {
     let conn = lock(&state)?;
-    answer_sheet_materialization::process_page(
-        &conn,
-        &state.data_dir,
-        page_id,
-        LOCAL_TEACHER_ACTOR,
-    )
-    .map_err(e)
+    answer_sheet_materialization::process_page(&conn, &state.data_dir, page_id, LOCAL_TEACHER_ACTOR)
+        .map_err(e)
 }
 
 /// 查询当前答题卡页是否已有老师确认的 active 空白模板。
@@ -604,6 +613,193 @@ pub fn exam_answer_sheet_confirm_template(
     let mut conn = lock(&state)?;
     answer_sheet_template_run::confirm(&mut conn, reference_page_id, ai_run_id, LOCAL_TEACHER_ACTOR)
         .map_err(e)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictationPageProcessingResult {
+    pub structure: DictationPageMaterializationResult,
+    pub transcriptions: Vec<DictationTranscriptionResult>,
+}
+
+/// 查询当前默写页是否已有老师一次确认的 active 空白模板。
+#[tauri::command]
+pub fn exam_dictation_template_status(
+    state: State<'_, AppState>,
+    reference_page_id: i64,
+) -> R<DictationTemplateStatus> {
+    let conn = lock(&state)?;
+    dictation_run::template_status(&conn, reference_page_id).map_err(e)
+}
+
+/// 分析老师选择的固定格式默写空白页；模型只定位题号/行栏，不读取答案。
+#[tauri::command]
+pub async fn exam_dictation_analyze_template(
+    state: State<'_, AppState>,
+    reference_page_id: i64,
+    blank_path: String,
+    idempotency_key: String,
+) -> R<DictationTemplateRunResult> {
+    let creds = secrets::load(&state.data_dir).map_err(e)?;
+    let recognizer = ArkDictationTemplateRecognizer::from_creds(&creds);
+    let descriptor = recognizer.descriptor();
+    let prepared =
+        dictation_run::prepare_blank_template(&blank_path, &state.data_dir).map_err(e)?;
+    let blank_artifact_id = {
+        let conn = lock(&state)?;
+        dictation_run::register_blank_template(&conn, &prepared)
+            .map_err(e)?
+            .id
+    };
+    let input = {
+        let conn = lock(&state)?;
+        dictation_run::load_template_input(&conn, reference_page_id, blank_artifact_id)
+            .map_err(e)?
+    };
+    let input = std::sync::Arc::new(input);
+    let ai_run_id = {
+        let conn = lock(&state)?;
+        match dictation_run::begin_template(&conn, &input, &descriptor, &idempotency_key)
+            .map_err(e)?
+        {
+            BeginDictationTemplateRun::Execute { ai_run_id } => ai_run_id,
+            BeginDictationTemplateRun::Completed(result) => return Ok(*result),
+        }
+    };
+    let worker_input = std::sync::Arc::clone(&input);
+    let provider_result =
+        tauri::async_runtime::spawn_blocking(move || recognizer.recognize(&worker_input.request()))
+            .await
+            .unwrap_or_else(|_| {
+                Err(DictationFailure {
+                    schema_version: DICTATION_TEMPLATE_SCHEMA_VERSION,
+                    code: DictationErrorCode::Internal,
+                    safe_message: "默写模板分析任务意外中断，已保留空白页等待重试".into(),
+                    retryable: true,
+                })
+            });
+    let conn = lock(&state)?;
+    dictation_run::finish_template(&conn, &input, ai_run_id, provider_result).map_err(e)
+}
+
+/// 老师一次确认 ready 默写空白模板，同时冻结本页每项答案/rubric 策略。
+#[tauri::command]
+pub fn exam_dictation_confirm_template(
+    state: State<'_, AppState>,
+    reference_page_id: i64,
+    ai_run_id: i64,
+) -> R<DictationTemplateConfirmation> {
+    let mut conn = lock(&state)?;
+    dictation_run::confirm_template(&mut conn, reference_page_id, ai_run_id, LOCAL_TEACHER_ACTOR)
+        .map_err(e)
+}
+
+async fn recognize_dictation_region(
+    state: &State<'_, AppState>,
+    answer_region_revision_id: i64,
+    idempotency_key: String,
+) -> R<DictationTranscriptionResult> {
+    let creds = secrets::load(&state.data_dir).map_err(e)?;
+    let recognizer = ArkDictationOcrRecognizer::from_creds(&creds);
+    let descriptor = recognizer.descriptor();
+    let metadata = {
+        let conn = lock(state)?;
+        dictation_run::load_ocr_metadata(&conn, answer_region_revision_id).map_err(e)?
+    };
+    let input = std::sync::Arc::new(dictation_run::load_ocr_input(metadata).map_err(e)?);
+    let ai_run_id = {
+        let mut conn = lock(state)?;
+        match dictation_run::begin_ocr(&mut conn, &input, &descriptor, &idempotency_key)
+            .map_err(e)?
+        {
+            BeginDictationOcrRun::Execute { ai_run_id } => ai_run_id,
+            BeginDictationOcrRun::Completed(result) => return Ok(*result),
+        }
+    };
+    let worker_input = std::sync::Arc::clone(&input);
+    let provider_result =
+        tauri::async_runtime::spawn_blocking(move || recognizer.recognize(&worker_input.request()))
+            .await
+            .unwrap_or_else(|_| {
+                Err(DictationFailure {
+                    schema_version: DICTATION_OCR_SCHEMA_VERSION,
+                    code: DictationErrorCode::Internal,
+                    safe_message: "默写 OCR 任务意外中断，已保留题区等待重试".into(),
+                    retryable: true,
+                })
+            });
+    let mut conn = lock(state)?;
+    dictation_run::finish_ocr(&mut conn, &input, ai_run_id, provider_result).map_err(e)
+}
+
+/// 单独重试一个默写题区；同一幂等键不会重复产生 OCR 调用或转写 revision。
+#[tauri::command]
+pub async fn exam_dictation_recognize_region(
+    state: State<'_, AppState>,
+    answer_region_revision_id: i64,
+    idempotency_key: String,
+) -> R<DictationTranscriptionResult> {
+    recognize_dictation_region(&state, answer_region_revision_id, idempotency_key).await
+}
+
+/// 把当前固定模板应用到学生页，并逐题 OCR。任何机器结果都只是建议，不创建成绩。
+#[tauri::command]
+pub async fn exam_dictation_process_page(
+    state: State<'_, AppState>,
+    page_id: i64,
+) -> R<DictationPageProcessingResult> {
+    let structure = {
+        let conn = lock(&state)?;
+        dictation_materialization::materialize_page(
+            &conn,
+            &state.data_dir,
+            page_id,
+            LOCAL_TEACHER_ACTOR,
+        )
+        .map_err(e)?
+    };
+    let mut transcriptions = Vec::with_capacity(structure.regions.len());
+    for region in &structure.regions {
+        let key = format!("dictation:page:{page_id}:region:{}:ocr-v1", region.id);
+        transcriptions.push(recognize_dictation_region(&state, region.id, key).await?);
+    }
+    Ok(DictationPageProcessingResult {
+        structure,
+        transcriptions,
+    })
+}
+
+/// 默写异常工作台：精确命中可快速查看，其余全部明确交给老师。
+#[tauri::command]
+pub fn exam_dictation_workbench(
+    state: State<'_, AppState>,
+    assessment_version_id: Option<i64>,
+    limit: Option<i64>,
+) -> R<Vec<DictationWorkbenchRow>> {
+    let conn = lock(&state)?;
+    dictation_pipeline::list_dictation_workbench(
+        &conn,
+        assessment_version_id,
+        limit.unwrap_or(1000),
+    )
+    .map_err(e)
+}
+
+/// 老师校正 OCR 文本。原始 OCR 保留，新 revision 重新做可复现的精确比较。
+#[tauri::command]
+pub fn exam_dictation_correct_transcription(
+    state: State<'_, AppState>,
+    answer_region_revision_id: i64,
+    corrected_text: String,
+) -> R<DictationTranscriptionResult> {
+    let mut conn = lock(&state)?;
+    dictation_pipeline::teacher_correct_transcription(
+        &mut conn,
+        answer_region_revision_id,
+        &corrected_text,
+        LOCAL_TEACHER_ACTOR,
+    )
+    .map_err(e)
 }
 
 // ───────────────────────── 豆包视觉：题目预分析 ─────────────────────────

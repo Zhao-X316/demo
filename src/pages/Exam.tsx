@@ -6,6 +6,10 @@ import {
   AnswerSheetPageProcessingResult,
   AnswerSheetTemplateRunResult,
   AnswerSheetTemplateStatus,
+  DictationPageProcessingResult,
+  DictationTemplateRunResult,
+  DictationTemplateStatus,
+  DictationWorkbenchRow,
   FixedIntakeOption,
   FixedIntakeResult,
   GroupedPageEvidence,
@@ -24,6 +28,13 @@ import {
   examAnswerSheetTemplateStatus,
   examAnswerSuggest,
   examAnswersList,
+  examDictationAnalyzeTemplate,
+  examDictationConfirmTemplate,
+  examDictationCorrectTranscription,
+  examDictationProcessPage,
+  examDictationRecognizeRegion,
+  examDictationTemplateStatus,
+  examDictationWorkbench,
   examFixedIntakeConfirmGrouping,
   examFixedIntakeConfirmGroupingQuality,
   examFixedIntakeGroupingEvidence,
@@ -47,7 +58,7 @@ import {
 } from "../api/exam";
 import { Student, studentsList } from "../api/manage";
 
-type Tab = "intake" | "objective" | "grade" | "questions" | "knowledge";
+type Tab = "intake" | "objective" | "dictation" | "grade" | "questions" | "knowledge";
 
 const TYPE_LABEL: Record<string, string> = {
   single: "单选",
@@ -141,6 +152,7 @@ export default function Exam() {
   const [knowledge, setKnowledge] = useState<KnowledgePoint[]>([]);
   const [answers, setAnswers] = useState<AnswerDetail[]>([]);
   const [objectiveWorkbench, setObjectiveWorkbench] = useState<ObjectiveWorkbench>({ rows: [], attempts: [] });
+  const [dictationWorkbench, setDictationWorkbench] = useState<DictationWorkbenchRow[]>([]);
   const [intakeOptions, setIntakeOptions] = useState<FixedIntakeOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -149,12 +161,13 @@ export default function Exam() {
   const load = async () => {
     setError("");
     try {
-      const [studentRows, questionRows, kpRows, answerRows, workbench, fixedOptions] = await Promise.all([
+      const [studentRows, questionRows, kpRows, answerRows, workbench, dictationRows, fixedOptions] = await Promise.all([
         studentsList(),
         questionsList(),
         kpList(),
         examAnswersList(),
         examObjectiveWorkbench(),
+        examDictationWorkbench(),
         examFixedIntakeOptions(),
       ]);
       setStudents(studentRows.filter((student) => student.enabled));
@@ -162,6 +175,7 @@ export default function Exam() {
       setKnowledge(kpRows);
       setAnswers(answerRows);
       setObjectiveWorkbench(workbench);
+      setDictationWorkbench(dictationRows);
       setIntakeOptions(fixedOptions);
     } catch (err) {
       setError(String(err));
@@ -196,6 +210,7 @@ export default function Exam() {
       <div className="tabs">
         <button className={tab === "intake" ? "tab active" : "tab"} onClick={() => setTab("intake")}>上传批改</button>
         <button className={tab === "objective" ? "tab active" : "tab"} onClick={() => setTab("objective")}>标准卷终审</button>
+        <button className={tab === "dictation" ? "tab active" : "tab"} onClick={() => setTab("dictation")}>默写复核</button>
         <button className={tab === "grade" ? "tab active" : "tab"} onClick={() => setTab("grade")}>老师补录</button>
         <button className={tab === "questions" ? "tab active" : "tab"} onClick={() => setTab("questions")}>题库</button>
         <button className={tab === "knowledge" ? "tab active" : "tab"} onClick={() => setTab("knowledge")}>知识点</button>
@@ -207,13 +222,23 @@ export default function Exam() {
           {tab === "intake" && (
             <FixedIntakeTab
               options={intakeOptions}
-              onOpenReview={() => setTab("objective")}
+              onOpenReview={(reviewTab) => {
+                void load();
+                setTab(reviewTab);
+              }}
               onError={(message) => setError(message)}
             />
           )}
           {tab === "objective" && (
             <ObjectiveReviewTab
               workbench={objectiveWorkbench}
+              onDone={done}
+              onError={(message) => setError(message)}
+            />
+          )}
+          {tab === "dictation" && (
+            <DictationReviewTab
+              rows={dictationWorkbench}
               onDone={done}
               onError={(message) => setError(message)}
             />
@@ -254,7 +279,7 @@ function FixedIntakeTab({
   onError,
 }: {
   options: FixedIntakeOption[];
-  onOpenReview: () => void;
+  onOpenReview: (tab: "objective" | "dictation") => void;
   onError: (message: string) => void;
 }) {
   const classOptions = useMemo(() => {
@@ -291,6 +316,13 @@ function FixedIntakeTab({
   const [answerSheetPageResults, setAnswerSheetPageResults] = useState<Record<number, AnswerSheetPageProcessingResult>>({});
   const [answerSheetPageFailures, setAnswerSheetPageFailures] = useState<Record<number, string>>({});
   const [processingAnswerSheetPageIds, setProcessingAnswerSheetPageIds] = useState<number[]>([]);
+  const [dictationTemplateStatus, setDictationTemplateStatus] = useState<DictationTemplateStatus | null>(null);
+  const [dictationTemplateStatusLoaded, setDictationTemplateStatusLoaded] = useState(false);
+  const [dictationTemplateRun, setDictationTemplateRun] = useState<DictationTemplateRunResult | null>(null);
+  const [dictationTemplateBusy, setDictationTemplateBusy] = useState(false);
+  const [dictationPageResults, setDictationPageResults] = useState<Record<number, DictationPageProcessingResult>>({});
+  const [dictationPageFailures, setDictationPageFailures] = useState<Record<number, string>>({});
+  const [processingDictationPageIds, setProcessingDictationPageIds] = useState<number[]>([]);
   const [groupingStartNo, setGroupingStartNo] = useState("");
   const [absentStudentNos, setAbsentStudentNos] = useState<string[]>([]);
   const [result, setResult] = useState<FixedIntakeResult | null>(null);
@@ -323,6 +355,12 @@ function FixedIntakeTab({
     setAnswerSheetPageResults({});
     setAnswerSheetPageFailures({});
     setProcessingAnswerSheetPageIds([]);
+    setDictationTemplateStatus(null);
+    setDictationTemplateStatusLoaded(false);
+    setDictationTemplateRun(null);
+    setDictationPageResults({});
+    setDictationPageFailures({});
+    setProcessingDictationPageIds([]);
   };
 
   const pickStudentPapers = async () => {
@@ -352,6 +390,12 @@ function FixedIntakeTab({
       setAnswerSheetPageResults({});
       setAnswerSheetPageFailures({});
       setProcessingAnswerSheetPageIds([]);
+      setDictationTemplateStatus(null);
+      setDictationTemplateStatusLoaded(false);
+      setDictationTemplateRun(null);
+      setDictationPageResults({});
+      setDictationPageFailures({});
+      setProcessingDictationPageIds([]);
       const inferred = await examFixedIntakeInferPageCycle(paths);
       setPageCycle(inferred);
       setExpectedPages(String(inferred.expectedPagesPerAttempt));
@@ -440,6 +484,12 @@ function FixedIntakeTab({
       setAnswerSheetPageResults({});
       setAnswerSheetPageFailures({});
       setProcessingAnswerSheetPageIds([]);
+      setDictationTemplateStatus(null);
+      setDictationTemplateStatusLoaded(false);
+      setDictationTemplateRun(null);
+      setDictationPageResults({});
+      setDictationPageFailures({});
+      setProcessingDictationPageIds([]);
     } catch (err) {
       onError(String(err));
     } finally {
@@ -501,6 +551,37 @@ function FixedIntakeTab({
       cancelled = true;
     };
   }, [answerSheetTemplateScopeKey]);
+
+  const dictationReferencePageId = answerSheetEligiblePages[0]?.pageId ?? 0;
+  const dictationTemplateScopeKey = result?.qualityReviewCompleted
+    && result.materialType === "dictation"
+    && dictationReferencePageId
+    ? `${result.batchId}:${dictationReferencePageId}`
+    : "";
+
+  useEffect(() => {
+    if (!dictationTemplateScopeKey || !dictationReferencePageId) return;
+    let cancelled = false;
+    setDictationTemplateStatusLoaded(false);
+    examDictationTemplateStatus(dictationReferencePageId)
+      .then((status) => {
+        if (cancelled) return;
+        setDictationTemplateStatus(status);
+        setDictationTemplateStatusLoaded(true);
+        if (status.activeTemplate) {
+          void processDictationPages(groupingEvidence);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setDictationTemplateStatusLoaded(true);
+          onError(`读取默写模板状态失败：${String(err)}`);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [dictationTemplateScopeKey]);
 
   const toggleRejectedPage = (pageId: number) => {
     if (result?.qualityReviewCompleted) return;
@@ -735,11 +816,96 @@ function FixedIntakeTab({
     }
   }
 
+  async function pickAndAnalyzeDictationTemplate() {
+    if (!dictationReferencePageId) {
+      onError("当前没有可用于建立模板的已确认默写页面");
+      return;
+    }
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: "默写空白页", extensions: ["jpg", "jpeg", "png", "webp"] }],
+      });
+      if (!selected || Array.isArray(selected)) return;
+      setDictationTemplateBusy(true);
+      const run = await examDictationAnalyzeTemplate(
+        dictationReferencePageId,
+        selected,
+        `dictation-template:${assessmentVersionId}:${crypto.randomUUID()}`,
+      );
+      setDictationTemplateRun(run);
+    } catch (err) {
+      onError(`建立默写模板失败：${String(err)}`);
+    } finally {
+      setDictationTemplateBusy(false);
+    }
+  }
+
+  async function confirmDictationTemplate() {
+    if (!dictationReferencePageId || !dictationTemplateRun?.output) return;
+    setDictationTemplateBusy(true);
+    try {
+      const confirmed = await examDictationConfirmTemplate(
+        dictationReferencePageId,
+        dictationTemplateRun.ai_run_id,
+      );
+      setDictationTemplateStatus({
+        assessmentVersionId: confirmed.template.assessment_version_id,
+        pageNo: confirmed.template.page_no,
+        activeTemplate: confirmed.template,
+      });
+      await processDictationPages(groupingEvidence);
+    } catch (err) {
+      onError(`确认默写模板失败：${String(err)}`);
+    } finally {
+      setDictationTemplateBusy(false);
+    }
+  }
+
+  async function processDictationPages(
+    evidence: GroupedPageEvidence[] = groupingEvidence,
+    retryFailed = false,
+  ) {
+    const pages = evidence.flatMap((group) => group.pages).filter((page) =>
+      page.qualityResult === "pass"
+      && page.matchDecision === "teacher_confirmed"
+      && (retryFailed
+        ? Boolean(dictationPageFailures[page.pageId])
+        : !dictationPageResults[page.pageId] && !dictationPageFailures[page.pageId]),
+    );
+    if (!pages.length) return;
+    setProcessingDictationPageIds((current) => Array.from(new Set([
+      ...current,
+      ...pages.map((page) => page.pageId),
+    ])));
+    const failures: string[] = [];
+    for (const page of pages) {
+      try {
+        const processed = await examDictationProcessPage(page.pageId);
+        setDictationPageResults((current) => ({ ...current, [page.pageId]: processed }));
+        setDictationPageFailures((current) => {
+          const next = { ...current };
+          delete next[page.pageId];
+          return next;
+        });
+      } catch (err) {
+        const message = String(err);
+        setDictationPageFailures((current) => ({ ...current, [page.pageId]: message }));
+        failures.push(`第${page.pageNo}页：${message}`);
+      } finally {
+        setProcessingDictationPageIds((current) => current.filter((value) => value !== page.pageId));
+      }
+    }
+    if (failures.length) {
+      onError(`有 ${failures.length} 张默写需要重拍、重试或老师检查。${failures[0]}`);
+    }
+  }
+
   if (!options.length) {
     return (
       <div className="exam-card objective-empty">
         <b>还没有可上传的固定卷作业</b>
-        <span className="muted">需先准备一份已确认、带客观题和标准答案的作业版本；上传入口不会临时拼出不可追溯的题目或答案。</span>
+        <span className="muted">需先准备一份已确认并带答案/评分点的作业版本；上传入口不会临时拼出不可追溯的题目或答案。</span>
       </div>
     );
   }
@@ -781,6 +947,17 @@ function FixedIntakeTab({
   const answerSheetPendingCount = Math.max(
     0,
     answerSheetEligiblePages.length - answerSheetProcessedValues.length - answerSheetFailureCount,
+  );
+  const dictationProcessedValues = Object.values(dictationPageResults);
+  const dictationTranscriptions = dictationProcessedValues.flatMap((value) => value.transcriptions);
+  const dictationExactCount = dictationTranscriptions.filter((value) =>
+    value.observation.result === "exact" || value.observation.result === "accepted_variant"
+  ).length;
+  const dictationReviewCount = dictationTranscriptions.length - dictationExactCount;
+  const dictationFailureCount = Object.keys(dictationPageFailures).length;
+  const dictationPendingCount = Math.max(
+    0,
+    answerSheetEligiblePages.length - dictationProcessedValues.length - dictationFailureCount,
   );
 
   return (
@@ -1171,6 +1348,79 @@ function FixedIntakeTab({
                 )}
               </div>
             )}
+            {result.qualityReviewCompleted && result.materialType === "dictation" && (
+              <div className="intake-analysis-card">
+                <div className="intake-quality-head">
+                  <div>
+                    <b>默写自动识别</b>
+                    <span>第一次确认一张同版空白页；系统逐格读取学生原文，不用标准答案反向改字。</span>
+                  </div>
+                  <strong>
+                    {!dictationTemplateStatusLoaded
+                      ? "正在检查模板…"
+                      : dictationTemplateStatus?.activeTemplate
+                        ? `模板第 ${dictationTemplateStatus.activeTemplate.revision} 版`
+                        : "还差空白页"}
+                  </strong>
+                </div>
+                {!dictationTemplateStatus?.activeTemplate ? (
+                  <div className="intake-analysis-actions vertical">
+                    <span className="muted">请上传这次默写的未作答空白页。系统只定位每题书写框，答案沿用作业中已确认的版本。</span>
+                    <button disabled={dictationTemplateBusy || !dictationTemplateStatusLoaded} onClick={() => void pickAndAnalyzeDictationTemplate()}>
+                      {dictationTemplateBusy ? "正在识别空白页…" : "选择一张默写空白页"}
+                    </button>
+                    {dictationTemplateRun?.status === "failed" && (
+                      <div className="intake-analysis-issues">
+                        <span>{dictationTemplateRun.failure?.safe_message}</span>
+                      </div>
+                    )}
+                    {dictationTemplateRun?.output && (
+                      <>
+                        <div className="intake-analysis-summary">
+                          <span>匹配题区 {dictationTemplateRun.output.regions.length}</span>
+                          <span>可信度 {Math.round(dictationTemplateRun.output.confidence * 100)}%</span>
+                          <span className={dictationTemplateRun.output.state === "ready" ? "ready" : "review"}>
+                            {dictationTemplateRun.output.state === "ready" ? "可以确认" : "需要换图或复核"}
+                          </span>
+                        </div>
+                        {dictationTemplateRun.output.issue_codes.length > 0 && (
+                          <div className="intake-analysis-issues">
+                            {dictationTemplateRun.output.issue_codes.slice(0, 4).map((code) => <span key={code}>{code}</span>)}
+                          </div>
+                        )}
+                        {dictationTemplateRun.output.state === "ready" && (
+                          <button disabled={dictationTemplateBusy} onClick={() => void confirmDictationTemplate()}>
+                            {dictationTemplateBusy ? "正在确认并处理全班…" : `确认这张空白页，识别 ${answerSheetEligiblePages.length} 份默写`}
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    <div className="intake-analysis-summary">
+                      <span>已处理 {dictationProcessedValues.length}/{answerSheetEligiblePages.length} 页</span>
+                      <span className="ready">精确命中 {dictationExactCount}</span>
+                      <span className="review">需老师看 {dictationReviewCount}</span>
+                      <span className="blocked">失败页 {dictationFailureCount}</span>
+                      <span>待处理 {dictationPendingCount}</span>
+                    </div>
+                    <div className="intake-analysis-actions">
+                      {dictationPendingCount > 0 && (
+                        <button disabled={processingDictationPageIds.length > 0} onClick={() => void processDictationPages()}>
+                          {processingDictationPageIds.length ? `正在处理 ${processingDictationPageIds.length} 页…` : `继续识别 ${dictationPendingCount} 页`}
+                        </button>
+                      )}
+                      {dictationFailureCount > 0 && (
+                        <button className="secondary" disabled={processingDictationPageIds.length > 0} onClick={() => void processDictationPages(groupingEvidence, true)}>
+                          重试 {dictationFailureCount} 张失败默写
+                        </button>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
             <div className="intake-route-grid">
               <div className={result.route === "ready_for_batch_confirm" ? "active ready" : ""}>
                 <span>可批量确认</span>
@@ -1203,11 +1453,167 @@ function FixedIntakeTab({
             <div className="intake-next">
               <span>下一步</span>
               <b>{result.nextAction}</b>
-              <button disabled={result.route === "blocked" || result.groupingRoute === "blocked" || result.materialTypeNeedsConfirmation || !result.groupingConfirmed || !result.qualityReviewCompleted} onClick={onOpenReview}>进入批改终审</button>
+              <button
+                disabled={result.route === "blocked" || result.groupingRoute === "blocked" || result.materialTypeNeedsConfirmation || !result.groupingConfirmed || !result.qualityReviewCompleted}
+                onClick={() => onOpenReview(result.materialType === "dictation" ? "dictation" : "objective")}
+              >进入批改终审</button>
             </div>
           </>
         )}
       </aside>
+    </div>
+  );
+}
+
+function dictationStateLabel(row: DictationWorkbenchRow) {
+  if (row.point_result === "exact") return "与标准答案一致";
+  if (row.point_result === "accepted_variant") return "可接受写法";
+  if (row.result_state === "not_written") return "疑似未写";
+  if (row.result_state === "unreadable") return "字迹无法辨认";
+  if (row.result_state === "recognize_failed") return "识别失败";
+  if (row.result_state === "ambiguous_final") return "涂改后答案不明确";
+  return "与标准答案有分歧";
+}
+
+function DictationReviewTab({
+  rows,
+  onDone,
+  onError,
+}: {
+  rows: DictationWorkbenchRow[];
+  onDone: (message: string) => void;
+  onError: (message: string) => void;
+}) {
+  const [showAll, setShowAll] = useState(false);
+  const [busyRegionId, setBusyRegionId] = useState<number | null>(null);
+  const [corrections, setCorrections] = useState<Record<number, string>>({});
+  const visible = rows
+    .filter((row) => showAll || row.requires_teacher_review)
+    .sort((left, right) => {
+      if (left.requires_teacher_review !== right.requires_teacher_review) {
+        return left.requires_teacher_review ? -1 : 1;
+      }
+      return left.order_index - right.order_index || left.student_no.localeCompare(right.student_no);
+    });
+  const exactCount = rows.filter((row) => !row.requires_teacher_review).length;
+  const reviewCount = rows.length - exactCount;
+
+  async function correct(row: DictationWorkbenchRow) {
+    const value = (corrections[row.answer_region_revision_id]
+      ?? row.teacher_corrected_text
+      ?? row.raw_ocr_text
+      ?? "").trim();
+    if (!value) {
+      onError("请先按原图填写学生实际写下的内容");
+      return;
+    }
+    setBusyRegionId(row.answer_region_revision_id);
+    try {
+      await examDictationCorrectTranscription(row.answer_region_revision_id, value);
+      onDone(`${row.student_no}号第${row.question_no}题已保存老师校正；机器原文仍保留`);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setBusyRegionId(null);
+    }
+  }
+
+  async function retry(row: DictationWorkbenchRow) {
+    setBusyRegionId(row.answer_region_revision_id);
+    try {
+      await examDictationRecognizeRegion(
+        row.answer_region_revision_id,
+        `dictation:region:${row.answer_region_revision_id}:retry:${crypto.randomUUID()}`,
+      );
+      onDone(`${row.student_no}号第${row.question_no}题已重新识别；旧失败记录仍保留`);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setBusyRegionId(null);
+    }
+  }
+
+  return (
+    <div className="exam-card">
+      <div className="exam-card-head">
+        <div>
+          <b>默写分歧复核</b>
+          <div className="meta">先看原图和机器原文；只有精确答案或老师已确认写法才显示建议得分。</div>
+        </div>
+        <div className="intake-analysis-summary">
+          <span className="ready">精确 {exactCount}</span>
+          <span className="review">待看 {reviewCount}</span>
+        </div>
+      </div>
+      <div className="intake-analysis-actions">
+        <button className="secondary" onClick={() => setShowAll((value) => !value)}>
+          {showAll ? "只看分歧" : "查看全部"}
+        </button>
+      </div>
+      {!visible.length && (
+        <div className="empty-state">{rows.length ? "当前没有需要老师处理的默写分歧。" : "还没有默写识别结果。"}</div>
+      )}
+      <div className="objective-review-list">
+        {visible.map((row) => {
+          const editable = row.result_state === "recognized";
+          const value = corrections[row.answer_region_revision_id]
+            ?? row.teacher_corrected_text
+            ?? row.raw_ocr_text
+            ?? "";
+          return (
+            <article className={`objective-review-row ${row.requires_teacher_review ? "needs-review" : ""}`} key={row.transcription_revision_id}>
+              <div className="objective-student">
+                <b>{row.student_no}号 · {row.student_name}</b>
+                <span>第{row.question_no}题 · {row.max_score}分</span>
+              </div>
+              <div className="objective-crop">
+                {row.crop_path
+                  ? <img src={convertFileSrc(row.crop_path)} alt={`${row.student_name} 第${row.question_no}题默写`} />
+                  : <span>裁剪图不可用</span>}
+              </div>
+              <div className="objective-evidence">
+                <b>{dictationStateLabel(row)}</b>
+                <span>机器原文：{row.raw_ocr_text || "—"}</span>
+                <span>标准内容：{row.canonical_text}</span>
+                {row.accepted_variants.length > 0 && <span>可接受写法：{row.accepted_variants.join("、")}</span>}
+                <span>置信度：{row.confidence == null ? "—" : `${Math.round(row.confidence * 100)}%`}</span>
+              </div>
+              <div className="objective-actions">
+                {editable ? (
+                  <>
+                    <input
+                      value={value}
+                      aria-label={`${row.student_name} 第${row.question_no}题实际书写`}
+                      onChange={(event) => setCorrections((current) => ({
+                        ...current,
+                        [row.answer_region_revision_id]: event.target.value,
+                      }))}
+                    />
+                    <button
+                      disabled={busyRegionId !== null || !row.requires_teacher_review}
+                      onClick={() => void correct(row)}
+                    >
+                      {busyRegionId === row.answer_region_revision_id ? "保存中…" : "按原图保存校正"}
+                    </button>
+                  </>
+                ) : row.result_state === "recognize_failed" ? (
+                  <>
+                    <span className="muted">识别服务未形成有效原文；可重试，仍失败时再由老师补录。</span>
+                    <button
+                      disabled={busyRegionId !== null}
+                      onClick={() => void retry(row)}
+                    >
+                      {busyRegionId === row.answer_region_revision_id ? "重试中…" : "重新识别本题"}
+                    </button>
+                  </>
+                ) : (
+                  <span className="muted">该题无法稳定转写，请在“老师补录”中人工判定；系统不会猜字。</span>
+                )}
+              </div>
+            </article>
+          );
+        })}
+      </div>
     </div>
   );
 }
