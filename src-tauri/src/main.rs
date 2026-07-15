@@ -4,6 +4,8 @@
 mod asr;
 mod archive;
 mod answer_sheet_materialization;
+mod answer_sheet_template_provider;
+mod answer_sheet_template_run;
 mod audio;
 mod backup;
 mod commands;
@@ -110,6 +112,9 @@ fn main() {
             exam_commands::exam_ordinary_paper_analyze_page,
             exam_commands::exam_ordinary_paper_confirm_page_structure,
             exam_commands::exam_answer_sheet_process_page,
+            exam_commands::exam_answer_sheet_template_status,
+            exam_commands::exam_answer_sheet_analyze_template,
+            exam_commands::exam_answer_sheet_confirm_template,
         ])
         .run(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");

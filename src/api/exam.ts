@@ -380,6 +380,50 @@ export interface AnswerSheetPageProcessingResult {
   }>;
 }
 
+export interface AnswerSheetTemplateRevision {
+  id: number;
+  public_id: string;
+  assessment_version_id: number;
+  revision: number;
+  template_version: string;
+  page_no: number;
+  blank_artifact_id: number;
+  source_ai_run_id: number | null;
+  confirmed_by: string;
+  state: "active" | "superseded" | "voided";
+  created_at: string;
+}
+
+export interface AnswerSheetTemplateStatus {
+  assessmentVersionId: number;
+  pageNo: number;
+  activeTemplate: AnswerSheetTemplateRevision | null;
+}
+
+export interface AnswerSheetTemplateRunResult {
+  ai_run_id: number;
+  status: "succeeded" | "failed";
+  output: {
+    state: "ready" | "needs_review" | "blocked";
+    page_no: number;
+    canvas_width: number;
+    canvas_height: number;
+    anchors: Array<{ key: string }>;
+    items: Array<{
+      assessment_item_id: number;
+      region_index: number;
+      cells: Array<{ label: string }>;
+    }>;
+    confidence: number;
+    issue_codes: string[];
+  } | null;
+  failure: {
+    code: string;
+    safe_message: string;
+    retryable: boolean;
+  } | null;
+}
+
 export const kpList = () => call<KnowledgePoint[]>("kp_list");
 export const kpCreate = (name: string, code: string | null, parent_id: number | null) =>
   call<KnowledgePoint>("kp_create", { subjectId: null, parentId: parent_id, code, name });
@@ -506,4 +550,25 @@ export const examOrdinaryPaperConfirmPageStructure = (
 export const examAnswerSheetProcessPage = (page_id: number) =>
   call<AnswerSheetPageProcessingResult>("exam_answer_sheet_process_page", {
     pageId: page_id,
+  });
+
+export const examAnswerSheetTemplateStatus = (reference_page_id: number) =>
+  call<AnswerSheetTemplateStatus>("exam_answer_sheet_template_status", {
+    referencePageId: reference_page_id,
+  });
+
+export const examAnswerSheetAnalyzeTemplate = (
+  reference_page_id: number,
+  blank_path: string,
+  idempotency_key: string,
+) => call<AnswerSheetTemplateRunResult>("exam_answer_sheet_analyze_template", {
+  referencePageId: reference_page_id,
+  blankPath: blank_path,
+  idempotencyKey: idempotency_key,
+});
+
+export const examAnswerSheetConfirmTemplate = (reference_page_id: number, ai_run_id: number) =>
+  call<AnswerSheetTemplateRevision>("exam_answer_sheet_confirm_template", {
+    referencePageId: reference_page_id,
+    aiRunId: ai_run_id,
   });

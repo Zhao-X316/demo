@@ -3,6 +3,10 @@
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
+use module_exam::answer_sheet_template_recognition::{
+    AnswerSheetTemplateRecognitionErrorCode, AnswerSheetTemplateRecognitionFailure,
+    AnswerSheetTemplateRecognizer, ANSWER_SHEET_TEMPLATE_RUN_SCHEMA_VERSION,
+};
 use module_exam::db::knowledge_points::{self as kp, KnowledgePoint, KpInput};
 use module_exam::db::questions::{self, NewOption, NewQuestion, Question, QuestionOption};
 use module_exam::objective_recognition::{
@@ -22,6 +26,10 @@ use module_exam::service::ordinary_structure::OrdinaryStructureConfirmationResul
 use module_exam::vlm::{self as exam_vlm, AnalyzedQuestion};
 
 use crate::answer_sheet_materialization::{self, AnswerSheetPageProcessingResult};
+use crate::answer_sheet_template_provider::ArkAnswerSheetTemplateRecognizer;
+use crate::answer_sheet_template_run::{
+    self, AnswerSheetTemplateRunResult, AnswerSheetTemplateStatus, BeginAnswerSheetTemplateRun,
+};
 use crate::exam_intake::{
     self, FixedIntakeOption, FixedIntakeRequest, FixedIntakeResult, GroupingConfirmationResult,
     GroupingQualityConfirmationResult, GroupingRetakeResult, MaterialTypeConfirmationResult,
@@ -522,6 +530,80 @@ pub fn exam_answer_sheet_process_page(
         LOCAL_TEACHER_ACTOR,
     )
     .map_err(e)
+}
+
+/// 查询当前答题卡页是否已有老师确认的 active 空白模板。
+#[tauri::command]
+pub fn exam_answer_sheet_template_status(
+    state: State<'_, AppState>,
+    reference_page_id: i64,
+) -> R<AnswerSheetTemplateStatus> {
+    let conn = lock(&state)?;
+    answer_sheet_template_run::status(&conn, reference_page_id).map_err(e)
+}
+
+/// 归档老师选择的首张空白答题卡并生成结构候选。
+///
+/// 外部视觉调用不持数据库锁；候选不会自动成为模板，也不会处理任何学生答案。
+#[tauri::command]
+pub async fn exam_answer_sheet_analyze_template(
+    state: State<'_, AppState>,
+    reference_page_id: i64,
+    blank_path: String,
+    idempotency_key: String,
+) -> R<AnswerSheetTemplateRunResult> {
+    let creds = secrets::load(&state.data_dir).map_err(e)?;
+    let recognizer = ArkAnswerSheetTemplateRecognizer::from_creds(&creds);
+    let descriptor = recognizer.descriptor();
+    let prepared = answer_sheet_template_run::prepare_blank_template(&blank_path, &state.data_dir)
+        .map_err(e)?;
+    let blank_artifact_id = {
+        let conn = lock(&state)?;
+        answer_sheet_template_run::register_blank_template(&conn, &prepared)
+            .map_err(e)?
+            .id
+    };
+    let input = {
+        let conn = lock(&state)?;
+        answer_sheet_template_run::load_input(&conn, reference_page_id, blank_artifact_id)
+            .map_err(e)?
+    };
+    let input = std::sync::Arc::new(input);
+    let ai_run_id = {
+        let conn = lock(&state)?;
+        match answer_sheet_template_run::begin(&conn, &input, &descriptor, &idempotency_key)
+            .map_err(e)?
+        {
+            BeginAnswerSheetTemplateRun::Execute { ai_run_id } => ai_run_id,
+            BeginAnswerSheetTemplateRun::Completed(result) => return Ok(*result),
+        }
+    };
+    let worker_input = std::sync::Arc::clone(&input);
+    let provider_result =
+        tauri::async_runtime::spawn_blocking(move || recognizer.recognize(&worker_input.request()))
+            .await
+            .unwrap_or_else(|_| {
+                Err(AnswerSheetTemplateRecognitionFailure {
+                    schema_version: ANSWER_SHEET_TEMPLATE_RUN_SCHEMA_VERSION,
+                    code: AnswerSheetTemplateRecognitionErrorCode::Internal,
+                    safe_message: "答题卡模板分析任务意外中断，已保留空白卡等待重试".into(),
+                    retryable: true,
+                })
+            });
+    let conn = lock(&state)?;
+    answer_sheet_template_run::finish(&conn, &input, ai_run_id, provider_result).map_err(e)
+}
+
+/// 老师一次确认 ready 空白答题卡候选，创建不可变 active 模板 revision。
+#[tauri::command]
+pub fn exam_answer_sheet_confirm_template(
+    state: State<'_, AppState>,
+    reference_page_id: i64,
+    ai_run_id: i64,
+) -> R<module_exam::service::answer_sheet::AnswerSheetTemplateRevision> {
+    let mut conn = lock(&state)?;
+    answer_sheet_template_run::confirm(&mut conn, reference_page_id, ai_run_id, LOCAL_TEACHER_ACTOR)
+        .map_err(e)
 }
 
 // ───────────────────────── 豆包视觉：题目预分析 ─────────────────────────

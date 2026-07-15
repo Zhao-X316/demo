@@ -3,6 +3,9 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   AnswerDetail,
+  AnswerSheetPageProcessingResult,
+  AnswerSheetTemplateRunResult,
+  AnswerSheetTemplateStatus,
   FixedIntakeOption,
   FixedIntakeResult,
   GroupedPageEvidence,
@@ -15,6 +18,10 @@ import {
   Question,
   QuestionInput,
   examAnswerHumanDecide,
+  examAnswerSheetAnalyzeTemplate,
+  examAnswerSheetConfirmTemplate,
+  examAnswerSheetProcessPage,
+  examAnswerSheetTemplateStatus,
   examAnswerSuggest,
   examAnswersList,
   examFixedIntakeConfirmGrouping,
@@ -277,6 +284,13 @@ function FixedIntakeTab({
   const [analyzingPageIds, setAnalyzingPageIds] = useState<number[]>([]);
   const [ordinaryConfirmations, setOrdinaryConfirmations] = useState<Record<number, OrdinaryStructureConfirmationResult>>({});
   const [confirmingOrdinaryPageIds, setConfirmingOrdinaryPageIds] = useState<number[]>([]);
+  const [answerSheetTemplateStatus, setAnswerSheetTemplateStatus] = useState<AnswerSheetTemplateStatus | null>(null);
+  const [answerSheetTemplateStatusLoaded, setAnswerSheetTemplateStatusLoaded] = useState(false);
+  const [answerSheetTemplateRun, setAnswerSheetTemplateRun] = useState<AnswerSheetTemplateRunResult | null>(null);
+  const [answerSheetTemplateBusy, setAnswerSheetTemplateBusy] = useState(false);
+  const [answerSheetPageResults, setAnswerSheetPageResults] = useState<Record<number, AnswerSheetPageProcessingResult>>({});
+  const [answerSheetPageFailures, setAnswerSheetPageFailures] = useState<Record<number, string>>({});
+  const [processingAnswerSheetPageIds, setProcessingAnswerSheetPageIds] = useState<number[]>([]);
   const [groupingStartNo, setGroupingStartNo] = useState("");
   const [absentStudentNos, setAbsentStudentNos] = useState<string[]>([]);
   const [result, setResult] = useState<FixedIntakeResult | null>(null);
@@ -303,6 +317,12 @@ function FixedIntakeTab({
     setRejectedPageIds([]);
     setOrdinaryPaperRuns({});
     setAnalyzingPageIds([]);
+    setAnswerSheetTemplateStatus(null);
+    setAnswerSheetTemplateStatusLoaded(false);
+    setAnswerSheetTemplateRun(null);
+    setAnswerSheetPageResults({});
+    setAnswerSheetPageFailures({});
+    setProcessingAnswerSheetPageIds([]);
   };
 
   const pickStudentPapers = async () => {
@@ -326,6 +346,12 @@ function FixedIntakeTab({
       setAnalyzingPageIds([]);
       setOrdinaryConfirmations({});
       setConfirmingOrdinaryPageIds([]);
+      setAnswerSheetTemplateStatus(null);
+      setAnswerSheetTemplateStatusLoaded(false);
+      setAnswerSheetTemplateRun(null);
+      setAnswerSheetPageResults({});
+      setAnswerSheetPageFailures({});
+      setProcessingAnswerSheetPageIds([]);
       const inferred = await examFixedIntakeInferPageCycle(paths);
       setPageCycle(inferred);
       setExpectedPages(String(inferred.expectedPagesPerAttempt));
@@ -408,6 +434,12 @@ function FixedIntakeTab({
       setAnalyzingPageIds([]);
       setOrdinaryConfirmations({});
       setConfirmingOrdinaryPageIds([]);
+      setAnswerSheetTemplateStatus(null);
+      setAnswerSheetTemplateStatusLoaded(false);
+      setAnswerSheetTemplateRun(null);
+      setAnswerSheetPageResults({});
+      setAnswerSheetPageFailures({});
+      setProcessingAnswerSheetPageIds([]);
     } catch (err) {
       onError(String(err));
     } finally {
@@ -435,6 +467,40 @@ function FixedIntakeTab({
       cancelled = true;
     };
   }, [groupingEvidenceBatchId]);
+
+  const answerSheetEligiblePages = groupingEvidence.flatMap((group) => group.pages).filter((page) =>
+    page.qualityResult === "pass" && page.matchDecision === "teacher_confirmed"
+  );
+  const answerSheetReferencePageId = answerSheetEligiblePages[0]?.pageId ?? 0;
+  const answerSheetTemplateScopeKey = result?.qualityReviewCompleted
+    && result.materialType === "answer_sheet"
+    && answerSheetReferencePageId
+    ? `${result.batchId}:${answerSheetReferencePageId}`
+    : "";
+
+  useEffect(() => {
+    if (!answerSheetTemplateScopeKey || !answerSheetReferencePageId) return;
+    let cancelled = false;
+    setAnswerSheetTemplateStatusLoaded(false);
+    examAnswerSheetTemplateStatus(answerSheetReferencePageId)
+      .then((status) => {
+        if (cancelled) return;
+        setAnswerSheetTemplateStatus(status);
+        setAnswerSheetTemplateStatusLoaded(true);
+        if (status.activeTemplate) {
+          void processAnswerSheetPages(groupingEvidence);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setAnswerSheetTemplateStatusLoaded(true);
+          onError(`读取答题卡模板状态失败：${String(err)}`);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [answerSheetTemplateScopeKey]);
 
   const toggleRejectedPage = (pageId: number) => {
     if (result?.qualityReviewCompleted) return;
@@ -584,6 +650,91 @@ function FixedIntakeTab({
     }
   }
 
+  async function pickAndAnalyzeAnswerSheetTemplate() {
+    if (!answerSheetReferencePageId) {
+      onError("当前没有可用于建立模板的已确认答题卡页面");
+      return;
+    }
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: "空白答题卡", extensions: ["jpg", "jpeg", "png", "webp"] }],
+      });
+      if (!selected || Array.isArray(selected)) return;
+      setAnswerSheetTemplateBusy(true);
+      const run = await examAnswerSheetAnalyzeTemplate(
+        answerSheetReferencePageId,
+        selected,
+        `answer-sheet-template:${assessmentVersionId}:${crypto.randomUUID()}`,
+      );
+      setAnswerSheetTemplateRun(run);
+    } catch (err) {
+      onError(`建立答题卡模板失败：${String(err)}`);
+    } finally {
+      setAnswerSheetTemplateBusy(false);
+    }
+  }
+
+  async function confirmAnswerSheetTemplate() {
+    if (!answerSheetReferencePageId || !answerSheetTemplateRun?.output) return;
+    setAnswerSheetTemplateBusy(true);
+    try {
+      const activeTemplate = await examAnswerSheetConfirmTemplate(
+        answerSheetReferencePageId,
+        answerSheetTemplateRun.ai_run_id,
+      );
+      setAnswerSheetTemplateStatus({
+        assessmentVersionId: activeTemplate.assessment_version_id,
+        pageNo: activeTemplate.page_no,
+        activeTemplate,
+      });
+      await processAnswerSheetPages(groupingEvidence);
+    } catch (err) {
+      onError(`确认答题卡模板失败：${String(err)}`);
+    } finally {
+      setAnswerSheetTemplateBusy(false);
+    }
+  }
+
+  async function processAnswerSheetPages(
+    evidence: GroupedPageEvidence[] = groupingEvidence,
+    retryFailed = false,
+  ) {
+    const pages = evidence.flatMap((group) => group.pages).filter((page) =>
+      page.qualityResult === "pass"
+      && page.matchDecision === "teacher_confirmed"
+      && (retryFailed
+        ? Boolean(answerSheetPageFailures[page.pageId])
+        : !answerSheetPageResults[page.pageId] && !answerSheetPageFailures[page.pageId]),
+    );
+    if (!pages.length) return;
+    setProcessingAnswerSheetPageIds((current) => Array.from(new Set([
+      ...current,
+      ...pages.map((page) => page.pageId),
+    ])));
+    const failures: string[] = [];
+    for (const page of pages) {
+      try {
+        const processed = await examAnswerSheetProcessPage(page.pageId);
+        setAnswerSheetPageResults((current) => ({ ...current, [page.pageId]: processed }));
+        setAnswerSheetPageFailures((current) => {
+          const next = { ...current };
+          delete next[page.pageId];
+          return next;
+        });
+      } catch (err) {
+        const message = String(err);
+        setAnswerSheetPageFailures((current) => ({ ...current, [page.pageId]: message }));
+        failures.push(`第${page.pageNo}页：${message}`);
+      } finally {
+        setProcessingAnswerSheetPageIds((current) => current.filter((value) => value !== page.pageId));
+      }
+    }
+    if (failures.length) {
+      onError(`有 ${failures.length} 张答题卡需要重试或老师检查。${failures[0]}`);
+    }
+  }
+
   if (!options.length) {
     return (
       <div className="exam-card objective-empty">
@@ -619,6 +770,17 @@ function FixedIntakeTab({
   const ordinaryPendingCount = Math.max(
     0,
     ordinaryEligiblePageCount - ordinaryRunValues.length,
+  );
+  const answerSheetProcessedValues = Object.values(answerSheetPageResults);
+  const answerSheetObservations = answerSheetProcessedValues.flatMap((value) => value.observations);
+  const answerSheetReadyObservationCount = answerSheetObservations.filter((value) =>
+    value.observation.result_state === "recognized" && value.suggestion.batch_eligible
+  ).length;
+  const answerSheetReviewObservationCount = answerSheetObservations.length - answerSheetReadyObservationCount;
+  const answerSheetFailureCount = Object.keys(answerSheetPageFailures).length;
+  const answerSheetPendingCount = Math.max(
+    0,
+    answerSheetEligiblePages.length - answerSheetProcessedValues.length - answerSheetFailureCount,
   );
 
   return (
@@ -933,6 +1095,80 @@ function FixedIntakeTab({
                     </button>
                   )}
                 </div>
+              </div>
+            )}
+            {result.qualityReviewCompleted && result.materialType === "answer_sheet" && (
+              <div className="intake-analysis-card">
+                <div className="intake-quality-head">
+                  <div>
+                    <b>答题卡自动识别</b>
+                    <span>第一次只确认一张空白答题卡；以后同版卡片自动四角校正并在本机识别涂点。</span>
+                  </div>
+                  <strong>
+                    {!answerSheetTemplateStatusLoaded
+                      ? "正在检查模板…"
+                      : answerSheetTemplateStatus?.activeTemplate
+                        ? `模板第 ${answerSheetTemplateStatus.activeTemplate.revision} 版`
+                        : "还差空白卡"}
+                  </strong>
+                </div>
+                {!answerSheetTemplateStatus?.activeTemplate ? (
+                  <div className="intake-analysis-actions vertical">
+                    <span className="muted">请上传这套答题卡的空白版本。系统只建立题号和涂点位置，不把它当学生作答。</span>
+                    <button disabled={answerSheetTemplateBusy || !answerSheetTemplateStatusLoaded} onClick={() => void pickAndAnalyzeAnswerSheetTemplate()}>
+                      {answerSheetTemplateBusy ? "正在识别空白卡…" : "选择一张空白答题卡"}
+                    </button>
+                    {answerSheetTemplateRun?.status === "failed" && (
+                      <div className="intake-analysis-issues">
+                        <span>{answerSheetTemplateRun.failure?.safe_message}</span>
+                      </div>
+                    )}
+                    {answerSheetTemplateRun?.output && (
+                      <>
+                        <div className="intake-analysis-summary">
+                          <span>定位锚点 {answerSheetTemplateRun.output.anchors.length}/4</span>
+                          <span>匹配题目 {answerSheetTemplateRun.output.items.length}</span>
+                          <span>可信度 {Math.round(answerSheetTemplateRun.output.confidence * 100)}%</span>
+                          <span className={answerSheetTemplateRun.output.state === "ready" ? "ready" : "review"}>
+                            {answerSheetTemplateRun.output.state === "ready" ? "可以确认" : "需要换图或复核"}
+                          </span>
+                        </div>
+                        {answerSheetTemplateRun.output.issue_codes.length > 0 && (
+                          <div className="intake-analysis-issues">
+                            {answerSheetTemplateRun.output.issue_codes.slice(0, 4).map((code) => <span key={code}>{code}</span>)}
+                          </div>
+                        )}
+                        {answerSheetTemplateRun.output.state === "ready" && (
+                          <button disabled={answerSheetTemplateBusy} onClick={() => void confirmAnswerSheetTemplate()}>
+                            {answerSheetTemplateBusy ? "正在确认并处理全班…" : `确认这张空白卡，识别 ${answerSheetEligiblePages.length} 张学生卡`}
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    <div className="intake-analysis-summary">
+                      <span>已处理 {answerSheetProcessedValues.length}/{answerSheetEligiblePages.length} 页</span>
+                      <span className="ready">清晰题区 {answerSheetReadyObservationCount}</span>
+                      <span className="review">需老师看 {answerSheetReviewObservationCount}</span>
+                      <span className="blocked">失败页 {answerSheetFailureCount}</span>
+                      <span>待处理 {answerSheetPendingCount}</span>
+                    </div>
+                    <div className="intake-analysis-actions">
+                      {answerSheetPendingCount > 0 && (
+                        <button disabled={processingAnswerSheetPageIds.length > 0} onClick={() => void processAnswerSheetPages()}>
+                          {processingAnswerSheetPageIds.length ? `正在处理 ${processingAnswerSheetPageIds.length} 页…` : `继续识别 ${answerSheetPendingCount} 页`}
+                        </button>
+                      )}
+                      {answerSheetFailureCount > 0 && (
+                        <button className="secondary" disabled={processingAnswerSheetPageIds.length > 0} onClick={() => void processAnswerSheetPages(groupingEvidence, true)}>
+                          重试 {answerSheetFailureCount} 张失败卡
+                        </button>
+                      )}
+                    </div>
+                  </>
+                )}
               </div>
             )}
             <div className="intake-route-grid">

@@ -4,6 +4,7 @@
 //! 知识点树、题库（含逐选项解析+知识点）、作答对比、错题、掌握度聚合，以及豆包视觉大模型接入。
 
 pub mod answer_sheet_recognition;
+pub mod answer_sheet_template_recognition;
 pub mod db;
 pub mod dictation;
 pub mod objective_recognition;
