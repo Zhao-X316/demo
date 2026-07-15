@@ -164,6 +164,50 @@ export interface GradePublication {
   published_at: string;
 }
 
+export interface FixedIntakeOption {
+  classId: number;
+  className: string;
+  assessmentId: number;
+  assessmentVersionId: number;
+  assessmentTitle: string;
+  revision: number;
+  templateVersion: string | null;
+  itemCount: number;
+}
+
+export interface FixedIntakeRequest {
+  assessmentVersionId: number;
+  studentPaths: string[];
+  answerPath: string | null;
+  answerText: string | null;
+  expectedPagesPerAttempt: number;
+  idempotencyKey: string;
+}
+
+export interface FixedIntakeDocumentSummary {
+  role: "student_work" | "answer_source";
+  format: "jpeg" | "pdf" | "text";
+  originalName: string;
+  pageCount: number;
+}
+
+export interface FixedIntakeResult {
+  batchId: number;
+  batchPublicId: string;
+  documents: FixedIntakeDocumentSummary[];
+  studentDocumentCount: number;
+  studentPageCount: number;
+  answerDocumentCount: number;
+  route: "ready_for_batch_confirm" | "review_required" | "blocked";
+  targetCount: number;
+  readyCount: number;
+  reviewCount: number;
+  blockedCount: number;
+  completedCount: number;
+  reasonCodes: string[];
+  nextAction: string;
+}
+
 export const kpList = () => call<KnowledgePoint[]>("kp_list");
 export const kpCreate = (name: string, code: string | null, parent_id: number | null) =>
   call<KnowledgePoint>("kp_create", { subjectId: null, parentId: parent_id, code, name });
@@ -212,3 +256,9 @@ export const examObjectiveStrictBatchAccept = (
 
 export const examObjectivePublishAttempt = (attempt_id: number) =>
   call<GradePublication>("exam_objective_publish_attempt", { attemptId: attempt_id });
+
+export const examFixedIntakeOptions = () =>
+  call<FixedIntakeOption[]>("exam_fixed_intake_options");
+
+export const examFixedIntakePrepare = (request: FixedIntakeRequest) =>
+  call<FixedIntakeResult>("exam_fixed_intake_prepare", { request });

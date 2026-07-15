@@ -12,6 +12,7 @@ use module_exam::service::objective::{
 };
 use module_exam::vlm::{self as exam_vlm, AnalyzedQuestion};
 
+use crate::exam_intake::{self, FixedIntakeOption, FixedIntakeRequest, FixedIntakeResult};
 use crate::secrets;
 use crate::state::AppState;
 use crate::vlm;
@@ -277,6 +278,27 @@ pub fn exam_objective_publish_attempt(
 ) -> R<Publication> {
     let conn = lock(&state)?;
     assessment::publish_attempt(&conn, attempt_id, LOCAL_TEACHER_ACTOR).map_err(e)
+}
+
+// ───────────────────── T6.1b 固定卷一站式上传 ─────────────────────
+
+/// 只返回已有的已确认客观题作业版本，不在上传页临时创建第二套作业状态。
+#[tauri::command]
+pub fn exam_fixed_intake_options(state: State<'_, AppState>) -> R<Vec<FixedIntakeOption>> {
+    let conn = lock(&state)?;
+    exam_intake::list_options(&conn).map_err(e)
+}
+
+/// 将 JPG/PDF 学生卷和可选答案资料归档、拆页并登记到既有 B1/B3a 状态机。
+#[tauri::command]
+pub fn exam_fixed_intake_prepare(
+    state: State<'_, AppState>,
+    request: FixedIntakeRequest,
+) -> R<FixedIntakeResult> {
+    // PDF 解析/拆页先在数据库锁外完成，避免大文件处理冻结其他本地查询。
+    let prepared = exam_intake::prepare_fixed_intake_files(&request).map_err(e)?;
+    let conn = lock(&state)?;
+    exam_intake::persist_fixed_intake(&conn, &state.data_dir, &request, &prepared).map_err(e)
 }
 
 // ───────────────────────── 豆包视觉：题目预分析 ─────────────────────────

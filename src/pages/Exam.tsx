@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   AnswerDetail,
+  FixedIntakeOption,
+  FixedIntakeResult,
   KnowledgePoint,
   ObjectiveWorkbench,
   ObjectiveWorkbenchRow,
@@ -10,6 +13,8 @@ import {
   examAnswerHumanDecide,
   examAnswerSuggest,
   examAnswersList,
+  examFixedIntakeOptions,
+  examFixedIntakePrepare,
   examObjectiveAccept,
   examObjectiveCorrect,
   examObjectivePublishAttempt,
@@ -22,7 +27,7 @@ import {
 } from "../api/exam";
 import { Student, studentsList } from "../api/manage";
 
-type Tab = "objective" | "grade" | "questions" | "knowledge";
+type Tab = "intake" | "objective" | "grade" | "questions" | "knowledge";
 
 const TYPE_LABEL: Record<string, string> = {
   single: "单选",
@@ -54,17 +59,52 @@ const EXCLUSION_LABEL: Record<string, string> = {
   UNSCORED: "机器无法确定计分",
 };
 
+const INTAKE_REASON_LABEL: Record<string, string> = {
+  BATCH_EMPTY: "没有可处理页面",
+  IMPORT_SEQUENCE_GAP: "页面顺序不连续",
+  SOURCE_DOCUMENT_UNREGISTERED: "原始资料未完整登记",
+  PAGE_QUALITY_REVIEW_REQUIRED: "需要检查页面清晰度",
+  PAGE_IDENTITY_UNCONFIRMED: "等待确认学生和页码",
+  PAGE_NUMBER_CONFLICT: "页码存在冲突",
+  PAGE_SEQUENCE_INVALID: "同一学生页序异常",
+  STUDENT_PAGES_NONCONTIGUOUS: "同一学生页面未连续排列",
+  GROUP_FIRST_PAGE_INVALID: "学生卷未从第 1 页开始",
+  GROUP_PAGE_COUNT_MISMATCH: "学生卷页数与设置不一致",
+  ANSWER_AUTHORITY_MISSING: "等待确认标准答案",
+  ANSWER_CANDIDATE_INVALID: "答案资料需要修正",
+  ANSWER_CANDIDATE_DRIFT: "答案版本发生变化",
+  ANSWER_SAME_LEVEL_CONFLICT: "答案资料存在分歧",
+  ANSWER_REGION_MISSING: "等待定位答题区域",
+  ANSWER_REGION_AMBIGUOUS: "答题区域不唯一",
+  OBJECTIVE_RESULT_REVIEW_REQUIRED: "识别结果需要老师复核",
+  ANSWER_VERSION_DRIFT: "识别使用的答案版本已变化",
+  REVIEW_INPUT_PRESENT: "本批存在需复核资料",
+};
+
+const STUDENT_FILE_EXTENSIONS = ["jpg", "jpeg", "pdf"];
+const ANSWER_FILE_EXTENSIONS = ["jpg", "jpeg", "pdf", "txt"];
+
+function hasExtension(path: string, extensions: string[]) {
+  const clean = path.split(/[?#]/, 1)[0].toLowerCase();
+  return extensions.some((extension) => clean.endsWith(`.${extension}`));
+}
+
+function fileName(path: string) {
+  return path.split(/[\\/]/).pop() || path;
+}
+
 function displayTime(value: string) {
   return value.replace("T", " ").slice(0, 16);
 }
 
 export default function Exam() {
-  const [tab, setTab] = useState<Tab>("grade");
+  const [tab, setTab] = useState<Tab>("intake");
   const [students, setStudents] = useState<Student[]>([]);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [knowledge, setKnowledge] = useState<KnowledgePoint[]>([]);
   const [answers, setAnswers] = useState<AnswerDetail[]>([]);
   const [objectiveWorkbench, setObjectiveWorkbench] = useState<ObjectiveWorkbench>({ rows: [], attempts: [] });
+  const [intakeOptions, setIntakeOptions] = useState<FixedIntakeOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
@@ -72,18 +112,20 @@ export default function Exam() {
   const load = async () => {
     setError("");
     try {
-      const [studentRows, questionRows, kpRows, answerRows, workbench] = await Promise.all([
+      const [studentRows, questionRows, kpRows, answerRows, workbench, fixedOptions] = await Promise.all([
         studentsList(),
         questionsList(),
         kpList(),
         examAnswersList(),
         examObjectiveWorkbench(),
+        examFixedIntakeOptions(),
       ]);
       setStudents(studentRows.filter((student) => student.enabled));
       setQuestions(questionRows.filter((question) => question.enabled));
       setKnowledge(kpRows);
       setAnswers(answerRows);
       setObjectiveWorkbench(workbench);
+      setIntakeOptions(fixedOptions);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -106,17 +148,18 @@ export default function Exam() {
       <div className="page-head">
         <div>
           <h1>题目批改</h1>
-          <div className="sub">机器先建议，老师确认后才计分并进入错题与掌握度。</div>
+          <div className="sub">选择班级和作业，上传照片或 PDF；系统整理证据，老师只处理分歧。</div>
         </div>
-        <span className="tag makeup">M2 · 客观题终审</span>
+        <span className="tag makeup">M2 · 一站式批改</span>
       </div>
       <div className="exam-notice">
-        <b>当前边界</b>
-        <span>固定模板客观题已接入按题终审、严格批量确认和显式发布；真实 OMR 识别仍未接入，手工录入保留为兜底。</span>
+        <b>老师保留终审权</b>
+        <span>上传只归档和整理资料；机器结果不会自动计分或发布，模糊、涂改和分歧统一交给老师确认。</span>
       </div>
       <div className="tabs">
+        <button className={tab === "intake" ? "tab active" : "tab"} onClick={() => setTab("intake")}>上传批改</button>
         <button className={tab === "objective" ? "tab active" : "tab"} onClick={() => setTab("objective")}>标准卷终审</button>
-        <button className={tab === "grade" ? "tab active" : "tab"} onClick={() => setTab("grade")}>快速批改</button>
+        <button className={tab === "grade" ? "tab active" : "tab"} onClick={() => setTab("grade")}>老师补录</button>
         <button className={tab === "questions" ? "tab active" : "tab"} onClick={() => setTab("questions")}>题库</button>
         <button className={tab === "knowledge" ? "tab active" : "tab"} onClick={() => setTab("knowledge")}>知识点</button>
       </div>
@@ -124,6 +167,13 @@ export default function Exam() {
       {toast && <div className="ok-banner">{toast}</div>}
       {loading ? <div className="loading">加载题目批改数据…</div> : (
         <>
+          {tab === "intake" && (
+            <FixedIntakeTab
+              options={intakeOptions}
+              onOpenReview={() => setTab("objective")}
+              onError={(message) => setError(message)}
+            />
+          )}
           {tab === "objective" && (
             <ObjectiveReviewTab
               workbench={objectiveWorkbench}
@@ -157,6 +207,279 @@ export default function Exam() {
           )}
         </>
       )}
+    </div>
+  );
+}
+
+function FixedIntakeTab({
+  options,
+  onOpenReview,
+  onError,
+}: {
+  options: FixedIntakeOption[];
+  onOpenReview: () => void;
+  onError: (message: string) => void;
+}) {
+  const classOptions = useMemo(() => {
+    const unique = new Map<number, string>();
+    options.forEach((option) => unique.set(option.classId, option.className));
+    return Array.from(unique, ([id, name]) => ({ id, name }));
+  }, [options]);
+  const [classId, setClassId] = useState(classOptions[0]?.id ?? 0);
+  const assessmentOptions = options.filter((option) => option.classId === classId);
+  const [assessmentVersionId, setAssessmentVersionId] = useState(
+    assessmentOptions[0]?.assessmentVersionId ?? 0,
+  );
+  const [studentPaths, setStudentPaths] = useState<string[]>([]);
+  const [answerPath, setAnswerPath] = useState<string | null>(null);
+  const [answerText, setAnswerText] = useState("");
+  const [expectedPages, setExpectedPages] = useState("1");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<FixedIntakeResult | null>(null);
+  const [requestKey, setRequestKey] = useState("");
+
+  useEffect(() => {
+    if (!classOptions.some((option) => option.id === classId)) {
+      setClassId(classOptions[0]?.id ?? 0);
+    }
+  }, [classId, classOptions]);
+
+  useEffect(() => {
+    if (!assessmentOptions.some((option) => option.assessmentVersionId === assessmentVersionId)) {
+      setAssessmentVersionId(assessmentOptions[0]?.assessmentVersionId ?? 0);
+    }
+  }, [assessmentOptions, assessmentVersionId]);
+
+  const resetRequest = () => {
+    setRequestKey("");
+    setResult(null);
+  };
+
+  const pickStudentPapers = async () => {
+    try {
+      const selected = await open({ multiple: true });
+      if (!selected) return;
+      const paths = Array.isArray(selected) ? selected : [selected];
+      const unsupported = paths.filter((path) => !hasExtension(path, STUDENT_FILE_EXTENSIONS));
+      if (unsupported.length) {
+        onError(`学生试卷只支持 JPG、JPEG 或 PDF；有 ${unsupported.length} 个文件未加入。`);
+        return;
+      }
+      setStudentPaths(paths);
+      resetRequest();
+    } catch (err) {
+      onError(`选择学生试卷失败：${String(err)}`);
+    }
+  };
+
+  const pickAnswer = async () => {
+    try {
+      const selected = await open({ multiple: false });
+      if (!selected || Array.isArray(selected)) return;
+      if (!hasExtension(selected, ANSWER_FILE_EXTENSIONS)) {
+        onError("答案资料只支持 JPG、JPEG、PDF 或 TXT。");
+        return;
+      }
+      setAnswerPath(selected);
+      setAnswerText("");
+      resetRequest();
+    } catch (err) {
+      onError(`选择答案资料失败：${String(err)}`);
+    }
+  };
+
+  const submit = async () => {
+    const pageCount = Number(expectedPages);
+    if (!assessmentVersionId) {
+      onError("请先选择要批改的作业");
+      return;
+    }
+    if (!studentPaths.length) {
+      onError("请至少上传一份学生试卷");
+      return;
+    }
+    if (!Number.isInteger(pageCount) || pageCount < 1) {
+      onError("每名学生的页数必须是大于 0 的整数");
+      return;
+    }
+    const currentKey = requestKey || crypto.randomUUID();
+    setRequestKey(currentKey);
+    setBusy(true);
+    try {
+      const prepared = await examFixedIntakePrepare({
+        assessmentVersionId,
+        studentPaths,
+        answerPath,
+        answerText: answerText.trim() || null,
+        expectedPagesPerAttempt: pageCount,
+        idempotencyKey: currentKey,
+      });
+      setResult(prepared);
+      setRequestKey("");
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!options.length) {
+    return (
+      <div className="exam-card objective-empty">
+        <b>还没有可上传的固定卷作业</b>
+        <span className="muted">需先准备一份已确认、带客观题和标准答案的作业版本；上传入口不会临时拼出不可追溯的题目或答案。</span>
+      </div>
+    );
+  }
+
+  const routeLabel = result?.route === "ready_for_batch_confirm"
+    ? "可批量确认"
+    : result?.route === "review_required"
+      ? "需老师复核"
+      : "暂时受阻";
+
+  return (
+    <div className="intake-layout">
+      <section className="exam-card intake-form-card">
+        <div className="exam-card-head">
+          <div>
+            <b>上传后自动整理</b>
+            <div className="muted">只需完成下面三步，答案资料可不传。</div>
+          </div>
+          <span className="tag">固定卷</span>
+        </div>
+        <div className="intake-steps">
+          <div className="intake-step">
+            <span>1</span>
+            <div className="intake-step-fields">
+              <label className="field">
+                <span className="fl">班级</span>
+                <select value={classId} onChange={(event) => {
+                  setClassId(Number(event.target.value));
+                  resetRequest();
+                }}>
+                  {classOptions.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}
+                </select>
+              </label>
+              <label className="field">
+                <span className="fl">批改哪份作业</span>
+                <select value={assessmentVersionId} onChange={(event) => {
+                  setAssessmentVersionId(Number(event.target.value));
+                  resetRequest();
+                }}>
+                  {assessmentOptions.map((option) => (
+                    <option key={option.assessmentVersionId} value={option.assessmentVersionId}>
+                      {option.assessmentTitle} · {option.itemCount} 题
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </div>
+          <div className="intake-step">
+            <span>2</span>
+            <div className="intake-upload-line">
+              <div>
+                <b>学生试卷</b>
+                <small>支持 JPG、JPEG、PDF，可一次选择全班文件</small>
+              </div>
+              <button onClick={pickStudentPapers}>选择试卷</button>
+              <strong>{studentPaths.length ? `已选 ${studentPaths.length} 份` : "未选择"}</strong>
+            </div>
+            {studentPaths.length > 0 && (
+              <div className="intake-file-preview">
+                {studentPaths.slice(0, 4).map((path) => <span key={path}>{fileName(path)}</span>)}
+                {studentPaths.length > 4 && <span>另有 {studentPaths.length - 4} 份</span>}
+              </div>
+            )}
+            <details className="intake-advanced">
+              <summary>每名学生不是 1 页？按学生、页码顺序选择文件</summary>
+              <label className="field">
+                <span className="fl">每名学生固定页数</span>
+                <input value={expectedPages} inputMode="numeric" onChange={(event) => {
+                  setExpectedPages(event.target.value);
+                  resetRequest();
+                }} />
+              </label>
+            </details>
+          </div>
+          <div className="intake-step optional">
+            <span>3</span>
+            <div className="intake-upload-line">
+              <div>
+                <b>答案资料（选填）</b>
+                <small>上传图片、PDF、TXT，或直接粘贴</small>
+              </div>
+              <button className="secondary" onClick={pickAnswer}>选择答案</button>
+              <strong>{answerPath ? fileName(answerPath) : "可跳过"}</strong>
+            </div>
+            <textarea
+              rows={3}
+              value={answerText}
+              disabled={Boolean(answerPath)}
+              placeholder={answerPath ? "已选择答案文件" : "也可以在这里粘贴答案"}
+              onChange={(event) => {
+                setAnswerText(event.target.value);
+                resetRequest();
+              }}
+            />
+            {(answerPath || answerText) && (
+              <button className="link-button" onClick={() => {
+                setAnswerPath(null);
+                setAnswerText("");
+                resetRequest();
+              }}>清除答案资料</button>
+            )}
+          </div>
+        </div>
+        <button className="primary intake-primary" disabled={busy} onClick={submit}>
+          {busy ? "正在安全归档并拆分页面…" : "上传并开始整理"}
+        </button>
+        <div className="muted intake-safe-note">原图保留；PDF 按页归档；本步骤不会自动计分或发布。</div>
+      </section>
+
+      <aside className="exam-card intake-result-card">
+        <div className="exam-card-head">
+          <b>本批处理状态</b>
+          {result && <span className={`tag intake-route ${result.route}`}>{routeLabel}</span>}
+        </div>
+        {!result ? (
+          <div className="empty-state">上传后这里只显示三种结果和一个下一步，不让老师处理技术参数。</div>
+        ) : (
+          <>
+            <div className="intake-import-summary">
+              <b>已归档 {result.studentDocumentCount} 份学生卷，共 {result.studentPageCount} 页</b>
+              <span>{result.answerDocumentCount ? "答案资料已归档，等待识别或确认" : "沿用作业已确认答案"}</span>
+            </div>
+            <div className="intake-route-grid">
+              <div className={result.route === "ready_for_batch_confirm" ? "active ready" : ""}>
+                <span>可批量确认</span>
+                <b>{result.targetCount ? result.readyCount : "—"}</b>
+              </div>
+              <div className={result.route === "review_required" ? "active review" : ""}>
+                <span>需复核</span>
+                <b>{result.targetCount ? result.reviewCount : "—"}</b>
+              </div>
+              <div className={result.route === "blocked" ? "active blocked" : ""}>
+                <span>受阻</span>
+                <b>{result.targetCount ? result.blockedCount : "—"}</b>
+              </div>
+            </div>
+            {result.reasonCodes.length > 0 && (
+              <div className="intake-reasons">
+                {result.reasonCodes.slice(0, 3).map((code) => (
+                  <span key={code}>{INTAKE_REASON_LABEL[code] || code}</span>
+                ))}
+              </div>
+            )}
+            <div className="intake-next">
+              <span>下一步</span>
+              <b>{result.nextAction}</b>
+              <button disabled={result.route === "blocked"} onClick={onOpenReview}>进入标准卷终审</button>
+            </div>
+          </>
+        )}
+      </aside>
     </div>
   );
 }

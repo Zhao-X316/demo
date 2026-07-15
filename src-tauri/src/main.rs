@@ -7,6 +7,8 @@ mod audio;
 mod backup;
 mod commands;
 mod exam_commands;
+mod exam_intake;
+mod pdf_pages;
 mod secrets;
 mod state;
 mod vlm;
@@ -90,6 +92,8 @@ fn main() {
             exam_commands::exam_objective_correct,
             exam_commands::exam_objective_strict_batch_accept,
             exam_commands::exam_objective_publish_attempt,
+            exam_commands::exam_fixed_intake_options,
+            exam_commands::exam_fixed_intake_prepare,
         ])
         .run(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");
