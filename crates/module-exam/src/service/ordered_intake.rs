@@ -129,6 +129,32 @@ pub struct OrderedGroupingInput<'a> {
     pub created_by: Option<&'a str>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrderedGroupingDecision {
+    pub id: i64,
+    pub public_id: String,
+    pub ingest_batch_id: i64,
+    pub revision: i64,
+    pub snapshot_hash: String,
+    pub source_grouping_revision_id: i64,
+    pub expected_pages_per_attempt: i64,
+    pub first_student_id: i64,
+    pub roster_scope_json: String,
+    pub page_type_cycle_json: String,
+    pub assignments_json: String,
+    pub decision: String,
+    pub state: String,
+    pub confirmed_by: String,
+}
+
+pub struct ConfirmOrderedGroupingInput<'a> {
+    pub ingest_batch_id: i64,
+    pub expected_pages_per_attempt: i64,
+    pub first_student_no: &'a str,
+    pub absent_student_nos: &'a [String],
+    pub confirmed_by: &'a str,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MaterialTypeSuggestion {
     pub material_type: &'static str,
@@ -338,6 +364,25 @@ fn grouping_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OrderedGroupingRevi
         issue_codes_json: row.get(10)?,
         grouping_json: row.get(11)?,
         state: row.get(12)?,
+    })
+}
+
+fn grouping_decision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OrderedGroupingDecision> {
+    Ok(OrderedGroupingDecision {
+        id: row.get(0)?,
+        public_id: row.get(1)?,
+        ingest_batch_id: row.get(2)?,
+        revision: row.get(3)?,
+        snapshot_hash: row.get(4)?,
+        source_grouping_revision_id: row.get(5)?,
+        expected_pages_per_attempt: row.get(6)?,
+        first_student_id: row.get(7)?,
+        roster_scope_json: row.get(8)?,
+        page_type_cycle_json: row.get(9)?,
+        assignments_json: row.get(10)?,
+        decision: row.get(11)?,
+        state: row.get(12)?,
+        confirmed_by: row.get(13)?,
     })
 }
 
@@ -690,7 +735,10 @@ fn current_import_order(conn: &Connection, batch_id: i64) -> CoreResult<ImportOr
     .ok_or_else(|| CoreError::Invalid("缺少有效导入顺序快照".into()))
 }
 
-fn current_material(conn: &Connection, batch_id: i64) -> CoreResult<Option<MaterialTypeRevision>> {
+pub fn current_material(
+    conn: &Connection,
+    batch_id: i64,
+) -> CoreResult<Option<MaterialTypeRevision>> {
     Ok(conn
         .query_row(
             "SELECT id,public_id,ingest_batch_id,revision,material_type,confidence,
@@ -726,14 +774,14 @@ fn ordered_pages(conn: &Connection, batch_id: i64) -> CoreResult<Vec<PageForGrou
     Ok(result)
 }
 
-#[derive(Debug)]
-struct RosterStudent {
-    id: i64,
-    student_no: String,
-    name: String,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RosterStudent {
+    pub id: i64,
+    pub student_no: String,
+    pub name: String,
 }
 
-fn roster(conn: &Connection, batch_id: i64) -> CoreResult<Vec<RosterStudent>> {
+pub fn roster(conn: &Connection, batch_id: i64) -> CoreResult<Vec<RosterStudent>> {
     let mut stmt = conn.prepare(
         "SELECT s.id,s.student_no,s.name
          FROM exam_ingest_batches_v2 b
@@ -757,6 +805,24 @@ fn roster(conn: &Connection, batch_id: i64) -> CoreResult<Vec<RosterStudent>> {
         natural_name_cmp(&left.student_no, &right.student_no).then_with(|| left.id.cmp(&right.id))
     });
     Ok(result)
+}
+
+pub fn current_grouping_decision(
+    conn: &Connection,
+    batch_id: i64,
+) -> CoreResult<Option<OrderedGroupingDecision>> {
+    Ok(conn
+        .query_row(
+            "SELECT id,public_id,ingest_batch_id,revision,snapshot_hash,
+                    source_grouping_revision_id,expected_pages_per_attempt,first_student_id,
+                    roster_scope_json,page_type_cycle_json,assignments_json,decision,state,
+                    confirmed_by
+             FROM exam_ordered_grouping_decisions_v2
+             WHERE ingest_batch_id=?1 AND state='active'",
+            [batch_id],
+            grouping_decision_row,
+        )
+        .optional()?)
 }
 
 pub fn preview_ordered_grouping(
@@ -995,6 +1061,252 @@ pub fn preview_ordered_grouping(
          FROM exam_ordered_grouping_revisions_v2 WHERE id=?1",
         [id],
         grouping_row,
+    )
+    .map_err(Into::into)
+}
+
+fn current_grouping(conn: &Connection, batch_id: i64) -> CoreResult<OrderedGroupingRevision> {
+    conn.query_row(
+        "SELECT id,public_id,ingest_batch_id,revision,snapshot_hash,
+                import_order_revision_id,material_type_revision_id,
+                expected_pages_per_attempt,route,student_group_count,
+                issue_codes_json,grouping_json,state
+         FROM exam_ordered_grouping_revisions_v2
+         WHERE ingest_batch_id=?1 AND state='active'",
+        [batch_id],
+        grouping_row,
+    )
+    .optional()?
+    .ok_or_else(|| CoreError::NotFound("本批连续拍摄分组预览".into()))
+}
+
+/// 老师只确认一次本批范围和缺交学生，形成照片组到学生/页码的可追溯映射。
+///
+/// 该决定不创建 attempt/page match；页面仍必须先通过 B1 质量闸门。
+pub fn confirm_ordered_grouping(
+    conn: &Connection,
+    input: &ConfirmOrderedGroupingInput<'_>,
+) -> CoreResult<OrderedGroupingDecision> {
+    if input.expected_pages_per_attempt < 1 {
+        return Err(CoreError::Invalid("每名学生页数必须大于 0".into()));
+    }
+    let first_student_no = input.first_student_no.trim();
+    let teacher = input.confirmed_by.trim();
+    if first_student_no.is_empty() || teacher.is_empty() {
+        return Err(CoreError::Invalid("必须选择起始学生并记录确认老师".into()));
+    }
+    let source_grouping = current_grouping(conn, input.ingest_batch_id)?;
+    if source_grouping.expected_pages_per_attempt != Some(input.expected_pages_per_attempt) {
+        return Err(CoreError::Invalid(
+            "每名学生页数已变化，请先重新生成分组预览".into(),
+        ));
+    }
+    let material = current_material(conn, input.ingest_batch_id)?
+        .ok_or_else(|| CoreError::Invalid("请先确认资料类型".into()))?;
+    if material.material_type == "unknown"
+        || !(material.decision == "teacher_confirmed"
+            || (material.decision == "suggested"
+                && material.confidence >= MATERIAL_AUTO_ACCEPT_CONFIDENCE))
+    {
+        return Err(CoreError::Invalid("请先确认资料类型".into()));
+    }
+
+    let pages = ordered_pages(conn, input.ingest_batch_id)?;
+    if pages.is_empty() || pages.len() as i64 % input.expected_pages_per_attempt != 0 {
+        return Err(CoreError::Invalid(
+            "照片数量不能按每名学生固定页数完整分组".into(),
+        ));
+    }
+    let students = roster(conn, input.ingest_batch_id)?;
+    let start_index = students
+        .iter()
+        .position(|student| student.student_no.trim() == first_student_no)
+        .ok_or_else(|| CoreError::Invalid("起始学号不在当前班级花名册".into()))?;
+    let absent = input
+        .absent_student_nos
+        .iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>();
+    if absent.len()
+        != input
+            .absent_student_nos
+            .iter()
+            .filter(|value| !value.trim().is_empty())
+            .count()
+    {
+        return Err(CoreError::Invalid("缺交学号不能重复".into()));
+    }
+    let roster_numbers = students
+        .iter()
+        .map(|student| student.student_no.trim().to_string())
+        .collect::<BTreeSet<_>>();
+    if absent.iter().any(|number| !roster_numbers.contains(number)) {
+        return Err(CoreError::Invalid("缺交学号不在当前班级花名册".into()));
+    }
+    if absent.contains(first_student_no) {
+        return Err(CoreError::Invalid(
+            "起始学生不能同时标记缺交；请改选下一位实际提交学生".into(),
+        ));
+    }
+
+    let group_count = pages.len() / input.expected_pages_per_attempt as usize;
+    let mut selected = Vec::with_capacity(group_count);
+    let mut covered_absent = BTreeSet::new();
+    for student in students.iter().skip(start_index) {
+        if absent.contains(student.student_no.trim()) {
+            covered_absent.insert(student.student_no.trim().to_string());
+            continue;
+        }
+        selected.push(student);
+        if selected.len() == group_count {
+            break;
+        }
+    }
+    if selected.len() != group_count {
+        return Err(CoreError::Invalid(
+            "从所选学号开始，扣除缺交后没有足够学生对应全部照片".into(),
+        ));
+    }
+    if covered_absent != absent {
+        return Err(CoreError::Invalid(
+            "缺交学生必须位于本批起始学号和推断结束学号之间".into(),
+        ));
+    }
+
+    let page_type_cycle = (0..input.expected_pages_per_attempt)
+        .map(|index| format!("page_{}", index + 1))
+        .collect::<Vec<_>>();
+    let mut assignments = Vec::with_capacity(group_count);
+    for (group_index, student) in selected.iter().enumerate() {
+        let start = group_index * input.expected_pages_per_attempt as usize;
+        let end = start + input.expected_pages_per_attempt as usize;
+        assignments.push(serde_json::json!({
+            "group_index": group_index,
+            "student_id": student.id,
+            "student_no": student.student_no,
+            "student_name": student.name,
+            "pages": pages[start..end].iter().enumerate().map(|(page_index, page)| {
+                serde_json::json!({
+                    "page_id": page.id,
+                    "import_index": page.import_index,
+                    "page_no": page_index + 1,
+                    "page_type_key": page_type_cycle[page_index]
+                })
+            }).collect::<Vec<_>>()
+        }));
+    }
+    let last_student = selected
+        .last()
+        .ok_or_else(|| CoreError::Invalid("本批没有可确认的学生页组".into()))?;
+    let roster_scope = serde_json::json!({
+        "schema_version": 1,
+        "first_student_id": selected[0].id,
+        "first_student_no": selected[0].student_no,
+        "last_student_id": last_student.id,
+        "last_student_no": last_student.student_no,
+        "absent_student_nos": absent.iter().collect::<Vec<_>>()
+    });
+    let page_type_cycle_json = serde_json::json!({
+        "schema_version": 1,
+        "source": "teacher_fixed_page_count_confirmation",
+        "keys": page_type_cycle
+    });
+    let assignments_json = serde_json::json!({
+        "schema_version": 1,
+        "assignment_state": "teacher_confirmed",
+        "groups": assignments
+    });
+    let snapshot = serde_json::json!({
+        "schema_version": 1,
+        "ingest_batch_id": input.ingest_batch_id,
+        "source_grouping_revision_id": source_grouping.id,
+        "expected_pages_per_attempt": input.expected_pages_per_attempt,
+        "roster_scope": roster_scope,
+        "page_type_cycle": page_type_cycle_json,
+        "assignments": assignments_json
+    });
+    let snapshot_hash = hashing::sha256_hex(
+        &serde_json::to_vec(&snapshot)
+            .map_err(|error| CoreError::Parse(format!("分组确认快照失败：{error}")))?,
+    );
+    if let Some(existing) = conn
+        .query_row(
+            "SELECT id,public_id,ingest_batch_id,revision,snapshot_hash,
+                    source_grouping_revision_id,expected_pages_per_attempt,first_student_id,
+                    roster_scope_json,page_type_cycle_json,assignments_json,decision,state,
+                    confirmed_by
+             FROM exam_ordered_grouping_decisions_v2
+             WHERE ingest_batch_id=?1 AND snapshot_hash=?2 AND state='active'",
+            (input.ingest_batch_id, &snapshot_hash),
+            grouping_decision_row,
+        )
+        .optional()?
+    {
+        return Ok(existing);
+    }
+
+    let now = time::utc_now_rfc3339();
+    let public_id = ids::new_public_id();
+    let roster_scope_json = roster_scope.to_string();
+    let page_type_cycle_json = page_type_cycle_json.to_string();
+    let assignments_json = assignments_json.to_string();
+    let tx = conn.unchecked_transaction()?;
+    let revision: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(revision),0)+1 FROM exam_ordered_grouping_decisions_v2
+         WHERE ingest_batch_id=?1",
+        [input.ingest_batch_id],
+        |row| row.get(0),
+    )?;
+    tx.execute(
+        "UPDATE exam_ordered_grouping_decisions_v2 SET state='superseded'
+         WHERE ingest_batch_id=?1 AND state='active'",
+        [input.ingest_batch_id],
+    )?;
+    tx.execute(
+        "INSERT INTO exam_ordered_grouping_decisions_v2
+         (public_id,ingest_batch_id,revision,snapshot_hash,source_grouping_revision_id,
+          expected_pages_per_attempt,first_student_id,roster_scope_json,page_type_cycle_json,
+          assignments_json,decision,state,confirmed_by,created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'teacher_confirmed','active',?11,?12)",
+        params![
+            &public_id,
+            input.ingest_batch_id,
+            revision,
+            &snapshot_hash,
+            source_grouping.id,
+            input.expected_pages_per_attempt,
+            selected[0].id,
+            &roster_scope_json,
+            &page_type_cycle_json,
+            &assignments_json,
+            teacher,
+            &now,
+        ],
+    )?;
+    let id = tx.last_insert_rowid();
+    append_audit(
+        &tx,
+        &AuditInput {
+            idempotency_key: &format!("exam:ordered-grouping-decision:{public_id}:active"),
+            actor_type: AuditActorType::Teacher,
+            actor_id: Some(teacher),
+            action: "exam.ordered_grouping.teacher_confirmed",
+            object_type: "exam_ordered_grouping_decision",
+            object_id: &public_id,
+            revision,
+            now: &now,
+        },
+    )?;
+    tx.commit()?;
+    conn.query_row(
+        "SELECT id,public_id,ingest_batch_id,revision,snapshot_hash,
+                source_grouping_revision_id,expected_pages_per_attempt,first_student_id,
+                roster_scope_json,page_type_cycle_json,assignments_json,decision,state,
+                confirmed_by
+         FROM exam_ordered_grouping_decisions_v2 WHERE id=?1",
+        [id],
+        grouping_decision_row,
     )
     .map_err(Into::into)
 }
@@ -1289,6 +1601,132 @@ mod tests {
         assert_eq!(confirmed.material_type, "answer_sheet");
         let states: Vec<String> = conn
             .prepare("SELECT state FROM exam_material_type_revisions_v2 ORDER BY revision")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(states, vec!["superseded", "active"]);
+    }
+
+    #[test]
+    fn teacher_confirms_subset_start_without_shifting_full_roster() {
+        let conn = seed();
+        let (batch_id, entries) = seed_batch(&conn, 2);
+        record_import_order(
+            &conn,
+            &NewImportOrderRevision {
+                ingest_batch_id: batch_id,
+                sort_policy: "filename_natural_exif_filetime_crosscheck_v1",
+                order_confidence: 0.8,
+                entries: &entries,
+                conflict_codes: &[],
+                created_by_type: "system",
+                created_by: None,
+            },
+        )
+        .unwrap();
+        confirm_material_type(&conn, batch_id, "ordinary_paper", "teacher").unwrap();
+        preview_ordered_grouping(
+            &conn,
+            &OrderedGroupingInput {
+                ingest_batch_id: batch_id,
+                expected_pages_per_attempt: 1,
+                created_by_type: "system",
+                created_by: None,
+            },
+        )
+        .unwrap();
+
+        let confirmed = confirm_ordered_grouping(
+            &conn,
+            &ConfirmOrderedGroupingInput {
+                ingest_batch_id: batch_id,
+                expected_pages_per_attempt: 1,
+                first_student_no: "2",
+                absent_student_nos: &[],
+                confirmed_by: "teacher",
+            },
+        )
+        .unwrap();
+        let assignments: Value = serde_json::from_str(&confirmed.assignments_json).unwrap();
+        let numbers = assignments["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|group| group["student_no"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(numbers, vec!["2", "10"]);
+        assert!(conn
+            .query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM exam_page_match_revisions_v2)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap());
+    }
+
+    #[test]
+    fn absence_correction_appends_decision_revision_and_preserves_old_mapping() {
+        let conn = seed();
+        let (batch_id, entries) = seed_batch(&conn, 2);
+        record_import_order(
+            &conn,
+            &NewImportOrderRevision {
+                ingest_batch_id: batch_id,
+                sort_policy: "filename_natural_exif_filetime_crosscheck_v1",
+                order_confidence: 0.8,
+                entries: &entries,
+                conflict_codes: &[],
+                created_by_type: "system",
+                created_by: None,
+            },
+        )
+        .unwrap();
+        confirm_material_type(&conn, batch_id, "ordinary_paper", "teacher").unwrap();
+        preview_ordered_grouping(
+            &conn,
+            &OrderedGroupingInput {
+                ingest_batch_id: batch_id,
+                expected_pages_per_attempt: 1,
+                created_by_type: "system",
+                created_by: None,
+            },
+        )
+        .unwrap();
+        let first = confirm_ordered_grouping(
+            &conn,
+            &ConfirmOrderedGroupingInput {
+                ingest_batch_id: batch_id,
+                expected_pages_per_attempt: 1,
+                first_student_no: "1",
+                absent_student_nos: &[],
+                confirmed_by: "teacher",
+            },
+        )
+        .unwrap();
+        let corrected = confirm_ordered_grouping(
+            &conn,
+            &ConfirmOrderedGroupingInput {
+                ingest_batch_id: batch_id,
+                expected_pages_per_attempt: 1,
+                first_student_no: "1",
+                absent_student_nos: &["2".into()],
+                confirmed_by: "teacher",
+            },
+        )
+        .unwrap();
+        assert_eq!((first.revision, corrected.revision), (1, 2));
+        let assignments: Value = serde_json::from_str(&corrected.assignments_json).unwrap();
+        let numbers = assignments["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|group| group["student_no"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(numbers, vec!["1", "10"]);
+        let states: Vec<String> = conn
+            .prepare("SELECT state FROM exam_ordered_grouping_decisions_v2 ORDER BY revision")
             .unwrap()
             .query_map([], |row| row.get(0))
             .unwrap()

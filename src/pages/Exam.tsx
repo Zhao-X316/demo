@@ -13,6 +13,7 @@ import {
   examAnswerHumanDecide,
   examAnswerSuggest,
   examAnswersList,
+  examFixedIntakeConfirmGrouping,
   examFixedIntakeOptions,
   examFixedIntakeConfirmMaterialType,
   examFixedIntakePrepare,
@@ -255,6 +256,9 @@ function FixedIntakeTab({
   const [expectedPages, setExpectedPages] = useState("1");
   const [busy, setBusy] = useState(false);
   const [confirmingType, setConfirmingType] = useState(false);
+  const [confirmingGrouping, setConfirmingGrouping] = useState(false);
+  const [groupingStartNo, setGroupingStartNo] = useState("");
+  const [absentStudentNos, setAbsentStudentNos] = useState<string[]>([]);
   const [result, setResult] = useState<FixedIntakeResult | null>(null);
   const [requestKey, setRequestKey] = useState("");
 
@@ -273,6 +277,8 @@ function FixedIntakeTab({
   const resetRequest = () => {
     setRequestKey("");
     setResult(null);
+    setGroupingStartNo("");
+    setAbsentStudentNos([]);
   };
 
   const pickStudentPapers = async () => {
@@ -336,12 +342,41 @@ function FixedIntakeTab({
         idempotencyKey: currentKey,
       });
       setResult(prepared);
+      setGroupingStartNo(
+        prepared.groupingFirstStudentNo
+          || prepared.groupingRoster[0]?.studentNo
+          || "",
+      );
+      setAbsentStudentNos([]);
       setRequestKey("");
     } catch (err) {
       onError(String(err));
     } finally {
       setBusy(false);
     }
+  };
+
+  const confirmGrouping = async () => {
+    if (!result || !groupingStartNo) return;
+    setConfirmingGrouping(true);
+    try {
+      const confirmed = await examFixedIntakeConfirmGrouping(
+        result.batchId,
+        groupingStartNo,
+        absentStudentNos,
+      );
+      setResult({ ...result, ...confirmed });
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setConfirmingGrouping(false);
+    }
+  };
+
+  const toggleAbsentStudent = (studentNo: string) => {
+    setAbsentStudentNos((current) => current.includes(studentNo)
+      ? current.filter((value) => value !== studentNo)
+      : [...current, studentNo]);
   };
 
   const confirmMaterialType = async (
@@ -377,6 +412,12 @@ function FixedIntakeTab({
     : result?.route === "review_required"
       ? "需老师复核"
       : "暂时受阻";
+  const groupingStartIndex = result?.groupingRoster.findIndex(
+    (student) => student.studentNo === groupingStartNo,
+  ) ?? -1;
+  const groupingAbsenceCandidates = groupingStartIndex >= 0
+    ? result?.groupingRoster.slice(groupingStartIndex + 1) ?? []
+    : [];
 
   return (
     <div className="intake-layout">
@@ -504,6 +545,51 @@ function FixedIntakeTab({
                 </div>
               </div>
             )}
+            {!result.materialTypeNeedsConfirmation
+              && result.groupingRoute !== "blocked"
+              && !result.groupingConfirmed && (
+              <div className="intake-grouping-confirm">
+                <b>确认照片从哪位学生开始</b>
+                <span>系统会按学号升序连续对应 {result.studentGroupCount} 名学生；只需标出中间缺交的人。</span>
+                <label className="field">
+                  <span className="fl">第一份是谁</span>
+                  <select value={groupingStartNo} onChange={(event) => {
+                    setGroupingStartNo(event.target.value);
+                    setAbsentStudentNos([]);
+                  }}>
+                    {result.groupingRoster.map((student) => (
+                      <option key={student.studentId} value={student.studentNo}>
+                        {student.studentNo}号 · {student.studentName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <details>
+                  <summary>{absentStudentNos.length ? `已标记 ${absentStudentNos.length} 人缺交` : "有人缺交？点这里勾选"}</summary>
+                  <div className="intake-absence-list">
+                    {groupingAbsenceCandidates.map((student) => (
+                      <label key={student.studentId}>
+                        <input
+                          type="checkbox"
+                          checked={absentStudentNos.includes(student.studentNo)}
+                          onChange={() => toggleAbsentStudent(student.studentNo)}
+                        />
+                        <span>{student.studentNo}号 · {student.studentName}</span>
+                      </label>
+                    ))}
+                  </div>
+                </details>
+                <button disabled={confirmingGrouping || !groupingStartNo} onClick={confirmGrouping}>
+                  {confirmingGrouping ? "正在确认对应关系…" : `确认这 ${result.studentGroupCount} 份学生顺序`}
+                </button>
+              </div>
+            )}
+            {result.groupingConfirmed && (
+              <div className="intake-grouping-confirm confirmed">
+                <b>照片与学生顺序已确认</b>
+                <span>{result.groupingFirstStudentNo}号至 {result.groupingLastStudentNo}号，共 {result.studentGroupCount} 名；后续页面质量异常只影响对应页组。</span>
+              </div>
+            )}
             <div className="intake-route-grid">
               <div className={result.route === "ready_for_batch_confirm" ? "active ready" : ""}>
                 <span>可批量确认</span>
@@ -536,7 +622,7 @@ function FixedIntakeTab({
             <div className="intake-next">
               <span>下一步</span>
               <b>{result.nextAction}</b>
-              <button disabled={result.route === "blocked" || result.groupingRoute === "blocked" || result.materialTypeNeedsConfirmation} onClick={onOpenReview}>进入批改终审</button>
+              <button disabled={result.route === "blocked" || result.groupingRoute === "blocked" || result.materialTypeNeedsConfirmation || !result.groupingConfirmed} onClick={onOpenReview}>进入批改终审</button>
             </div>
           </>
         )}

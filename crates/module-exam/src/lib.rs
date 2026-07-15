@@ -48,6 +48,10 @@ static MIGRATIONS: &[Migration] = &[
         id: "exam_0009",
         sql: include_str!("../migrations/0009_ordered_material_routing.sql"),
     },
+    Migration {
+        id: "exam_0010",
+        sql: include_str!("../migrations/0010_ordered_grouping_confirmation.sql"),
+    },
 ];
 
 /// 模块迁移（供外壳/测试在 core 迁移之后运行）。

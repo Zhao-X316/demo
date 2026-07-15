@@ -192,6 +192,12 @@ export interface FixedIntakeDocumentSummary {
   pageCount: number;
 }
 
+export interface GroupingRosterStudent {
+  studentId: number;
+  studentNo: string;
+  studentName: string;
+}
+
 export interface FixedIntakeResult {
   batchId: number;
   batchPublicId: string;
@@ -216,6 +222,11 @@ export interface FixedIntakeResult {
   groupingRoute: "preview_ready" | "review_required" | "blocked";
   studentGroupCount: number;
   groupingIssueCodes: string[];
+  expectedPagesPerAttempt: number;
+  groupingRoster: GroupingRosterStudent[];
+  groupingConfirmed: boolean;
+  groupingFirstStudentNo: string | null;
+  groupingLastStudentNo: string | null;
   nextAction: string;
 }
 
@@ -226,6 +237,16 @@ export interface MaterialTypeConfirmationResult {
   groupingRoute: "preview_ready" | "review_required" | "blocked";
   studentGroupCount: number;
   groupingIssueCodes: string[];
+  nextAction: string;
+}
+
+export interface GroupingConfirmationResult {
+  groupingRoute: "preview_ready";
+  studentGroupCount: number;
+  groupingIssueCodes: string[];
+  groupingConfirmed: true;
+  groupingFirstStudentNo: string;
+  groupingLastStudentNo: string;
   nextAction: string;
 }
 
@@ -298,4 +319,14 @@ export const examFixedIntakeConfirmMaterialType = (
 ) => call<MaterialTypeConfirmationResult>("exam_fixed_intake_confirm_material_type", {
   batchId: batch_id,
   materialType: material_type,
+});
+
+export const examFixedIntakeConfirmGrouping = (
+  batch_id: number,
+  first_student_no: string,
+  absent_student_nos: string[],
+) => call<GroupingConfirmationResult>("exam_fixed_intake_confirm_grouping", {
+  batchId: batch_id,
+  firstStudentNo: first_student_no,
+  absentStudentNos: absent_student_nos,
 });

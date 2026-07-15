@@ -97,6 +97,7 @@ fn main() {
             exam_commands::exam_fixed_intake_options,
             exam_commands::exam_fixed_intake_prepare,
             exam_commands::exam_fixed_intake_confirm_material_type,
+            exam_commands::exam_fixed_intake_confirm_grouping,
             exam_commands::exam_objective_recognize_region,
         ])
         .run(tauri::generate_context!())
