@@ -682,7 +682,7 @@ fn expect(condition: bool, message: impl Into<String>) -> AppResult<()> {
 
 fn verify_fixture(data_dir: &Path, phase: &str) -> AppResult<FixtureReport> {
     let report = inspect_fixture(data_dir, phase)?;
-    expect(report.migration_count == 17, "夹具必须包含全部 17 个迁移")?;
+    expect(report.migration_count == 18, "夹具必须包含全部 18 个迁移")?;
     expect(report.integrity_check == "ok", "integrity_check 必须为 ok")?;
     expect(report.foreign_key_violations == 0, "夹具不能包含外键违规")?;
     expect(report.workbench_rows == 6, "工作台必须显示 6 条题区证据")?;
