@@ -18,7 +18,7 @@ use module_exam::vlm::{self as exam_vlm, AnalyzedQuestion};
 
 use crate::exam_intake::{
     self, FixedIntakeOption, FixedIntakeRequest, FixedIntakeResult, GroupingConfirmationResult,
-    MaterialTypeConfirmationResult,
+    MaterialTypeConfirmationResult, PageCycleSuggestion,
 };
 use crate::objective_provider::ArkObjectiveRecognizer;
 use crate::objective_run::{self, BeginObjectiveRun};
@@ -296,6 +296,12 @@ pub fn exam_objective_publish_attempt(
 pub fn exam_fixed_intake_options(state: State<'_, AppState>) -> R<Vec<FixedIntakeOption>> {
     let conn = lock(&state)?;
     exam_intake::list_options(&conn).map_err(e)
+}
+
+/// 只读取待上传文件并比较重复版式，不持有数据库锁，也不创建任何批改事实。
+#[tauri::command]
+pub fn exam_fixed_intake_infer_page_cycle(student_paths: Vec<String>) -> R<PageCycleSuggestion> {
+    exam_intake::infer_page_cycle_paths(&student_paths).map_err(e)
 }
 
 /// 将 JPG/PDF 学生卷和可选答案资料归档、拆页并登记到既有 B1/B3a 状态机。

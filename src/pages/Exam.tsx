@@ -5,6 +5,7 @@ import {
   AnswerDetail,
   FixedIntakeOption,
   FixedIntakeResult,
+  PageCycleSuggestion,
   KnowledgePoint,
   ObjectiveWorkbench,
   ObjectiveWorkbenchRow,
@@ -14,6 +15,7 @@ import {
   examAnswerSuggest,
   examAnswersList,
   examFixedIntakeConfirmGrouping,
+  examFixedIntakeInferPageCycle,
   examFixedIntakeOptions,
   examFixedIntakeConfirmMaterialType,
   examFixedIntakePrepare,
@@ -254,6 +256,7 @@ function FixedIntakeTab({
   const [answerPath, setAnswerPath] = useState<string | null>(null);
   const [answerText, setAnswerText] = useState("");
   const [expectedPages, setExpectedPages] = useState("1");
+  const [pageCycle, setPageCycle] = useState<PageCycleSuggestion | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmingType, setConfirmingType] = useState(false);
   const [confirmingGrouping, setConfirmingGrouping] = useState(false);
@@ -292,7 +295,13 @@ function FixedIntakeTab({
         return;
       }
       setStudentPaths(paths);
-      resetRequest();
+      setRequestKey("");
+      setResult(null);
+      setGroupingStartNo("");
+      setAbsentStudentNos([]);
+      const inferred = await examFixedIntakeInferPageCycle(paths);
+      setPageCycle(inferred);
+      setExpectedPages(String(inferred.expectedPagesPerAttempt));
     } catch (err) {
       onError(`选择学生试卷失败：${String(err)}`);
     }
@@ -474,14 +483,28 @@ function FixedIntakeTab({
               </div>
             )}
             <details className="intake-advanced">
-              <summary>每名学生不是 1 页？按学生、页码顺序选择文件</summary>
+              <summary>
+                {pageCycle?.source === "visual_repeating_layout_v1"
+                  ? `检测到版式每 ${pageCycle.expectedPagesPerAttempt} 页重复 · 可修改`
+                  : pageCycle?.source === "pdf_document_page_count"
+                    ? `检测到每份 PDF ${pageCycle.expectedPagesPerAttempt} 页 · 可修改`
+                    : "没有识别出稳定重复？手动填写每人页数"}
+              </summary>
               <label className="field">
                 <span className="fl">每名学生固定页数</span>
                 <input value={expectedPages} inputMode="numeric" onChange={(event) => {
                   setExpectedPages(event.target.value);
-                  resetRequest();
+                  setRequestKey("");
+                  setResult(null);
                 }} />
               </label>
+              {pageCycle && (
+                <small className="muted">
+                  {pageCycle.needsTeacherInput
+                    ? "现有照片不足以可靠判断，请确认页数。"
+                    : `版式周期可信度 ${Math.round(pageCycle.confidence * 100)}%，最终仍在学生顺序卡中一次确认。`}
+                </small>
+              )}
             </details>
           </div>
           <div className="intake-step optional">
@@ -532,6 +555,12 @@ function FixedIntakeTab({
               <b>已归档 {result.studentDocumentCount} 份学生卷，共 {result.studentPageCount} 页</b>
               <span>{result.answerDocumentCount ? "答案资料已归档，等待识别或确认" : "沿用作业已确认答案"}</span>
               <span>已按文件名自然顺序整理，并用拍摄/文件时间交叉核对 · 顺序可信度 {Math.round(result.orderConfidence * 100)}%</span>
+              <span>
+                每人 {result.expectedPagesPerAttempt} 页
+                {result.pageCycleSource === "visual_repeating_layout_v1"
+                  ? ` · 重复版式识别 ${Math.round(result.pageCycleConfidence * 100)}%`
+                  : " · 已按老师填写页数排列"}
+              </span>
               <span>资料类型：{MATERIAL_TYPE_LABEL[result.materialType] || result.materialType} · 预计 {result.studentGroupCount} 名学生</span>
             </div>
             {result.materialTypeNeedsConfirmation && (

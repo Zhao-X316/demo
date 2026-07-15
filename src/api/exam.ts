@@ -223,11 +223,22 @@ export interface FixedIntakeResult {
   studentGroupCount: number;
   groupingIssueCodes: string[];
   expectedPagesPerAttempt: number;
+  pageCycleSource: string;
+  pageCycleConfidence: number;
+  pageCycleNeedsTeacherInput: boolean;
   groupingRoster: GroupingRosterStudent[];
   groupingConfirmed: boolean;
   groupingFirstStudentNo: string | null;
   groupingLastStudentNo: string | null;
   nextAction: string;
+}
+
+export interface PageCycleSuggestion {
+  expectedPagesPerAttempt: number;
+  confidence: number;
+  source: string;
+  issueCodes: string[];
+  needsTeacherInput: boolean;
 }
 
 export interface MaterialTypeConfirmationResult {
@@ -309,6 +320,11 @@ export const examObjectiveRecognizeRegion = (
 
 export const examFixedIntakeOptions = () =>
   call<FixedIntakeOption[]>("exam_fixed_intake_options");
+
+export const examFixedIntakeInferPageCycle = (student_paths: string[]) =>
+  call<PageCycleSuggestion>("exam_fixed_intake_infer_page_cycle", {
+    studentPaths: student_paths,
+  });
 
 export const examFixedIntakePrepare = (request: FixedIntakeRequest) =>
   call<FixedIntakeResult>("exam_fixed_intake_prepare", { request });

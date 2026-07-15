@@ -95,6 +95,7 @@ fn main() {
             exam_commands::exam_objective_strict_batch_accept,
             exam_commands::exam_objective_publish_attempt,
             exam_commands::exam_fixed_intake_options,
+            exam_commands::exam_fixed_intake_infer_page_cycle,
             exam_commands::exam_fixed_intake_prepare,
             exam_commands::exam_fixed_intake_confirm_material_type,
             exam_commands::exam_fixed_intake_confirm_grouping,

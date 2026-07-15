@@ -20,6 +20,7 @@ use module_exam::service::ordered_intake::{
     self, ConfirmOrderedGroupingInput, ImportOrderEntry, NewImportOrderRevision,
     NewMaterialTypeRevision, NewPageTypeRevision, OrderedGroupingInput,
 };
+use module_exam::service::page_cycle;
 use module_exam::service::papers::{self, NewIngestBatch, NewIngestPage};
 
 use crate::pdf_pages;
@@ -99,11 +100,24 @@ pub struct FixedIntakeResult {
     pub student_group_count: i64,
     pub grouping_issue_codes: Vec<String>,
     pub expected_pages_per_attempt: i64,
+    pub page_cycle_source: String,
+    pub page_cycle_confidence: f64,
+    pub page_cycle_needs_teacher_input: bool,
     pub grouping_roster: Vec<GroupingRosterStudent>,
     pub grouping_confirmed: bool,
     pub grouping_first_student_no: Option<String>,
     pub grouping_last_student_no: Option<String>,
     pub next_action: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageCycleSuggestion {
+    pub expected_pages_per_attempt: i64,
+    pub confidence: f64,
+    pub source: String,
+    pub issue_codes: Vec<String>,
+    pub needs_teacher_input: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -188,6 +202,7 @@ pub(crate) struct PreparedFixedIntake {
     answer_source: Option<PreparedSource>,
     order_confidence: f64,
     order_conflict_codes: Vec<String>,
+    page_cycle: PageCycleSuggestion,
 }
 
 struct ArchivedFile {
@@ -422,6 +437,102 @@ fn prepare_text(text: &str) -> CoreResult<PreparedSource> {
         file_created_ms: None,
         file_modified_ms: None,
     })
+}
+
+fn manual_page_cycle(code: &str) -> PageCycleSuggestion {
+    PageCycleSuggestion {
+        expected_pages_per_attempt: 1,
+        confidence: 0.0,
+        source: "teacher_input_required".into(),
+        issue_codes: vec![code.into()],
+        needs_teacher_input: true,
+    }
+}
+
+fn infer_prepared_page_cycle(sources: &[PreparedSource]) -> PageCycleSuggestion {
+    if sources.is_empty() {
+        return manual_page_cycle("NO_STUDENT_PAGE");
+    }
+    if sources
+        .iter()
+        .all(|source| source.format == SourceFormat::Pdf)
+    {
+        let page_counts = sources
+            .iter()
+            .map(|source| source.pdf_pages.len() as i64)
+            .collect::<Vec<_>>();
+        let first = page_counts[0];
+        if first > 0 && page_counts.iter().all(|count| *count == first) {
+            return PageCycleSuggestion {
+                expected_pages_per_attempt: first,
+                confidence: if sources.len() >= 2 { 0.99 } else { 0.80 },
+                source: "pdf_document_page_count".into(),
+                issue_codes: Vec::new(),
+                needs_teacher_input: sources.len() < 2,
+            };
+        }
+        return manual_page_cycle("PDF_PAGE_COUNT_MISMATCH");
+    }
+    if !sources
+        .iter()
+        .all(|source| source.format == SourceFormat::Jpeg)
+    {
+        return manual_page_cycle("MIXED_STUDENT_FORMAT_PAGE_CYCLE");
+    }
+    if sources.len() == 1 {
+        return PageCycleSuggestion {
+            expected_pages_per_attempt: 1,
+            confidence: 0.60,
+            source: "single_photo_fallback".into(),
+            issue_codes: vec!["PAGE_CYCLE_NEEDS_MORE_PHOTOS".into()],
+            needs_teacher_input: true,
+        };
+    }
+    let signatures = sources
+        .iter()
+        .map(|source| {
+            let path = source
+                .path
+                .as_ref()
+                .ok_or_else(|| CoreError::Invalid("学生照片缺少本地路径".into()))?;
+            let bytes = std::fs::read(path).map_err(|error| io_error("读取页面版式失败", error))?;
+            page_cycle::signature_from_jpeg(&bytes)
+        })
+        .collect::<CoreResult<Vec<_>>>();
+    let Ok(signatures) = signatures else {
+        return manual_page_cycle("PAGE_LAYOUT_DECODE_FAILED");
+    };
+    let Some(inference) = page_cycle::infer_repeating_cycle(&signatures, 12) else {
+        return manual_page_cycle("PAGE_CYCLE_NOT_CONFIDENT");
+    };
+    PageCycleSuggestion {
+        expected_pages_per_attempt: inference.pages_per_attempt as i64,
+        confidence: inference.confidence,
+        source: "visual_repeating_layout_v1".into(),
+        issue_codes: Vec::new(),
+        needs_teacher_input: inference.confidence < 0.80,
+    }
+}
+
+/// 数据库写入前的轻量版式预判；失败时只要求老师补一个页数，不产生任何业务事实。
+pub(crate) fn infer_page_cycle_paths(paths: &[String]) -> CoreResult<PageCycleSuggestion> {
+    if paths.is_empty() {
+        return Err(CoreError::Invalid("请至少选择一份学生试卷".into()));
+    }
+    let mut sources = paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| prepare_path(path, false, index as i64))
+        .collect::<CoreResult<Vec<_>>>()?;
+    sources.sort_by(|left, right| {
+        ordered_intake::natural_name_cmp(&left.original_name, &right.original_name).then_with(
+            || {
+                left.original_request_index
+                    .cmp(&right.original_request_index)
+            },
+        )
+    });
+    Ok(infer_prepared_page_cycle(&sources))
 }
 
 fn archive_bytes(
@@ -698,11 +809,13 @@ pub(crate) fn prepare_fixed_intake_files(
         (None, None) => None,
         (Some(_), Some(_)) => unreachable!("validated"),
     };
+    let page_cycle = infer_prepared_page_cycle(&student_sources);
     Ok(PreparedFixedIntake {
         student_sources,
         answer_source,
         order_confidence,
         order_conflict_codes,
+        page_cycle,
     })
 }
 
@@ -856,19 +969,36 @@ pub(crate) fn persist_fixed_intake(
                     expected_page_no: Some(import_index % request.expected_pages_per_attempt + 1),
                 },
             )?;
-            let single_page = request.expected_pages_per_attempt == 1;
+            let cycle_matches = prepared.page_cycle.expected_pages_per_attempt
+                == request.expected_pages_per_attempt
+                && prepared.page_cycle.source == "visual_repeating_layout_v1";
+            let page_no = import_index % request.expected_pages_per_attempt + 1;
+            let evidence = serde_json::json!({
+                "schema_version": 1,
+                "source": if cycle_matches {
+                    "visual_repeating_layout_v1"
+                } else {
+                    "teacher_fixed_page_count_sequence"
+                },
+                "cycle_confidence": if cycle_matches {
+                    prepared.page_cycle.confidence
+                } else {
+                    0.80
+                }
+            })
+            .to_string();
             ordered_intake::record_page_type(
                 conn,
                 &NewPageTypeRevision {
                     page_id: page.id,
-                    page_type_key: if single_page { "page_1" } else { "unknown" },
-                    confidence: if single_page { 1.0 } else { 0.0 },
-                    evidence_json: if single_page {
-                        r#"{"schema_version":1,"source":"single_page_contract"}"#
+                    page_type_key: &format!("page_{page_no}"),
+                    confidence: if cycle_matches {
+                        prepared.page_cycle.confidence
                     } else {
-                        r#"{"schema_version":1,"source":"awaiting_visual_page_classifier"}"#
+                        0.80
                     },
-                    decision: if single_page { "suggested" } else { "unknown" },
+                    evidence_json: &evidence,
+                    decision: "suggested",
                     created_by_type: "system",
                     created_by: None,
                     confirmed_by: None,
@@ -1056,6 +1186,10 @@ pub(crate) fn persist_fixed_intake(
         student_group_count: grouping.student_group_count,
         grouping_issue_codes,
         expected_pages_per_attempt: request.expected_pages_per_attempt,
+        page_cycle_source: prepared.page_cycle.source.clone(),
+        page_cycle_confidence: prepared.page_cycle.confidence,
+        page_cycle_needs_teacher_input: prepared.page_cycle.needs_teacher_input
+            || prepared.page_cycle.expected_pages_per_attempt != request.expected_pages_per_attempt,
         grouping_roster,
         grouping_confirmed,
         grouping_first_student_no,
@@ -1281,6 +1415,18 @@ mod tests {
         assert_eq!(options[0].item_count, 1);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pdf_page_count_is_suggested_before_any_database_write() {
+        let root = test_root("pdf-cycle-suggestion");
+        let student = root.join("student.pdf");
+        std::fs::write(&student, crate::pdf_pages::two_page_pdf_fixture()).unwrap();
+        let suggestion = infer_page_cycle_paths(&[student.to_string_lossy().into_owned()]).unwrap();
+        assert_eq!(suggestion.expected_pages_per_attempt, 2);
+        assert_eq!(suggestion.source, "pdf_document_page_count");
+        assert!(suggestion.needs_teacher_input);
+    }
+
     #[test]
     fn jpeg_and_pasted_answer_are_archived_without_creating_scores() {
         let root = test_root("jpeg");
@@ -1413,6 +1559,52 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
         assert_eq!(value["entries"][0]["original_request_index"], 2);
         assert_eq!(value["entries"][2]["original_request_index"], 0);
+    }
+
+    #[test]
+    fn fixed_page_count_records_a_repeating_page_cycle_instead_of_unknown_types() {
+        let root = test_root("fixed-page-cycle");
+        let second = root.join("IMG_2.jpg");
+        let first = root.join("IMG_1.jpg");
+        write_jpeg(&second, b"paper-page-two");
+        write_jpeg(&first, b"paper-page-one");
+        let conn = seed();
+        let request = FixedIntakeRequest {
+            assessment_version_id: 1,
+            student_paths: vec![
+                second.to_string_lossy().into_owned(),
+                first.to_string_lossy().into_owned(),
+            ],
+            answer_path: None,
+            answer_text: None,
+            expected_pages_per_attempt: 2,
+            material_type: Some("ordinary_paper".into()),
+            idempotency_key: "fixed-page-cycle-intake".into(),
+        };
+        let result = prepare_fixed_intake(&conn, &root, &request).unwrap();
+        assert_eq!(result.grouping_route, "review_required");
+        let page_types = conn
+            .prepare(
+                "SELECT page_type_key,decision FROM exam_page_type_revisions_v2 ORDER BY page_id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            page_types,
+            vec![
+                ("page_1".into(), "suggested".into()),
+                ("page_2".into(), "suggested".into())
+            ]
+        );
+        assert!(!result
+            .grouping_issue_codes
+            .iter()
+            .any(|code| code == "PAGE_TYPE_CYCLE_UNVERIFIED"));
     }
 
     #[test]
