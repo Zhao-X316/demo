@@ -1,4 +1,4 @@
-//! 答案图片/文本结构化的 provider-neutral 合同。
+//! 答案图片/PDF/文本结构化的 provider-neutral 合同。
 //!
 //! 请求只携带老师上传的 teaching_content 与当前作业题目清单，不携带学生作答，也
 //! 不携带当前标准答案。模型只能生成带来源锚点的候选，不能确认答案或改写 K1。
@@ -11,6 +11,15 @@ use suite_core::domain::hashing;
 use suite_core::error::{CoreError, CoreResult};
 
 pub const ANSWER_SOURCE_SCHEMA_VERSION: i64 = 1;
+pub const ANSWER_SOURCE_MAX_VISUAL_PAGES: usize = 40;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnswerSourceVisualPage {
+    pub page_no: i64,
+    pub mime_type: String,
+    pub sha256: String,
+    pub bytes: Vec<u8>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -95,6 +104,8 @@ pub struct AnswerSourceRecognitionRequest<'a> {
     pub mime_type: &'a str,
     pub source_bytes: &'a [u8],
     pub source_text: Option<&'a str>,
+    pub visualization_version: Option<&'a str>,
+    pub visual_pages: &'a [AnswerSourceVisualPage],
     pub items: &'a [AnswerSourceItemSpec],
 }
 
@@ -113,22 +124,70 @@ impl AnswerSourceRecognitionRequest<'_> {
         {
             return Err(CoreError::Invalid("答案资料 hash 非法".into()));
         }
-        if !matches!(self.source_format, "jpeg" | "text") {
+        if !matches!(self.source_format, "jpeg" | "pdf" | "text") {
             return Err(CoreError::Invalid(
-                "当前答案结构化纵切只接受图片或文本；PDF 已归档但需后续解析器".into(),
+                "答案结构化只接受 JPG、PDF 或文本".into(),
             ));
         }
         if self.source_bytes.is_empty() || self.items.is_empty() {
             return Err(CoreError::Invalid("答案资料和题目清单不能为空".into()));
         }
-        if self.source_format == "text"
-            && self
-                .source_text
-                .map(str::trim)
-                .unwrap_or_default()
-                .is_empty()
+        if hashing::sha256_hex(self.source_bytes)
+            != self.source_artifact_sha256.trim().to_ascii_lowercase()
         {
-            return Err(CoreError::Invalid("文本答案资料不能为空".into()));
+            return Err(CoreError::Invalid("答案资料内容与登记 hash 不一致".into()));
+        }
+        match self.source_format {
+            "text" => {
+                if self
+                    .source_text
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .is_empty()
+                    || self.visualization_version.is_some()
+                    || !self.visual_pages.is_empty()
+                {
+                    return Err(CoreError::Invalid("文本答案资料输入形态非法".into()));
+                }
+            }
+            "jpeg" | "pdf" => {
+                if self.source_text.is_some()
+                    || self
+                        .visualization_version
+                        .map(str::trim)
+                        .unwrap_or_default()
+                        .is_empty()
+                    || self.visual_pages.is_empty()
+                    || self.visual_pages.len() > ANSWER_SOURCE_MAX_VISUAL_PAGES
+                    || (self.source_format == "jpeg" && self.visual_pages.len() != 1)
+                {
+                    return Err(CoreError::Invalid("图片/PDF 答案资料输入形态非法".into()));
+                }
+                for (index, page) in self.visual_pages.iter().enumerate() {
+                    if page.page_no != (index + 1) as i64
+                        || !page.mime_type.trim().eq_ignore_ascii_case("image/jpeg")
+                        || page.bytes.is_empty()
+                        || page.sha256.len() != 64
+                        || !page.sha256.chars().all(|value| value.is_ascii_hexdigit())
+                        || hashing::sha256_hex(&page.bytes) != page.sha256.to_ascii_lowercase()
+                    {
+                        return Err(CoreError::Invalid(
+                            "答案资料视觉分页必须连续、可读且 hash 一致".into(),
+                        ));
+                    }
+                }
+                if self.source_format == "jpeg"
+                    && (self.visual_pages[0].bytes != self.source_bytes
+                        || !self.visual_pages[0]
+                            .sha256
+                            .eq_ignore_ascii_case(self.source_artifact_sha256.trim()))
+                {
+                    return Err(CoreError::Invalid(
+                        "JPG 答案资料视觉页必须对应原始 artifact".into(),
+                    ));
+                }
+            }
+            _ => unreachable!(),
         }
         let mut ids = BTreeSet::new();
         for item in self.items {
@@ -155,6 +214,12 @@ impl AnswerSourceRecognitionRequest<'_> {
             "source_artifact_sha256": self.source_artifact_sha256.to_ascii_lowercase(),
             "source_format": self.source_format,
             "mime_type": self.mime_type.to_ascii_lowercase(),
+            "visualization_version": self.visualization_version,
+            "visual_pages": self.visual_pages.iter().map(|page| serde_json::json!({
+                "page_no": page.page_no,
+                "mime_type": page.mime_type.to_ascii_lowercase(),
+                "sha256": page.sha256.to_ascii_lowercase(),
+            })).collect::<Vec<_>>(),
             "items": self.items,
         });
         let bytes = serde_json::to_vec(&payload)
@@ -230,6 +295,29 @@ impl AnswerSourceRecognitionOutput {
             }
             schema_object(&entry.answer_json, "候选答案")?;
             schema_object(&entry.source_anchor, "来源锚点")?;
+            match request.source_format {
+                "jpeg" | "pdf" => {
+                    let page = entry
+                        .source_anchor
+                        .get("page")
+                        .and_then(Value::as_i64)
+                        .ok_or_else(|| CoreError::Invalid("图片来源锚点缺少页码".into()))?;
+                    if page <= 0 || page > request.visual_pages.len() as i64 {
+                        return Err(CoreError::Invalid("答案来源锚点页码越界".into()));
+                    }
+                }
+                "text" => {
+                    if entry
+                        .source_anchor
+                        .get("line")
+                        .and_then(Value::as_i64)
+                        .is_none_or(|line| line <= 0)
+                    {
+                        return Err(CoreError::Invalid("文本来源锚点缺少有效行号".into()));
+                    }
+                }
+                _ => unreachable!(),
+            }
             if !entry.confidence.is_finite() || !(0.0..=1.0).contains(&entry.confidence) {
                 return Err(CoreError::Invalid(
                     "答案结构化逐题置信度必须位于 0~1".into(),
@@ -306,7 +394,7 @@ pub trait AnswerSourceRecognizer: Send + Sync {
 mod tests {
     use super::*;
 
-    const HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const SOURCE: &[u8] = b"1.A 2.TRUE";
 
     fn items() -> Vec<AnswerSourceItemSpec> {
         vec![
@@ -333,11 +421,14 @@ mod tests {
         AnswerSourceRecognitionRequest {
             ingest_batch_id: 7,
             source_artifact_id: 9,
-            source_artifact_sha256: HASH,
+            source_artifact_sha256:
+                "bef970ade57f0f91db0bebb0d8ba7b9525337025d59113c66f4940a970ba5de5",
             source_format: "text",
             mime_type: "text/plain",
-            source_bytes: b"1.A 2.TRUE",
+            source_bytes: SOURCE,
             source_text: Some("1.A 2.TRUE"),
+            visualization_version: None,
+            visual_pages: &[],
             items,
         }
     }
@@ -357,7 +448,7 @@ mod tests {
             schema_version: 1,
             ingest_batch_id: 7,
             source_artifact_id: 9,
-            source_artifact_sha256: "a".repeat(64),
+            source_artifact_sha256: request.source_artifact_sha256.into(),
             input_hash: request.input_hash().unwrap(),
             descriptor,
             state: AnswerSourceState::Ready,
@@ -390,5 +481,71 @@ mod tests {
         let serialized = serde_json::to_string(&items).unwrap();
         assert!(!serialized.contains("correct_labels"));
         assert_eq!(request.input_hash().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn pdf_pages_and_output_anchors_are_bound_to_real_page_numbers() {
+        let items = items();
+        let source = b"%PDF-fixture";
+        let pages = vec![
+            AnswerSourceVisualPage {
+                page_no: 1,
+                mime_type: "image/jpeg".into(),
+                sha256: hashing::sha256_hex(b"page-1"),
+                bytes: b"page-1".to_vec(),
+            },
+            AnswerSourceVisualPage {
+                page_no: 2,
+                mime_type: "image/jpeg".into(),
+                sha256: hashing::sha256_hex(b"page-2"),
+                bytes: b"page-2".to_vec(),
+            },
+        ];
+        let request = AnswerSourceRecognitionRequest {
+            ingest_batch_id: 7,
+            source_artifact_id: 9,
+            source_artifact_sha256: &hashing::sha256_hex(source),
+            source_format: "pdf",
+            mime_type: "application/pdf",
+            source_bytes: source,
+            source_text: None,
+            visualization_version: Some("fixture-renderer-v1"),
+            visual_pages: &pages,
+            items: &items,
+        };
+        let mut output = AnswerSourceRecognitionOutput {
+            schema_version: 1,
+            ingest_batch_id: 7,
+            source_artifact_id: 9,
+            source_artifact_sha256: hashing::sha256_hex(source),
+            input_hash: request.input_hash().unwrap(),
+            descriptor: AnswerSourceRecognizerDescriptor {
+                provider: "fixture".into(),
+                model_name: "fixture".into(),
+                model_version: "v1".into(),
+                config_version: "v1".into(),
+                rule_version: "v1".into(),
+            },
+            state: AnswerSourceState::Ready,
+            entries: vec![
+                AnswerSourceEntry {
+                    assessment_item_id: 11,
+                    answer_json: serde_json::json!({"schema_version":1,"correct_labels":["A"]}),
+                    source_anchor: serde_json::json!({"schema_version":1,"page":1}),
+                    confidence: 0.99,
+                },
+                AnswerSourceEntry {
+                    assessment_item_id: 12,
+                    answer_json: serde_json::json!({"schema_version":1,"correct":true}),
+                    source_anchor: serde_json::json!({"schema_version":1,"page":2}),
+                    confidence: 0.99,
+                },
+            ],
+            confidence: 0.99,
+            issue_codes: vec![],
+        };
+        output.validate_against(&request).unwrap();
+        output.entries[1].source_anchor["page"] = serde_json::json!(3);
+        assert!(output.validate_against(&request).is_err());
     }
 }

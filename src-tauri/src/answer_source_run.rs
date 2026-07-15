@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use module_exam::answer_source_recognition::{
     AnswerSourceFailure, AnswerSourceItemSpec, AnswerSourceQuestionType,
     AnswerSourceRecognitionOutput, AnswerSourceRecognitionRequest,
-    AnswerSourceRecognizerDescriptor,
+    AnswerSourceRecognizerDescriptor, AnswerSourceVisualPage,
 };
 use module_exam::service::answer_source::{self, AnswerSourceReviewSummary};
 use rusqlite::{Connection, OptionalExtension};
@@ -17,6 +17,11 @@ use suite_core::db::repo::{ai_runs, artifacts};
 use suite_core::domain::{hashing, time};
 use suite_core::error::{CoreError, CoreResult};
 use suite_core::models::{AiRun, AiRunStatus, ArchiveStatus, PrivacyClass};
+
+use crate::pdf_pages;
+
+const SOURCE_IMAGE_VERSION: &str = "answer-source-original-jpeg-v1";
+const PDF_VISUALIZATION_VERSION: &str = "macos-coregraphics-gray-jpeg-1800-v1";
 
 pub struct AnswerSourceRunMetadata {
     ingest_batch_id: i64,
@@ -36,6 +41,8 @@ pub struct AnswerSourceRunInput {
     mime_type: String,
     source_bytes: Vec<u8>,
     source_text: Option<String>,
+    visualization_version: Option<String>,
+    visual_pages: Vec<AnswerSourceVisualPage>,
     items: Vec<AnswerSourceItemSpec>,
     input_hash: String,
 }
@@ -50,6 +57,8 @@ impl AnswerSourceRunInput {
             mime_type: &self.mime_type,
             source_bytes: &self.source_bytes,
             source_text: self.source_text.as_deref(),
+            visualization_version: self.visualization_version.as_deref(),
+            visual_pages: &self.visual_pages,
             items: &self.items,
         }
     }
@@ -100,10 +109,8 @@ pub fn load_metadata(conn: &Connection, batch_id: i64) -> CoreResult<AnswerSourc
             "答案资料必须已归档为 teaching_content".into(),
         ));
     }
-    if !matches!(source_format.as_str(), "jpeg" | "text") {
-        return Err(CoreError::Invalid(
-            "PDF 答案已安全归档，但当前纵切尚未接扫描 PDF 视觉解析，请先上传 JPG 或粘贴文本".into(),
-        ));
+    if !matches!(source_format.as_str(), "jpeg" | "pdf" | "text") {
+        return Err(CoreError::Invalid("答案资料只支持 JPG、PDF 或文本".into()));
     }
     let mut stmt = conn.prepare(
         "SELECT i.id,i.order_index,
@@ -158,13 +165,40 @@ pub fn load_input(metadata: AnswerSourceRunMetadata) -> CoreResult<AnswerSourceR
     if hashing::sha256_hex(&source_bytes) != metadata.source_artifact_sha256 {
         return Err(CoreError::Invalid("答案资料归档与登记 hash 不一致".into()));
     }
-    let source_text = if metadata.source_format == "text" {
-        Some(
-            String::from_utf8(source_bytes.clone())
-                .map_err(|_| CoreError::Invalid("文本答案资料必须是 UTF-8".into()))?,
-        )
-    } else {
-        None
+    let (source_text, visualization_version, visual_pages) = match metadata.source_format.as_str() {
+        "text" => (
+            Some(
+                String::from_utf8(source_bytes.clone())
+                    .map_err(|_| CoreError::Invalid("文本答案资料必须是 UTF-8".into()))?,
+            ),
+            None,
+            vec![],
+        ),
+        "jpeg" => (
+            None,
+            Some(SOURCE_IMAGE_VERSION.into()),
+            vec![AnswerSourceVisualPage {
+                page_no: 1,
+                mime_type: "image/jpeg".into(),
+                sha256: metadata.source_artifact_sha256.clone(),
+                bytes: source_bytes.clone(),
+            }],
+        ),
+        "pdf" => {
+            let rendered = pdf_pages::render_to_jpegs(&metadata.archived_path)?;
+            let pages = rendered
+                .into_iter()
+                .enumerate()
+                .map(|(index, bytes)| AnswerSourceVisualPage {
+                    page_no: (index + 1) as i64,
+                    mime_type: "image/jpeg".into(),
+                    sha256: hashing::sha256_hex(&bytes),
+                    bytes,
+                })
+                .collect();
+            (None, Some(PDF_VISUALIZATION_VERSION.into()), pages)
+        }
+        _ => return Err(CoreError::Invalid("答案资料格式不受支持".into())),
     };
     let mut input = AnswerSourceRunInput {
         ingest_batch_id: metadata.ingest_batch_id,
@@ -174,6 +208,8 @@ pub fn load_input(metadata: AnswerSourceRunMetadata) -> CoreResult<AnswerSourceR
         mime_type: metadata.mime_type,
         source_bytes,
         source_text,
+        visualization_version,
+        visual_pages,
         items: metadata.items,
         input_hash: String::new(),
     };

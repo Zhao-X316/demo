@@ -1,4 +1,4 @@
-//! 火山方舟答案图片/文本结构化适配器。
+//! 火山方舟答案图片/PDF/文本结构化适配器。
 //!
 //! 模型只看到老师答案资料与题目清单，不看到学生答案或当前 K1 标准答案。
 
@@ -17,8 +17,8 @@ use crate::secrets::VolcanoCreds;
 use crate::vlm::{ARK_URL, DEFAULT_MODEL};
 
 const MODEL_VERSION: &str = "ark-chat-completions-v3";
-const CONFIG_VERSION: &str = "answer-source-image-text-v1";
-const RULE_VERSION: &str = "answer-source-structured-json-v1";
+const CONFIG_VERSION: &str = "answer-source-image-text-pdf-v2";
+const RULE_VERSION: &str = "answer-source-structured-json-page-anchor-v2";
 
 pub struct ArkAnswerSourceRecognizer {
     api_key: String,
@@ -90,7 +90,7 @@ fn build_prompt(request: &AnswerSourceRecognitionRequest<'_>) -> String {
          answer_json 必须带 schema_version=1：单选/多选使用 correct_labels 字符串数组；\n\
          判断题使用 correct 布尔值；填空使用 slots 数组，每项含 order_index 与 canonical_answers；\n\
          简答使用 reference_answer 与 rubric_points 数组。source_anchor 必须带 schema_version=1，\n\
-         图片写 page/region_hint，文本写 line/quote。不得新增清单外题目，不得根据题干猜答案，\n\
+         图片/PDF 写真实的 page（从1开始）和 region_hint，文本写 line/quote。不得新增清单外题目，不得根据题干猜答案，\n\
          不得利用学生多数答案；资料没写清、缺题或题号无法绑定时必须 needs_review/blocked。\n\
          只有逐题覆盖完整且每项与总置信度均不低于0.95时才能 ready。"
     )
@@ -125,19 +125,23 @@ impl AnswerSourceRecognizer for ArkAnswerSourceRecognizer {
                 true,
             ));
         }
-        let content = if request.source_format == "jpeg" {
-            let data_url = format!(
-                "data:{};base64,{}",
-                request.mime_type.trim().to_ascii_lowercase(),
-                base64::engine::general_purpose::STANDARD.encode(request.source_bytes)
-            );
-            json!([
-                {"type":"text","text":build_prompt(request)},
-                {"type":"image_url","image_url":{"url":data_url}}
-            ])
-        } else {
-            json!([{"type":"text","text":build_prompt(request)}])
-        };
+        let mut content = vec![json!({"type":"text","text":build_prompt(request)})];
+        for page in request.visual_pages {
+            content.push(json!({
+                "type":"text",
+                "text":format!("答案资料第 {} 页", page.page_no)
+            }));
+            content.push(json!({
+                "type":"image_url",
+                "image_url":{
+                    "url":format!(
+                        "data:{};base64,{}",
+                        page.mime_type.trim().to_ascii_lowercase(),
+                        base64::engine::general_purpose::STANDARD.encode(&page.bytes)
+                    )
+                }
+            }));
+        }
         let body = json!({
             "model": self.model,
             "messages": [{"role":"user","content":content}],
@@ -253,11 +257,12 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
 
-    use module_exam::answer_source_recognition::{AnswerSourceItemSpec, AnswerSourceQuestionType};
+    use module_exam::answer_source_recognition::{
+        AnswerSourceItemSpec, AnswerSourceQuestionType, AnswerSourceVisualPage,
+    };
+    use suite_core::domain::hashing;
 
     use super::*;
-
-    const HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn serve_once(body: &str) -> (String, std::sync::mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -295,11 +300,13 @@ mod tests {
         let request = AnswerSourceRecognitionRequest {
             ingest_batch_id: 7,
             source_artifact_id: 9,
-            source_artifact_sha256: HASH,
+            source_artifact_sha256: &hashing::sha256_hex(b"1.A"),
             source_format: "text",
             mime_type: "text/plain",
             source_bytes: b"1.A",
             source_text: Some("1.A"),
+            visualization_version: None,
+            visual_pages: &[],
             items: &items,
         };
         let payload = json!({
@@ -321,6 +328,66 @@ mod tests {
         let http = captured.recv().unwrap();
         assert!(http.contains("不得根据题干猜答案"));
         assert!(http.contains("1.A"));
+        assert!(!http.contains("student_answer"));
+        assert!(!http.contains("bound_answer"));
+    }
+
+    #[test]
+    fn pdf_provider_sends_numbered_visual_pages_and_accepts_bounded_anchors() {
+        let items = [AnswerSourceItemSpec {
+            assessment_item_id: 11,
+            order_index: 0,
+            question_no: "1".into(),
+            question_type: AnswerSourceQuestionType::Single,
+            stem: "鸦片战争爆发于哪一年？".into(),
+            max_score: 1.0,
+        }];
+        let source = b"%PDF-test";
+        let pages = vec![
+            AnswerSourceVisualPage {
+                page_no: 1,
+                mime_type: "image/jpeg".into(),
+                sha256: hashing::sha256_hex(b"page-one"),
+                bytes: b"page-one".to_vec(),
+            },
+            AnswerSourceVisualPage {
+                page_no: 2,
+                mime_type: "image/jpeg".into(),
+                sha256: hashing::sha256_hex(b"page-two"),
+                bytes: b"page-two".to_vec(),
+            },
+        ];
+        let request = AnswerSourceRecognitionRequest {
+            ingest_batch_id: 7,
+            source_artifact_id: 9,
+            source_artifact_sha256: &hashing::sha256_hex(source),
+            source_format: "pdf",
+            mime_type: "application/pdf",
+            source_bytes: source,
+            source_text: None,
+            visualization_version: Some("fixture-renderer-v1"),
+            visual_pages: &pages,
+            items: &items,
+        };
+        let payload = json!({
+            "state":"ready",
+            "entries":[{
+                "assessment_item_id":11,
+                "answer_json":{"schema_version":1,"correct_labels":["A"]},
+                "source_anchor":{"schema_version":1,"page":2,"region_hint":"题号1"},
+                "confidence":0.99
+            }],
+            "confidence":0.99,
+            "issue_codes":[]
+        });
+        let envelope = json!({"choices":[{"message":{"content":payload.to_string()}}]});
+        let (endpoint, captured) = serve_once(&envelope.to_string());
+        let recognizer = ArkAnswerSourceRecognizer::for_test(endpoint);
+        recognizer.recognize(&request).unwrap();
+        let http = captured.recv().unwrap();
+        assert!(http.contains("答案资料第 1 页"));
+        assert!(http.contains("答案资料第 2 页"));
+        assert!(http.contains(&base64::engine::general_purpose::STANDARD.encode(b"page-one")));
         assert!(!http.contains("student_answer"));
         assert!(!http.contains("bound_answer"));
     }
