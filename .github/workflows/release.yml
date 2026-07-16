@@ -40,14 +40,26 @@ jobs:
 
       # tauri build 会先跑 beforeBuildCommand(npm run build) 再编译+打包
       - name: Build installers
+        env:
+          # macOS 下显式跳过易受锁屏/无 GUI 影响的 Finder AppleScript。
+          CI: true
         run: npx --yes @tauri-apps/cli build
+
+      - name: Verify macOS DMG
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          shopt -s nullglob
+          dmg_files=(src-tauri/target/release/bundle/dmg/JiaofuSuite_*.dmg)
+          test "${#dmg_files[@]}" -eq 1
+          bash scripts/verify_macos_dmg.sh "${dmg_files[0]}"
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
           name: jiaofu-suite-${{ matrix.os }}
           path: |
-            src-tauri/target/release/bundle/**/*.dmg
+            src-tauri/target/release/bundle/dmg/*.dmg
             src-tauri/target/release/bundle/**/*.msi
             src-tauri/target/release/bundle/**/*.exe
           if-no-files-found: warn

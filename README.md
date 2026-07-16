@@ -77,6 +77,14 @@ cargo check --manifest-path src-tauri/Cargo.toml
 npm run build
 npm run tauri build
 
+# macOS 安装盘：显式跳过易超时的 Finder 美化，并在挂载后验证
+# bundle id / 版本 / 可执行文件 / Applications 链接 / 敏感文件边界
+npm run bundle:macos
+
+# 快速调试构建，或单独复核既有 DMG
+npm run bundle:macos:debug
+npm run verify:macos:dmg -- src-tauri/target/debug/bundle/dmg/JiaofuSuite_0.1.0_aarch64.dmg
+
 # T6 独立验收包（独立 bundle id，不读取正式应用目录）
 npm run acceptance:t6:build
 cargo test --manifest-path src-tauri/Cargo.toml --example t6_objective_fixture

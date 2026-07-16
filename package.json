@@ -8,6 +8,9 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "bundle:macos": "bash scripts/build_macos_dmg.sh",
+    "bundle:macos:debug": "bash scripts/build_macos_dmg.sh --debug",
+    "verify:macos:dmg": "bash scripts/verify_macos_dmg.sh",
     "acceptance:t6:build": "tauri build --debug --bundles app --config src-tauri/tauri.acceptance.conf.json",
     "acceptance:subjective:build": "tauri build --debug --bundles app --config src-tauri/tauri.subjective-acceptance.conf.json"
   },
