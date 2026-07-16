@@ -28,8 +28,8 @@ use module_exam::ordinary_paper_recognition::{
 use module_exam::service::answer_source::{self, AnswerSourceReviewSummary};
 use module_exam::service::assessment::{self, GradeDecision, Publication};
 use module_exam::service::dictation_pipeline::{
-    self, DictationPageMaterializationResult, DictationTemplateConfirmation,
-    DictationTranscriptionResult, DictationWorkbenchRow,
+    self, DictationPageMaterializationResult, DictationReviewBatch, DictationTemplateConfirmation,
+    DictationTranscriptionResult, DictationWorkbench, StrictDictationBatchReview,
 };
 use module_exam::service::grading::{self, AnswerDetail};
 use module_exam::service::objective::{
@@ -903,7 +903,7 @@ pub fn exam_dictation_workbench(
     state: State<'_, AppState>,
     assessment_version_id: Option<i64>,
     limit: Option<i64>,
-) -> R<Vec<DictationWorkbenchRow>> {
+) -> R<DictationWorkbench> {
     let conn = lock(&state)?;
     dictation_pipeline::list_dictation_workbench(
         &conn,
@@ -911,6 +911,71 @@ pub fn exam_dictation_workbench(
         limit.unwrap_or(1000),
     )
     .map_err(e)
+}
+
+/// 接受当前精确命中或老师已校正后的默写建议；只终审，不发布。
+#[tauri::command]
+pub fn exam_dictation_accept(
+    state: State<'_, AppState>,
+    transcription_revision_id: i64,
+) -> R<GradeDecision> {
+    let conn = lock(&state)?;
+    dictation_pipeline::accept_dictation_suggestion(
+        &conn,
+        transcription_revision_id,
+        LOCAL_TEACHER_ACTOR,
+    )
+    .map_err(e)
+}
+
+/// 老师依据原图对分歧、未写或识别失败项人工记分。
+#[tauri::command]
+pub fn exam_dictation_correct_grade(
+    state: State<'_, AppState>,
+    transcription_revision_id: i64,
+    teacher_score: f64,
+    teacher_note: Option<String>,
+    teacher_evidence_text: Option<String>,
+) -> R<GradeDecision> {
+    let conn = lock(&state)?;
+    dictation_pipeline::correct_dictation_grade(
+        &conn,
+        transcription_revision_id,
+        teacher_score,
+        teacher_note.as_deref(),
+        teacher_evidence_text.as_deref(),
+        LOCAL_TEACHER_ACTOR,
+    )
+    .map_err(e)
+}
+
+/// 只批量接受当前精确、置信度不低于 0.95 的默写结果；逐条保存排除原因。
+#[tauri::command]
+pub fn exam_dictation_strict_batch_accept(
+    state: State<'_, AppState>,
+    transcription_revision_ids: Vec<i64>,
+    idempotency_key: String,
+) -> R<DictationReviewBatch> {
+    let conn = lock(&state)?;
+    dictation_pipeline::strict_batch_accept(
+        &conn,
+        &StrictDictationBatchReview {
+            transcription_revision_ids: &transcription_revision_ids,
+            reviewed_by: LOCAL_TEACHER_ACTOR,
+            idempotency_key: &idempotency_key,
+        },
+    )
+    .map_err(e)
+}
+
+/// 默写整份 attempt 显式发布；发布后才激活评分点学习证据。
+#[tauri::command]
+pub fn exam_dictation_publish_attempt(
+    state: State<'_, AppState>,
+    attempt_id: i64,
+) -> R<Publication> {
+    let conn = lock(&state)?;
+    assessment::publish_attempt(&conn, attempt_id, LOCAL_TEACHER_ACTOR).map_err(e)
 }
 
 /// 老师校正 OCR 文本。原始 OCR 保留，新 revision 重新做可复现的精确比较。

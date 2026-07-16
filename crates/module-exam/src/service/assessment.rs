@@ -715,6 +715,39 @@ struct EvidenceDecision {
     item_public_id: String,
     item_score: f64,
     link_set_id: i64,
+    dictation_rubric_point_public_id: Option<String>,
+}
+
+impl EvidenceDecision {
+    fn source_type(&self) -> &'static str {
+        if self.dictation_rubric_point_public_id.is_some() {
+            "dictation_rubric_point"
+        } else {
+            "objective_question"
+        }
+    }
+
+    fn source_ref_type(&self) -> &'static str {
+        if self.dictation_rubric_point_public_id.is_some() {
+            "rubric_point"
+        } else {
+            "assessment_item"
+        }
+    }
+
+    fn source_ref_id(&self) -> &str {
+        self.dictation_rubric_point_public_id
+            .as_deref()
+            .unwrap_or(&self.item_public_id)
+    }
+
+    fn rule_version(&self) -> &'static str {
+        if self.dictation_rubric_point_public_id.is_some() {
+            "dictation-grading-v1"
+        } else {
+            "objective-grading-v1"
+        }
+    }
 }
 
 fn evidence_context(value: &str) -> AssessmentContext {
@@ -770,9 +803,9 @@ fn activate_evidence_target(
             idempotency_key: &idempotency_key,
             student_id: context.student_id,
             source_module: context.source_module,
-            source_type: "objective_question",
-            source_ref_type: "assessment_item",
-            source_ref_id: &decision.item_public_id,
+            source_type: decision.source_type(),
+            source_ref_type: decision.source_ref_type(),
+            source_ref_id: decision.source_ref_id(),
             source_revision: decision.revision,
             decision_ref_type: Some("grade_decision"),
             decision_ref_id: Some(&decision.public_id),
@@ -785,7 +818,7 @@ fn activate_evidence_target(
             evidence_quality: target.quality.clamp(0.0, 1.0),
             assessment_context: context.assessment_context,
             occurred_at: &decision.decided_at,
-            rule_version: "objective-grading-v1",
+            rule_version: decision.rule_version(),
             knowledge_map_version: target.knowledge_map_version,
         },
     )?;
@@ -823,7 +856,11 @@ fn activate_evidence_target(
             object_type: "learning_evidence",
             object_id: &evidence.public_id,
             object_revision: Some(decision.revision),
-            note: Some("老师显式发布后激活客观题正式学习证据"),
+            note: Some(if decision.dictation_rubric_point_public_id.is_some() {
+                "老师显式发布后激活默写评分点正式学习证据"
+            } else {
+                "老师显式发布后激活客观题正式学习证据"
+            }),
             meta_json: None,
             occurred_at: &decision.decided_at,
         },
@@ -874,9 +911,14 @@ fn activate_publication_evidence(
     let assessment_context = evidence_context(&context_raw);
     let mut stmt = conn.prepare(
         "SELECT d.public_id,d.revision,d.teacher_score,d.confirmation_level,d.decided_at,
-                i.public_id,i.score,i.link_set_id
+                i.public_id,i.score,i.link_set_id,rp.public_id
          FROM exam_grade_decisions_v2 d
          JOIN exam_assessment_items_v2 i ON i.id=d.assessment_item_id
+         LEFT JOIN exam_grade_decision_dictation_sources_v2 ds
+           ON ds.grade_decision_id=d.id
+         LEFT JOIN exam_dictation_point_observations_v2 obs
+           ON obs.id=ds.point_observation_id
+         LEFT JOIN k1_rubric_points rp ON rp.id=obs.rubric_point_id
          WHERE d.attempt_id=?1 AND d.state='active' AND i.state='active'
          ORDER BY i.order_index,d.id",
     )?;
@@ -890,6 +932,7 @@ fn activate_publication_evidence(
             item_public_id: row.get(5)?,
             item_score: row.get(6)?,
             link_set_id: row.get(7)?,
+            dictation_rubric_point_public_id: row.get(8)?,
         })
     })?;
     let decisions = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -914,13 +957,23 @@ fn activate_publication_evidence(
             "SELECT DISTINCT n.public_id
              FROM k1_knowledge_links l
              JOIN k1_knowledge_nodes n ON n.id=l.knowledge_node_id AND n.state='active'
-             WHERE l.link_set_id=?1 AND l.source_type='question'
-               AND l.relation_type='direct_assessment'
+             WHERE l.link_set_id=?1
+               AND ((?2 IS NULL AND l.source_type='question'
+                     AND l.relation_type='direct_assessment')
+                 OR (?2 IS NOT NULL AND l.source_type='rubric_point'
+                     AND l.source_public_id=?2
+                     AND l.relation_type IN ('direct_assessment','rubric_basis')))
                AND l.confirmation_level='teacher_confirmed'
              ORDER BY n.public_id",
         )?;
         let knowledge_nodes = knowledge_stmt
-            .query_map([decision.link_set_id], |row| row.get::<_, String>(0))?
+            .query_map(
+                (
+                    decision.link_set_id,
+                    decision.dictation_rubric_point_public_id.as_deref(),
+                ),
+                |row| row.get::<_, String>(0),
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(knowledge_stmt);
         for node in &knowledge_nodes {
@@ -942,14 +995,21 @@ fn activate_publication_evidence(
              FROM k1_ability_links l
              JOIN k1_ability_dimensions d
                ON d.id=l.ability_dimension_id AND d.state='active'
-             WHERE l.link_set_id=?1 AND l.source_type='question'
+             WHERE l.link_set_id=?1
+               AND ((?2 IS NULL AND l.source_type='question')
+                 OR (?2 IS NOT NULL AND l.source_type='rubric_point'
+                     AND l.source_public_id=?2))
                AND l.confirmation_level='teacher_confirmed'
              ORDER BY d.public_id",
         )?;
         let ability_nodes = ability_stmt
-            .query_map([decision.link_set_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
-            })?
+            .query_map(
+                (
+                    decision.link_set_id,
+                    decision.dictation_rubric_point_public_id.as_deref(),
+                ),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)),
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(ability_stmt);
         for (node, strength) in &ability_nodes {

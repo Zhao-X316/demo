@@ -131,6 +131,10 @@ fn main() {
             exam_commands::exam_dictation_process_page,
             exam_commands::exam_dictation_recognize_region,
             exam_commands::exam_dictation_workbench,
+            exam_commands::exam_dictation_accept,
+            exam_commands::exam_dictation_correct_grade,
+            exam_commands::exam_dictation_strict_batch_accept,
+            exam_commands::exam_dictation_publish_attempt,
             exam_commands::exam_dictation_correct_transcription,
         ])
         .run(tauri::generate_context!())

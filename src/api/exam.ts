@@ -552,9 +552,12 @@ export interface DictationPageProcessingResult {
 }
 
 export interface DictationWorkbenchRow {
+  assessment_id: number;
   assessment_version_id: number;
   assessment_title: string;
   attempt_id: number;
+  attempt_state: "ingesting" | "grading" | "ready_to_publish" | "published";
+  active_publication_id: number | null;
   student_id: number;
   student_no: string;
   student_name: string;
@@ -579,6 +582,33 @@ export interface DictationWorkbenchRow {
   accepted_variants: string[];
   suggested_score: number | null;
   requires_teacher_review: boolean;
+  grade_decision_id: number | null;
+  grade_decision_revision: number | null;
+  teacher_score: number | null;
+  confirmation_level: "teacher_accepted" | "teacher_corrected" | null;
+  review_mode: "single" | "strict_batch" | null;
+  current_transcription_confirmed: boolean;
+  decided_at: string | null;
+}
+
+export type DictationAttemptSummary = ObjectiveAttemptSummary;
+
+export interface DictationWorkbench {
+  rows: DictationWorkbenchRow[];
+  attempts: DictationAttemptSummary[];
+}
+
+export interface DictationReviewBatch {
+  id: number;
+  requested_count: number;
+  confirmed_count: number;
+  excluded_count: number;
+  items: Array<{
+    transcription_revision_id: number;
+    outcome: "confirmed" | "excluded";
+    reason_code: string | null;
+    grade_decision_id: number | null;
+  }>;
 }
 
 export const kpList = () => call<KnowledgePoint[]>("kp_list");
@@ -787,10 +817,38 @@ export const examDictationRecognizeRegion = (
 });
 
 export const examDictationWorkbench = (assessment_version_id: number | null = null, limit = 1000) =>
-  call<DictationWorkbenchRow[]>("exam_dictation_workbench", {
+  call<DictationWorkbench>("exam_dictation_workbench", {
     assessmentVersionId: assessment_version_id,
     limit,
   });
+
+export const examDictationAccept = (transcription_revision_id: number) =>
+  call<GradeDecision>("exam_dictation_accept", {
+    transcriptionRevisionId: transcription_revision_id,
+  });
+
+export const examDictationCorrectGrade = (
+  transcription_revision_id: number,
+  teacher_score: number,
+  teacher_note: string,
+  teacher_evidence_text: string | null,
+) => call<GradeDecision>("exam_dictation_correct_grade", {
+  transcriptionRevisionId: transcription_revision_id,
+  teacherScore: teacher_score,
+  teacherNote: teacher_note,
+  teacherEvidenceText: teacher_evidence_text,
+});
+
+export const examDictationStrictBatchAccept = (
+  transcription_revision_ids: number[],
+  idempotency_key: string,
+) => call<DictationReviewBatch>("exam_dictation_strict_batch_accept", {
+  transcriptionRevisionIds: transcription_revision_ids,
+  idempotencyKey: idempotency_key,
+});
+
+export const examDictationPublishAttempt = (attempt_id: number) =>
+  call<GradePublication>("exam_dictation_publish_attempt", { attemptId: attempt_id });
 
 export const examDictationCorrectTranscription = (
   answer_region_revision_id: number,

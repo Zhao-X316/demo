@@ -4,10 +4,12 @@ use suite_core::db::{open_in_memory, run_migrations, CORE_MIGRATIONS};
 use suite_core::domain::hashing;
 use suite_core::models::{ArchiveStatus, ArtifactKind, PrivacyClass};
 
+use super::assessment::publish_attempt;
 use super::dictation_pipeline::{
-    confirm_template_and_policies, list_dictation_workbench, materialize_in_transaction,
-    record_ocr_ai_run_transcription, teacher_correct_transcription, DictationRegionArtifact,
-    MaterializeDictationPageInput,
+    accept_dictation_suggestion, confirm_template_and_policies, correct_dictation_grade,
+    list_dictation_workbench, materialize_in_transaction, record_ocr_ai_run_transcription,
+    strict_batch_accept, teacher_correct_transcription, DictationRegionArtifact,
+    MaterializeDictationPageInput, StrictDictationBatchReview,
 };
 use super::papers::{
     self, NewIngestBatch, NewIngestPage, NewPageMatchRevision, NewPageQualityRevision,
@@ -98,6 +100,26 @@ fn setup() -> Fixture {
               confirmed_by,confirmed_at)
              VALUES ('link-d',1,1,1,'confirmed','2026-07-15T10:00:00.000Z',
                      'teacher','2026-07-15T10:00:00.000Z');
+           INSERT INTO k1_knowledge_nodes
+             (public_id,stable_id,knowledge_map_id,code,title,order_index,state,created_at)
+             VALUES ('knowledge-d','knowledge-d-stable',1,'K-D','南京条约签订时间',0,'active',
+                     '2026-07-15T10:00:00.000Z');
+           INSERT INTO k1_ability_dimensions
+             (public_id,stable_id,subject_id,revision,code,title,state,created_at)
+             VALUES ('ability-d','ability-d-stable',1,1,'fact_recall','事实识记与提取','active',
+                     '2026-07-15T10:00:00.000Z');
+           INSERT INTO k1_knowledge_links
+             (public_id,link_set_id,source_type,source_public_id,knowledge_node_id,
+              relation_type,confirmation_level,verified_by,verified_at,created_at)
+             VALUES ('knowledge-link-d',1,'rubric_point','point-d',1,'rubric_basis',
+                     'teacher_confirmed','teacher','2026-07-15T10:00:00.000Z',
+                     '2026-07-15T10:00:00.000Z');
+           INSERT INTO k1_ability_links
+             (public_id,link_set_id,source_type,source_public_id,ability_dimension_id,
+              evidence_strength,response_mode,confirmation_level,verified_by,verified_at,created_at)
+             VALUES ('ability-link-d',1,'rubric_point','point-d',1,0.8,'recall',
+                     'teacher_confirmed','teacher','2026-07-15T10:00:00.000Z',
+                     '2026-07-15T10:00:00.000Z');
            INSERT INTO exam_assessment_items_v2
              (public_id,assessment_version_id,question_version_id,answer_key_version_id,
               rubric_version_id,link_set_id,order_index,score,presentation_snapshot_json,
@@ -371,6 +393,29 @@ fn create_ocr_run(fixture: &Fixture, region_id: i64) -> i64 {
     run.id
 }
 
+fn prepare_machine_result(fixture: &mut Fixture) -> (i64, i64) {
+    let template_revision_id = create_template(fixture);
+    let materialized = materialize_in_transaction(
+        &fixture.conn,
+        &MaterializeDictationPageInput {
+            page_id: fixture.page_id,
+            template_revision_id,
+            aligned_artifact_id: fixture.aligned_artifact_id,
+            regions: &[DictationRegionArtifact {
+                assessment_item_id: 1,
+                region_index: 0,
+                crop_artifact_id: fixture.crop_artifact_id,
+            }],
+            confirmed_by: "teacher",
+        },
+    )
+    .unwrap();
+    let region_id = materialized.regions[0].id;
+    let ai_run_id = create_ocr_run(fixture, region_id);
+    let machine = record_ocr_ai_run_transcription(&mut fixture.conn, ai_run_id).unwrap();
+    (region_id, machine.transcription.id)
+}
+
 #[test]
 fn wrong_ocr_is_never_repaired_and_teacher_correction_is_append_only() {
     let mut fixture = setup();
@@ -422,10 +467,10 @@ fn wrong_ocr_is_never_repaired_and_teacher_correction_is_append_only() {
         )
         .unwrap();
     assert_eq!(old_state, "superseded");
-    let rows = list_dictation_workbench(&fixture.conn, Some(1), 10).unwrap();
-    assert_eq!(rows.len(), 1);
-    assert!(!rows[0].requires_teacher_review);
-    assert_eq!(rows[0].raw_ocr_text.as_deref(), Some("1840年"));
+    let workbench = list_dictation_workbench(&fixture.conn, Some(1), 10).unwrap();
+    assert_eq!(workbench.rows.len(), 1);
+    assert!(!workbench.rows[0].requires_teacher_review);
+    assert_eq!(workbench.rows[0].raw_ocr_text.as_deref(), Some("1840年"));
     let grade_count: i64 = fixture
         .conn
         .query_row("SELECT COUNT(*) FROM exam_grade_decisions_v2", [], |row| {
@@ -433,4 +478,141 @@ fn wrong_ocr_is_never_repaired_and_teacher_correction_is_append_only() {
         })
         .unwrap();
     assert_eq!(grade_count, 0);
+}
+
+#[test]
+fn corrected_dictation_requires_review_then_explicit_publication_activates_point_evidence() {
+    let mut fixture = setup();
+    let (region_id, machine_transcription_id) = prepare_machine_result(&mut fixture);
+    let corrected =
+        teacher_correct_transcription(&mut fixture.conn, region_id, "1842年", "teacher").unwrap();
+
+    assert!(
+        accept_dictation_suggestion(&fixture.conn, machine_transcription_id, "teacher").is_err()
+    );
+    let decision =
+        accept_dictation_suggestion(&fixture.conn, corrected.transcription.id, "teacher").unwrap();
+    assert_eq!(decision.confirmation_level, "teacher_corrected");
+    assert_eq!(decision.teacher_score, 2.0);
+
+    let before_publish: (i64, i64) = fixture
+        .conn
+        .query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM exam_grade_publications_v2),
+               (SELECT COUNT(*) FROM learning_evidence)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(before_publish, (0, 0));
+    let workbench = list_dictation_workbench(&fixture.conn, Some(1), 10).unwrap();
+    assert!(workbench.rows[0].current_transcription_confirmed);
+    assert!(workbench.attempts[0].can_publish);
+
+    let publication = publish_attempt(&fixture.conn, 1, "teacher").unwrap();
+    assert_eq!(publication.total_score, 2.0);
+    let evidence: Vec<(String, String, String, String)> = {
+        let mut stmt = fixture
+            .conn
+            .prepare(
+                "SELECT source_type,source_ref_type,source_ref_id,confirmation_level
+                 FROM learning_evidence WHERE state='active' ORDER BY id",
+            )
+            .unwrap();
+        stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+    };
+    assert_eq!(evidence.len(), 2);
+    assert!(evidence.iter().all(|value| {
+        value.0 == "dictation_rubric_point"
+            && value.1 == "rubric_point"
+            && value.2 == "point-d"
+            && value.3 == "teacher_corrected"
+    }));
+    assert!(fixture
+        .conn
+        .execute(
+            "UPDATE exam_grade_decision_dictation_sources_v2
+             SET teacher_evidence_text='tampered' WHERE grade_decision_id=?1",
+            [decision.id],
+        )
+        .is_err());
+}
+
+#[test]
+fn manual_dictation_grade_keeps_machine_text_and_requires_a_reason() {
+    let mut fixture = setup();
+    let (_region_id, transcription_id) = prepare_machine_result(&mut fixture);
+    assert!(correct_dictation_grade(
+        &fixture.conn,
+        transcription_id,
+        1.0,
+        None,
+        Some("1840年"),
+        "teacher",
+    )
+    .is_err());
+    let decision = correct_dictation_grade(
+        &fixture.conn,
+        transcription_id,
+        1.0,
+        Some("原图可辨，年份写错，按规则给部分分"),
+        Some("1840年"),
+        "teacher",
+    )
+    .unwrap();
+    assert_eq!(decision.confirmation_level, "teacher_corrected");
+    let source: (String, String, Option<String>) = fixture
+        .conn
+        .query_row(
+            "SELECT t.raw_ocr_text,t.state,s.teacher_evidence_text
+             FROM exam_grade_decision_dictation_sources_v2 s
+             JOIN exam_dictation_transcription_revisions_v2 t
+               ON t.id=s.transcription_revision_id
+             WHERE s.grade_decision_id=?1",
+            [decision.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        source,
+        ("1840年".into(), "active".into(), Some("1840年".into()))
+    );
+}
+
+#[test]
+fn strict_dictation_batch_is_idempotent_and_records_already_confirmed_exclusion() {
+    let mut fixture = setup();
+    let (region_id, _machine_id) = prepare_machine_result(&mut fixture);
+    let corrected =
+        teacher_correct_transcription(&mut fixture.conn, region_id, "1842年", "teacher").unwrap();
+    let input = StrictDictationBatchReview {
+        transcription_revision_ids: &[corrected.transcription.id],
+        reviewed_by: "teacher",
+        idempotency_key: "dictation-batch-1",
+    };
+    let batch = strict_batch_accept(&fixture.conn, &input).unwrap();
+    let repeated = strict_batch_accept(&fixture.conn, &input).unwrap();
+    assert_eq!(batch.id, repeated.id);
+    assert_eq!((batch.confirmed_count, batch.excluded_count), (1, 0));
+
+    let excluded = strict_batch_accept(
+        &fixture.conn,
+        &StrictDictationBatchReview {
+            transcription_revision_ids: &[corrected.transcription.id],
+            reviewed_by: "teacher",
+            idempotency_key: "dictation-batch-2",
+        },
+    )
+    .unwrap();
+    assert_eq!((excluded.confirmed_count, excluded.excluded_count), (0, 1));
+    assert_eq!(
+        excluded.items[0].reason_code.as_deref(),
+        Some("ALREADY_CONFIRMED")
+    );
 }

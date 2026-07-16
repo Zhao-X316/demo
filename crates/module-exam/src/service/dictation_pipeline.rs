@@ -2,7 +2,8 @@
 //!
 //! 首版把“一行/一栏/一个题号”作为一个 assessment item，并要求每项只有一个已确认
 //! rubric point。老师确认一次空白页模板后，后续学生页按该模板裁区；OCR 和老师校正
-//! 另写追加式 transcription，不在本服务中产生分数、发布或学习证据。
+//! 另写追加式 transcription。只有老师接受建议或人工记分后才桥接 B0 grade decision，
+//! 整卷仍需显式发布，发布后才产生正式学习证据。
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -21,10 +22,13 @@ use crate::dictation_recognition::{
     DictationTemplateState, DICTATION_READY_CONFIDENCE,
 };
 
+use super::assessment::{decide_grade_in_transaction, GradeDecision, NewGradeDecision};
 use super::papers::{
     self, AnswerRegionRevision, NewAnswerRegionRevision, NewPageAlignmentRevision,
     PageAlignmentRevision,
 };
+
+pub const DICTATION_STRICT_BATCH_CONFIDENCE: f64 = 0.95;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DictationTemplateRevision {
@@ -148,9 +152,12 @@ pub struct DictationTranscriptionResult {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DictationWorkbenchRow {
+    pub assessment_id: i64,
     pub assessment_version_id: i64,
     pub assessment_title: String,
     pub attempt_id: i64,
+    pub attempt_state: String,
+    pub active_publication_id: Option<i64>,
     pub student_id: i64,
     pub student_no: String,
     pub student_name: String,
@@ -175,6 +182,66 @@ pub struct DictationWorkbenchRow {
     pub accepted_variants: Vec<String>,
     pub suggested_score: Option<f64>,
     pub requires_teacher_review: bool,
+    pub grade_decision_id: Option<i64>,
+    pub grade_decision_revision: Option<i64>,
+    pub teacher_score: Option<f64>,
+    pub confirmation_level: Option<String>,
+    pub review_mode: Option<String>,
+    pub current_transcription_confirmed: bool,
+    pub decided_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DictationAttemptSummary {
+    pub assessment_id: i64,
+    pub assessment_version_id: i64,
+    pub assessment_title: String,
+    pub attempt_id: i64,
+    pub attempt_state: String,
+    pub active_publication_id: Option<i64>,
+    pub student_id: i64,
+    pub student_no: String,
+    pub student_name: String,
+    pub item_count: i64,
+    pub observed_count: i64,
+    pub confirmed_count: i64,
+    pub teacher_total_score: f64,
+    pub max_total_score: f64,
+    pub published_total_score: Option<f64>,
+    pub can_publish: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DictationWorkbench {
+    pub rows: Vec<DictationWorkbenchRow>,
+    pub attempts: Vec<DictationAttemptSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DictationBatchItemResult {
+    pub transcription_revision_id: i64,
+    pub outcome: String,
+    pub reason_code: Option<String>,
+    pub grade_decision_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DictationReviewBatch {
+    pub id: i64,
+    pub public_id: String,
+    pub assessment_version_id: i64,
+    pub idempotency_key: String,
+    pub requested_count: i64,
+    pub confirmed_count: i64,
+    pub excluded_count: i64,
+    pub created_by: String,
+    pub items: Vec<DictationBatchItemResult>,
+}
+
+pub struct StrictDictationBatchReview<'a> {
+    pub transcription_revision_ids: &'a [i64],
+    pub reviewed_by: &'a str,
+    pub idempotency_key: &'a str,
 }
 
 fn required(value: &str, field: &str) -> CoreResult<()> {
@@ -1311,21 +1378,552 @@ pub fn teacher_correct_transcription(
     Ok(result)
 }
 
+#[derive(Debug)]
+struct DictationReviewScope {
+    assessment_version_id: i64,
+    max_score: f64,
+    transcription: DictationTranscriptionRevision,
+    observation: DictationPointObservation,
+    region_state: String,
+    region_decision: String,
+    policy_state: String,
+}
+
+fn review_scope(
+    conn: &Connection,
+    transcription_revision_id: i64,
+) -> CoreResult<DictationReviewScope> {
+    let raw = conn
+        .query_row(
+            "SELECT i.assessment_version_id,i.score,
+                    t.id,t.public_id,t.attempt_id,t.assessment_item_id,
+                    t.answer_region_revision_id,t.revision,t.source_ai_run_id,t.result_state,
+                    t.raw_ocr_text,t.normalized_text,t.teacher_corrected_text,t.confidence,
+                    t.failure_meta_json,t.corrected_by,t.corrected_at,t.state,t.created_at,
+                    r.state,r.decision,p.state
+             FROM exam_dictation_transcription_revisions_v2 t
+             JOIN exam_dictation_point_observations_v2 o
+               ON o.transcription_revision_id=t.id
+             JOIN exam_dictation_policy_revisions_v2 p ON p.id=o.policy_revision_id
+             JOIN exam_answer_region_revisions_v2 r ON r.id=t.answer_region_revision_id
+             JOIN exam_attempts_v2 at ON at.id=t.attempt_id AND at.state<>'voided'
+             JOIN exam_assessment_items_v2 i
+               ON i.id=t.assessment_item_id
+              AND i.assessment_version_id=at.assessment_version_id AND i.state='active'
+             WHERE t.id=?1",
+            [transcription_revision_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, f64>(1)?,
+                    DictationTranscriptionRevision {
+                        id: row.get(2)?,
+                        public_id: row.get(3)?,
+                        attempt_id: row.get(4)?,
+                        assessment_item_id: row.get(5)?,
+                        answer_region_revision_id: row.get(6)?,
+                        revision: row.get(7)?,
+                        source_ai_run_id: row.get(8)?,
+                        result_state: row.get(9)?,
+                        raw_ocr_text: row.get(10)?,
+                        normalized_text: row.get(11)?,
+                        teacher_corrected_text: row.get(12)?,
+                        confidence: row.get(13)?,
+                        failure_meta_json: row.get(14)?,
+                        corrected_by: row.get(15)?,
+                        corrected_at: row.get(16)?,
+                        state: row.get(17)?,
+                        created_at: row.get(18)?,
+                    },
+                    row.get::<_, String>(19)?,
+                    row.get::<_, String>(20)?,
+                    row.get::<_, String>(21)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| {
+            CoreError::NotFound(format!(
+                "dictation_transcription_revision#{transcription_revision_id}"
+            ))
+        })?;
+    Ok(DictationReviewScope {
+        assessment_version_id: raw.0,
+        max_score: raw.1,
+        observation: load_observation(conn, raw.2.id)?,
+        transcription: raw.2,
+        region_state: raw.3,
+        region_decision: raw.4,
+        policy_state: raw.5,
+    })
+}
+
+fn active_review_reason(
+    scope: &DictationReviewScope,
+    strict_confidence: Option<f64>,
+) -> Option<String> {
+    if scope.transcription.state != "active" || scope.policy_state != "active" {
+        return Some("SUPERSEDED_TRANSCRIPTION".into());
+    }
+    if scope.region_state != "active" || scope.region_decision != "teacher_confirmed" {
+        return Some("REGION_NO_LONGER_CONFIRMED".into());
+    }
+    if !matches!(
+        scope.observation.result.as_str(),
+        "exact" | "accepted_variant"
+    ) || scope.observation.suggested_score.is_none()
+    {
+        return Some(
+            match scope.transcription.result_state.as_str() {
+                "not_written" => "NOT_WRITTEN",
+                "unreadable" => "UNREADABLE",
+                "recognize_failed" => "RECOGNITION_FAILED",
+                "ambiguous_final" => "AMBIGUOUS_FINAL",
+                _ => "ANSWER_DIFFERS",
+            }
+            .into(),
+        );
+    }
+    if let Some(threshold) = strict_confidence {
+        if scope.transcription.result_state != "recognized" {
+            return Some("NOT_BATCH_ELIGIBLE".into());
+        }
+        if scope
+            .transcription
+            .confidence
+            .is_none_or(|value| value < threshold)
+        {
+            return Some("BELOW_BATCH_THRESHOLD".into());
+        }
+    }
+    None
+}
+
+fn dictation_point_results(
+    scope: &DictationReviewScope,
+    source: &str,
+    teacher_score: f64,
+    teacher_evidence_text: Option<&str>,
+) -> String {
+    serde_json::json!({
+        "schema_version": 1,
+        "source": source,
+        "transcription_revision_id": scope.transcription.id,
+        "transcription_revision": scope.transcription.revision,
+        "point_observation_id": scope.observation.id,
+        "rubric_point_id": scope.observation.rubric_point_id,
+        "result": scope.observation.result,
+        "machine_evidence_text": scope.observation.evidence_text,
+        "teacher_evidence_text": teacher_evidence_text,
+        "suggested_score": scope.observation.suggested_score,
+        "teacher_score": teacher_score,
+        "max_score": scope.max_score
+    })
+    .to_string()
+}
+
+struct DictationDecisionSource<'a> {
+    decision_id: i64,
+    scope: &'a DictationReviewScope,
+    review_mode: &'a str,
+    batch_id: Option<i64>,
+    teacher_evidence_text: Option<&'a str>,
+    reviewed_by: &'a str,
+    now: &'a str,
+}
+
+fn link_decision_source(conn: &Connection, input: &DictationDecisionSource<'_>) -> CoreResult<()> {
+    let evidence = input
+        .teacher_evidence_text
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    conn.execute(
+        "INSERT INTO exam_grade_decision_dictation_sources_v2
+         (grade_decision_id,transcription_revision_id,point_observation_id,
+          review_mode,batch_id,teacher_evidence_text,reviewed_by,created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+         ON CONFLICT(grade_decision_id) DO NOTHING",
+        (
+            input.decision_id,
+            input.scope.transcription.id,
+            input.scope.observation.id,
+            input.review_mode,
+            input.batch_id,
+            evidence,
+            input.reviewed_by,
+            input.now,
+        ),
+    )?;
+    let existing: (i64, i64, String, Option<i64>, Option<String>, String) = conn.query_row(
+        "SELECT transcription_revision_id,point_observation_id,review_mode,batch_id,
+                teacher_evidence_text,reviewed_by
+         FROM exam_grade_decision_dictation_sources_v2 WHERE grade_decision_id=?1",
+        [input.decision_id],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        },
+    )?;
+    if existing
+        != (
+            input.scope.transcription.id,
+            input.scope.observation.id,
+            input.review_mode.to_string(),
+            input.batch_id,
+            evidence.map(str::to_string),
+            input.reviewed_by.to_string(),
+        )
+    {
+        return Err(CoreError::Invalid(
+            "评分 revision 已绑定不同的默写证据来源".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn accept_dictation_suggestion(
+    conn: &Connection,
+    transcription_revision_id: i64,
+    reviewed_by: &str,
+) -> CoreResult<GradeDecision> {
+    required(reviewed_by, "默写终审人")?;
+    let tx = conn.unchecked_transaction()?;
+    let scope = review_scope(&tx, transcription_revision_id)?;
+    if let Some(reason) = active_review_reason(&scope, None) {
+        return Err(CoreError::Invalid(format!(
+            "该默写结果不能直接接受：{reason}"
+        )));
+    }
+    let score = scope.observation.suggested_score.expect("validated score");
+    let point_results = dictation_point_results(&scope, "dictation_teacher_accept", score, None);
+    let confirmation_level = if scope.transcription.corrected_by.is_some() {
+        "teacher_corrected"
+    } else {
+        "teacher_accepted"
+    };
+    let decision = decide_grade_in_transaction(
+        &tx,
+        &NewGradeDecision {
+            attempt_id: scope.transcription.attempt_id,
+            assessment_item_id: scope.transcription.assessment_item_id,
+            machine_grade_ai_run_id: None,
+            teacher_score: score,
+            point_results_json: &point_results,
+            teacher_note: None,
+            confirmation_level,
+            decided_by: reviewed_by,
+        },
+    )?;
+    let now = time::utc_now_rfc3339();
+    link_decision_source(
+        &tx,
+        &DictationDecisionSource {
+            decision_id: decision.id,
+            scope: &scope,
+            review_mode: "single",
+            batch_id: None,
+            teacher_evidence_text: None,
+            reviewed_by: reviewed_by.trim(),
+            now: &now,
+        },
+    )?;
+    tx.commit()?;
+    Ok(decision)
+}
+
+/// 老师查看原始裁剪后，可对分歧、未写、无法辨认或识别失败项人工记分。
+/// `teacher_evidence_text` 只记录老师看到的实际内容，不改写原始 OCR。
+pub fn correct_dictation_grade(
+    conn: &Connection,
+    transcription_revision_id: i64,
+    teacher_score: f64,
+    teacher_note: Option<&str>,
+    teacher_evidence_text: Option<&str>,
+    reviewed_by: &str,
+) -> CoreResult<GradeDecision> {
+    required(reviewed_by, "默写终审人")?;
+    let note = teacher_note
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| CoreError::Invalid("默写人工记分必须填写判定依据".into()))?;
+    let evidence = teacher_evidence_text
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let tx = conn.unchecked_transaction()?;
+    let scope = review_scope(&tx, transcription_revision_id)?;
+    if scope.transcription.state != "active" || scope.policy_state != "active" {
+        return Err(CoreError::Invalid("默写转写已被后续 revision 替代".into()));
+    }
+    if scope.region_state != "active" || scope.region_decision != "teacher_confirmed" {
+        return Err(CoreError::Invalid(
+            "答案区域已变化，请先重新核对页面证据".into(),
+        ));
+    }
+    if !teacher_score.is_finite()
+        || teacher_score < 0.0
+        || teacher_score > scope.max_score + 0.000_001
+    {
+        return Err(CoreError::Invalid(format!(
+            "人工得分必须位于 0~{} 分",
+            scope.max_score
+        )));
+    }
+    let point_results = dictation_point_results(
+        &scope,
+        "dictation_teacher_correction",
+        teacher_score,
+        evidence,
+    );
+    let decision = decide_grade_in_transaction(
+        &tx,
+        &NewGradeDecision {
+            attempt_id: scope.transcription.attempt_id,
+            assessment_item_id: scope.transcription.assessment_item_id,
+            machine_grade_ai_run_id: None,
+            teacher_score,
+            point_results_json: &point_results,
+            teacher_note: Some(note),
+            confirmation_level: "teacher_corrected",
+            decided_by: reviewed_by,
+        },
+    )?;
+    let now = time::utc_now_rfc3339();
+    link_decision_source(
+        &tx,
+        &DictationDecisionSource {
+            decision_id: decision.id,
+            scope: &scope,
+            review_mode: "single",
+            batch_id: None,
+            teacher_evidence_text: evidence,
+            reviewed_by: reviewed_by.trim(),
+            now: &now,
+        },
+    )?;
+    tx.commit()?;
+    Ok(decision)
+}
+
+fn get_review_batch(conn: &Connection, id: i64) -> CoreResult<DictationReviewBatch> {
+    let mut batch = conn.query_row(
+        "SELECT id,public_id,assessment_version_id,idempotency_key,requested_count,
+                confirmed_count,excluded_count,created_by
+         FROM exam_dictation_review_batches_v2 WHERE id=?1",
+        [id],
+        |row| {
+            Ok(DictationReviewBatch {
+                id: row.get(0)?,
+                public_id: row.get(1)?,
+                assessment_version_id: row.get(2)?,
+                idempotency_key: row.get(3)?,
+                requested_count: row.get(4)?,
+                confirmed_count: row.get(5)?,
+                excluded_count: row.get(6)?,
+                created_by: row.get(7)?,
+                items: Vec::new(),
+            })
+        },
+    )?;
+    let mut stmt = conn.prepare(
+        "SELECT transcription_revision_id,outcome,reason_code,grade_decision_id
+         FROM exam_dictation_review_batch_items_v2 WHERE batch_id=?1 ORDER BY id",
+    )?;
+    batch.items = stmt
+        .query_map([id], |row| {
+            Ok(DictationBatchItemResult {
+                transcription_revision_id: row.get(0)?,
+                outcome: row.get(1)?,
+                reason_code: row.get(2)?,
+                grade_decision_id: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(batch)
+}
+
+pub fn strict_batch_accept(
+    conn: &Connection,
+    input: &StrictDictationBatchReview<'_>,
+) -> CoreResult<DictationReviewBatch> {
+    required(input.reviewed_by, "默写批量终审人")?;
+    required(input.idempotency_key, "默写批量终审幂等键")?;
+    let transcription_ids: Vec<i64> = input
+        .transcription_revision_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if transcription_ids.is_empty() {
+        return Err(CoreError::Invalid(
+            "严格批量确认至少需要一条默写结果".into(),
+        ));
+    }
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "transcription_revision_ids": transcription_ids,
+        "confidence_micros": (DICTATION_STRICT_BATCH_CONFIDENCE * 1_000_000.0).round() as i64,
+        "reviewed_by": input.reviewed_by.trim()
+    });
+    let request_hash = hashing::sha256_hex(
+        &serde_json::to_vec(&request)
+            .map_err(|error| CoreError::Parse(format!("默写批量终审 hash 失败：{error}")))?,
+    );
+    if let Some((id, hash)) = conn
+        .query_row(
+            "SELECT id,request_hash FROM exam_dictation_review_batches_v2
+             WHERE idempotency_key=?1",
+            [input.idempotency_key.trim()],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?
+    {
+        if hash != request_hash {
+            return Err(CoreError::Invalid(
+                "默写批量终审幂等键已属于不同请求".into(),
+            ));
+        }
+        return get_review_batch(conn, id);
+    }
+    let tx = conn.unchecked_transaction()?;
+    let mut scopes = Vec::with_capacity(transcription_ids.len());
+    let mut assessment_version_id = None;
+    for id in &transcription_ids {
+        let scope = review_scope(&tx, *id)?;
+        match assessment_version_id {
+            Some(version_id) if version_id != scope.assessment_version_id => {
+                return Err(CoreError::Invalid(
+                    "一次严格批量终审只能处理同一作业版本".into(),
+                ));
+            }
+            None => assessment_version_id = Some(scope.assessment_version_id),
+            _ => {}
+        }
+        scopes.push(scope);
+    }
+    let mut reasons = Vec::with_capacity(scopes.len());
+    for scope in &scopes {
+        let already_confirmed: bool = tx.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM exam_grade_decision_dictation_sources_v2 src
+               JOIN exam_grade_decisions_v2 d ON d.id=src.grade_decision_id
+               WHERE src.transcription_revision_id=?1 AND d.state='active'
+             )",
+            [scope.transcription.id],
+            |row| row.get(0),
+        )?;
+        reasons.push(if already_confirmed {
+            Some("ALREADY_CONFIRMED".into())
+        } else {
+            active_review_reason(scope, Some(DICTATION_STRICT_BATCH_CONFIDENCE))
+        });
+    }
+    let confirmed_count = reasons.iter().filter(|reason| reason.is_none()).count() as i64;
+    let excluded_count = reasons.len() as i64 - confirmed_count;
+    let now = time::utc_now_rfc3339();
+    tx.execute(
+        "INSERT INTO exam_dictation_review_batches_v2
+         (public_id,assessment_version_id,idempotency_key,request_hash,requested_count,
+          confirmed_count,excluded_count,state,created_by,created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,'completed',?8,?9)",
+        (
+            ids::new_public_id(),
+            assessment_version_id.expect("non-empty scopes"),
+            input.idempotency_key.trim(),
+            &request_hash,
+            scopes.len() as i64,
+            confirmed_count,
+            excluded_count,
+            input.reviewed_by.trim(),
+            &now,
+        ),
+    )?;
+    let batch_id = tx.last_insert_rowid();
+    for (scope, reason) in scopes.iter().zip(reasons) {
+        let decision = if reason.is_none() {
+            let score = scope.observation.suggested_score.expect("validated score");
+            let point_results =
+                dictation_point_results(scope, "dictation_strict_batch", score, None);
+            let confirmation_level = if scope.transcription.corrected_by.is_some() {
+                "teacher_corrected"
+            } else {
+                "teacher_accepted"
+            };
+            let decision = decide_grade_in_transaction(
+                &tx,
+                &NewGradeDecision {
+                    attempt_id: scope.transcription.attempt_id,
+                    assessment_item_id: scope.transcription.assessment_item_id,
+                    machine_grade_ai_run_id: None,
+                    teacher_score: score,
+                    point_results_json: &point_results,
+                    teacher_note: None,
+                    confirmation_level,
+                    decided_by: input.reviewed_by,
+                },
+            )?;
+            link_decision_source(
+                &tx,
+                &DictationDecisionSource {
+                    decision_id: decision.id,
+                    scope,
+                    review_mode: "strict_batch",
+                    batch_id: Some(batch_id),
+                    teacher_evidence_text: None,
+                    reviewed_by: input.reviewed_by.trim(),
+                    now: &now,
+                },
+            )?;
+            Some(decision)
+        } else {
+            None
+        };
+        tx.execute(
+            "INSERT INTO exam_dictation_review_batch_items_v2
+             (batch_id,transcription_revision_id,outcome,reason_code,grade_decision_id,created_at)
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            (
+                batch_id,
+                scope.transcription.id,
+                if decision.is_some() {
+                    "confirmed"
+                } else {
+                    "excluded"
+                },
+                reason.as_deref(),
+                decision.as_ref().map(|value| value.id),
+                &now,
+            ),
+        )?;
+    }
+    let batch = get_review_batch(&tx, batch_id)?;
+    tx.commit()?;
+    Ok(batch)
+}
+
 pub fn list_dictation_workbench(
     conn: &Connection,
     assessment_version_id: Option<i64>,
     limit: i64,
-) -> CoreResult<Vec<DictationWorkbenchRow>> {
+) -> CoreResult<DictationWorkbench> {
     let limit = limit.clamp(1, 2000);
     let mut stmt = conn.prepare(
-        "SELECT v.id,a.title,at.id,st.id,st.student_no,st.name,
-                i.id,i.order_index,
+        "SELECT a.id,v.id,a.title,at.id,at.state,at.active_publication_id,
+                st.id,st.student_no,st.name,i.id,i.order_index,
                 COALESCE(CAST(json_extract(i.presentation_snapshot_json,'$.question_no') AS TEXT),
                          CAST(i.order_index + 1 AS TEXT)),
                 q.question_type,q.stem,i.score,r.id,art.archived_path,
                 t.id,t.revision,t.source_ai_run_id,t.result_state,t.raw_ocr_text,
                 t.normalized_text,t.teacher_corrected_text,t.confidence,o.result,
-                p.policy_json,o.suggested_score
+                p.policy_json,o.suggested_score,
+                d.id,d.revision,d.teacher_score,d.confirmation_level,src.review_mode,
+                CASE WHEN src.transcription_revision_id=t.id THEN 1 ELSE 0 END,d.decided_at
          FROM exam_dictation_transcription_revisions_v2 t
          JOIN exam_dictation_point_observations_v2 o
            ON o.transcription_revision_id=t.id
@@ -1341,80 +1939,135 @@ pub fn list_dictation_workbench(
          JOIN exam_assessment_versions_v2 v ON v.id=i.assessment_version_id
          JOIN exam_assessments_v2 a ON a.id=v.assessment_id
          JOIN k1_question_versions q ON q.id=i.question_version_id
+         LEFT JOIN exam_grade_decisions_v2 d
+           ON d.attempt_id=at.id AND d.assessment_item_id=i.id AND d.state='active'
+         LEFT JOIN exam_grade_decision_dictation_sources_v2 src
+           ON src.grade_decision_id=d.id
          WHERE t.state='active' AND (?1 IS NULL OR v.id=?1)
          ORDER BY v.id DESC,i.order_index,st.student_no,at.attempt_no
          LIMIT ?2",
     )?;
     let rows = stmt.query_map((assessment_version_id, limit), |row| {
         Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, String>(5)?,
-            row.get::<_, i64>(6)?,
-            row.get::<_, i64>(7)?,
-            row.get::<_, String>(8)?,
-            row.get::<_, String>(9)?,
-            row.get::<_, String>(10)?,
-            row.get::<_, f64>(11)?,
-            row.get::<_, i64>(12)?,
-            row.get::<_, Option<String>>(13)?,
-            row.get::<_, i64>(14)?,
-            row.get::<_, i64>(15)?,
-            row.get::<_, Option<i64>>(16)?,
-            row.get::<_, String>(17)?,
-            row.get::<_, Option<String>>(18)?,
-            row.get::<_, Option<String>>(19)?,
-            row.get::<_, Option<String>>(20)?,
-            row.get::<_, Option<f64>>(21)?,
-            row.get::<_, String>(22)?,
-            row.get::<_, String>(23)?,
-            row.get::<_, Option<f64>>(24)?,
+            DictationWorkbenchRow {
+                assessment_id: row.get(0)?,
+                assessment_version_id: row.get(1)?,
+                assessment_title: row.get(2)?,
+                attempt_id: row.get(3)?,
+                attempt_state: row.get(4)?,
+                active_publication_id: row.get(5)?,
+                student_id: row.get(6)?,
+                student_no: row.get(7)?,
+                student_name: row.get(8)?,
+                assessment_item_id: row.get(9)?,
+                order_index: row.get(10)?,
+                question_no: row.get(11)?,
+                question_type: row.get(12)?,
+                question_stem: row.get(13)?,
+                max_score: row.get(14)?,
+                answer_region_revision_id: row.get(15)?,
+                crop_path: row.get(16)?,
+                transcription_revision_id: row.get(17)?,
+                transcription_revision: row.get(18)?,
+                source_ai_run_id: row.get(19)?,
+                result_state: row.get(20)?,
+                raw_ocr_text: row.get(21)?,
+                normalized_text: row.get(22)?,
+                teacher_corrected_text: row.get(23)?,
+                confidence: row.get(24)?,
+                point_result: row.get(25)?,
+                canonical_text: String::new(),
+                accepted_variants: Vec::new(),
+                suggested_score: row.get(27)?,
+                requires_teacher_review: true,
+                grade_decision_id: row.get(28)?,
+                grade_decision_revision: row.get(29)?,
+                teacher_score: row.get(30)?,
+                confirmation_level: row.get(31)?,
+                review_mode: row.get(32)?,
+                current_transcription_confirmed: row.get(33)?,
+                decided_at: row.get(34)?,
+            },
+            row.get::<_, String>(26)?,
         ))
     })?;
     let mut result = Vec::new();
     for row in rows {
-        let row = row?;
-        let policy: StoredPolicy = serde_json::from_str(&row.23)
+        let (mut row, policy_json) = row?;
+        let policy: StoredPolicy = serde_json::from_str(&policy_json)
             .map_err(|error| CoreError::Parse(format!("默写策略 JSON 损坏：{error}")))?;
         let point = policy
             .points
             .into_iter()
             .next()
             .ok_or_else(|| CoreError::Invalid("默写策略没有评分点".into()))?;
-        result.push(DictationWorkbenchRow {
-            assessment_version_id: row.0,
-            assessment_title: row.1,
-            attempt_id: row.2,
-            student_id: row.3,
-            student_no: row.4,
-            student_name: row.5,
-            assessment_item_id: row.6,
-            order_index: row.7,
-            question_no: row.8,
-            question_type: row.9,
-            question_stem: row.10,
-            max_score: row.11,
-            answer_region_revision_id: row.12,
-            crop_path: row.13,
-            transcription_revision_id: row.14,
-            transcription_revision: row.15,
-            source_ai_run_id: row.16,
-            result_state: row.17,
-            raw_ocr_text: row.18,
-            normalized_text: row.19,
-            teacher_corrected_text: row.20,
-            confidence: row.21,
-            point_result: row.22.clone(),
-            canonical_text: point.canonical_text,
-            accepted_variants: point.accepted_variants,
-            suggested_score: row.24,
-            requires_teacher_review: !matches!(row.22.as_str(), "exact" | "accepted_variant"),
-        });
+        row.requires_teacher_review =
+            !matches!(row.point_result.as_str(), "exact" | "accepted_variant");
+        row.canonical_text = point.canonical_text;
+        row.accepted_variants = point.accepted_variants;
+        result.push(row);
     }
-    Ok(result)
+    drop(stmt);
+
+    let mut attempt_stmt = conn.prepare(
+        "SELECT a.id,v.id,a.title,at.id,at.state,at.active_publication_id,
+                st.id,st.student_no,st.name,
+                (SELECT COUNT(*) FROM exam_assessment_items_v2 i
+                 WHERE i.assessment_version_id=v.id AND i.state='active'),
+                (SELECT COUNT(*) FROM exam_dictation_transcription_revisions_v2 t
+                 WHERE t.attempt_id=at.id AND t.state='active'),
+                (SELECT COUNT(*) FROM exam_grade_decisions_v2 d
+                 JOIN exam_assessment_items_v2 i ON i.id=d.assessment_item_id
+                 WHERE d.attempt_id=at.id AND d.state='active'
+                   AND i.assessment_version_id=v.id AND i.state='active'),
+                (SELECT COALESCE(SUM(d.teacher_score),0.0)
+                 FROM exam_grade_decisions_v2 d
+                 JOIN exam_assessment_items_v2 i ON i.id=d.assessment_item_id
+                 WHERE d.attempt_id=at.id AND d.state='active'
+                   AND i.assessment_version_id=v.id AND i.state='active'),
+                (SELECT COALESCE(SUM(i.score),0.0)
+                 FROM exam_assessment_items_v2 i
+                 WHERE i.assessment_version_id=v.id AND i.state='active'),
+                pi.total_score,
+                CASE WHEN at.state='ready_to_publish' THEN 1 ELSE 0 END
+         FROM exam_attempts_v2 at
+         JOIN students st ON st.id=at.student_id
+         JOIN exam_assessment_versions_v2 v ON v.id=at.assessment_version_id
+         JOIN exam_assessments_v2 a ON a.id=v.assessment_id
+         LEFT JOIN exam_grade_publication_items_v2 pi
+           ON pi.publication_id=at.active_publication_id AND pi.attempt_id=at.id
+         WHERE at.state<>'voided' AND (?1 IS NULL OR v.id=?1)
+           AND EXISTS(SELECT 1 FROM exam_dictation_transcription_revisions_v2 t
+                      WHERE t.attempt_id=at.id AND t.state='active')
+         ORDER BY v.id DESC,st.student_no,at.attempt_no
+         LIMIT ?2",
+    )?;
+    let attempts = attempt_stmt
+        .query_map((assessment_version_id, limit), |row| {
+            Ok(DictationAttemptSummary {
+                assessment_id: row.get(0)?,
+                assessment_version_id: row.get(1)?,
+                assessment_title: row.get(2)?,
+                attempt_id: row.get(3)?,
+                attempt_state: row.get(4)?,
+                active_publication_id: row.get(5)?,
+                student_id: row.get(6)?,
+                student_no: row.get(7)?,
+                student_name: row.get(8)?,
+                item_count: row.get(9)?,
+                observed_count: row.get(10)?,
+                confirmed_count: row.get(11)?,
+                teacher_total_score: row.get(12)?,
+                max_total_score: row.get(13)?,
+                published_total_score: row.get(14)?,
+                can_publish: row.get(15)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(DictationWorkbench {
+        rows: result,
+        attempts,
+    })
 }
 
 pub fn template_source(

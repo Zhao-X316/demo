@@ -8,7 +8,7 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 
 ## 当前进度
 
-> 2026-07-15：独立分支 `codex/t2-artifacts@8e0a1e8` 已完成 T2～T6、B3a0、B3a1 普通卷纵切、B3a2 固定答题卡首建/复用、M2-C0 固定格式默写首条纵切，以及答案图片/TXT/PDF/DOCX/XLSX 结构化、冲突预检和“采用上传答案，另存新版本”。PDF 由 macOS CoreGraphics 逐页渲染为 JPEG；DOCX/XLSX 只在本机做确定性 OOXML 解包和文字/单元格提取，不执行宏或访问外链。上传答案先形成带来源锚点的逐题 AI 草稿：全题与当前作业 K1 答案结构一致时老师一次确认复用；冲突或缺题会阻断并逐题展示；老师可明确沿用当前答案。若客观题或固定填空题无缺题且老师选择采用冲突答案，系统原子创建新的 K1 答案版本和 assessment version，本批学生照片仍固定引用原 assessment version，不会被静默重评。简答题冲突因涉及 rubric/知识链接，仍要求老师先补录和确认 rubric。普通卷、答题卡和默写的机器观察仍不能自动确认分数、发布或生成正式学习证据。真实文件/provider/GUI、默写正式终审与三类黄金集仍未完成。未 tag、合并、推送或发布。
+> 2026-07-15：独立分支 `codex/t2-artifacts` 已完成 T2～T6、B3a0、B3a1 普通卷纵切、B3a2 固定答题卡首建/复用、M2-C0 固定格式默写正式终审，以及答案图片/TXT/PDF/DOCX/XLSX 结构化、冲突预检和“采用上传答案，另存新版本”。默写 OCR 仍只产生追加式转写和评分点建议；老师可逐条接受、按原图补录/记分，或严格批量确认置信度不低于 0.95 的精确结果。整份默写必须显式发布，发布后才按 rubric point 生成正式学习证据；OCR 原文、老师校正、评分 revision 和发布 revision 均可追溯。真实文件/provider/GUI 与三类黄金集仍未完成。未 tag、合并、推送或发布。
 
 | 部分 | 状态 | 说明 |
 |------|------|------|
@@ -18,7 +18,7 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 | `crates/module-recitation` M1 域 | ✅ 实现 + 单测 | 文件名解析、熟练度 A/B/C、评分编排、识别 ports、rec_contents 仓储 |
 | `crates/module-recitation` M1 服务 | ✅ 实现 + 单测 | import 去重/归档、ASR 可恢复状态机、机器建议、老师终审、补背/到期复习/日切、双向改判 |
 | `crates/module-knowledge` K1 | 🟡 T3 兼容底座 | 教材/知识/考点/能力稳定版本，题目/答案/rubric/link 不可变版本，C0～L4 质量闸门与旧表显式映射；导入、搜索和 UI 尚未接入 |
-| `crates/module-exam` M2 | 🟡 A1 + B0/B1 + M2.5 + B2 + B3a1/B3a2/B3c2 + M2-C0 纵切 | 普通卷、固定答题卡、固定默写首建/复用链、五类答案源结构化/冲突预检及客观题/固定填空答案另存新版本已落；默写机器结果仍只是建议，简答答案冲突仍须先补录并确认 rubric |
+| `crates/module-exam` M2 | 🟡 A1 + B0/B1 + M2.5 + B2 + B3a1/B3a2/B3c2 + M2-C0 | 普通卷、固定答题卡、固定默写首建/复用与正式终审链、五类答案源结构化/冲突预检及客观题/固定填空答案另存新版本已落；默写机器结果仍只是建议，简答答案冲突仍须先补录并确认 rubric |
 | Tauri 应用外壳 `src-tauri` | ✅ 实现 + 独立检查 | DB+迁移、M1 终审，以及 T6 工作台/接受建议/人工记分/严格批量/显式发布、T6.1b 固定卷上传归档/PDF 真拆页和 Ark 题区识别 run；在线备份恢复、按 hash 归档、凭据掩码与最小 asset scope |
 | 前端 `src` | 🟡 M1/M2 已接入 | 方向 B 模块切换；M1 六区、M2-A1 手工兜底，以及“上传批改”单入口、T6 标准卷按题终审、异常处理、严格批量和整卷发布页面 |
 | 跨平台 CI | ✅ 后端三平台 + 应用 Win/Mac 编译 | `.github/workflows/ci.yml` |
@@ -27,12 +27,12 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 | 页面与老师终审 | ✅ A6b 真机通过 | 机器只给建议；老师核对录音/ASR/答案版本/评分/备注后终审，副作用才生效 |
 | M2 页面证据链 / OCR | 🟡 三材料固定版式纵切已接 | 普通卷按 `structure run → teacher confirmation → alignment/region/crop → observation`；答题卡按 `blank image → template run → one-time teacher confirmation → four-anchor alignment → deterministic crop/OMR → observation`；默写按 `blank image → template/policy confirmation → aligned derivative/region crop → answer-free OCR → exception review`。真实照片准确率未验证 |
 | M2.5 题目自动沉淀 | 🟡 T5 核心合同完成 | 精确复用当前作业已固定的 K1 版本；否则创建老师私有 C0 候选；冲突/歧义进入待确认，学生卷只允许脱敏文本；相似题语义检索、候选整理 UI 和晋级尚未接入 |
-| M2 拍照批改 | 🟡 普通卷/固定答题卡/固定默写纵切 | 三类材料共用自然排序和学生归组，识别方式独立；默写已分开未写、无法辨认、识别失败、涂改终态和真实不匹配，并支持失败 run 新幂等键重试与老师追加式校正 |
+| M2 拍照批改 | 🟡 普通卷/固定答题卡/固定默写纵切 | 三类材料共用自然排序和学生归组，识别方式独立；默写已分开未写、无法辨认、识别失败、涂改终态和真实不匹配，并支持失败重试、追加式校正、人工补录/记分、严格批量终审与显式发布 |
 | M2 傻瓜式固定卷预检 | 🟡 三材料固定版式 + 图片/TXT/PDF/Word/Excel 答案核对已贯通 | “上传批改”仍是唯一主入口；普通卷确认结构，答题卡确认一次空白模板，默写确认一次空白区域/评分策略，之后整批自动处理并只展示异常。答案全一致一次确认；冲突/缺题阻断；老师可沿用当前答案，或把客观题/固定填空冲突答案另存为新 K1/作业版本且不改写本批绑定 |
 | 音频回放 | ✅ app-managed archive | 按 hash 归档；原文件改名、重启和数据库恢复后仍可回放，原路径只兜底 |
 | ffmpeg 转码/时长探测 | ✅ 可选集成 | 装了 ffmpeg 则转 16k 单声道 wav + 探测时长，否则降级 |
 
-当前已验证：module-exam **92 tests**、workspace **221 tests**、Tauri 应用 **47 tests**（另有隔离夹具 2 tests）、两套 Clippy `-D warnings`、Tauri check、前端 build 和 `git diff --check` 全通过；exam 迁移已到 `exam_0019`。新增回归证明：答案结构化请求不携带当前标准答案或学生数据；PDF 真正渲染为逐页 JPEG；DOCX/XLSX 在本机确定性提取；逐题全一致才允许一次确认；采用冲突答案会创建新的 K1 答案和 assessment version、保持当前批次绑定与旧答案不变、重复点击幂等且不产生分数/发布/evidence；固定填空保留槽位身份与评分规则；简答冲突整笔回滚并要求老师先确认 rubric。真实答题卡/默写/答案文件、真实 provider 凭据、阈值和 GUI 尚未验证；默写正式成绩/evidence 尚未完成；正式库未写入。
+当前已验证：module-exam **95 tests**、workspace **224 tests**、Tauri 应用 **47 tests**（另有隔离夹具 2 tests）、两套 Clippy `-D warnings`、Tauri check、前端 build 和 `git diff --check` 全通过；exam 迁移已到 `exam_0020`。新增回归证明：老师校正默写后仍须单独终审，发布前不产生正式学习证据；人工补录不会覆盖机器 OCR；严格批量只确认当前高置信度精确结果、重复请求幂等并保存排除原因；显式发布后证据精确引用 rubric point，且老师校正级别和不可变来源可追溯。真实答题卡/默写/答案文件、真实 provider 凭据、阈值和 GUI 尚未验证；正式库未写入。
 
 > 这些结果不等于授权发布。异模型复核、tag、合并和安装包发布仍需单独放行。
 
