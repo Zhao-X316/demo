@@ -36,6 +36,7 @@ use module_exam::service::objective::{
     self, ObjectiveObservationResult, ObjectiveReviewBatch, ObjectiveWorkbench, StrictBatchReview,
 };
 use module_exam::service::ordinary_structure::OrdinaryStructureConfirmationResult;
+use module_exam::service::subjective::SubjectiveTranscriptionRevision;
 use module_exam::vlm::{self as exam_vlm, AnalyzedQuestion};
 
 use crate::answer_sheet_materialization::{self, AnswerSheetPageProcessingResult};
@@ -46,7 +47,9 @@ use crate::answer_sheet_template_run::{
 use crate::answer_source_provider::ArkAnswerSourceRecognizer;
 use crate::answer_source_run::{self, AnswerSourceAnalysisResult, BeginAnswerSourceRun};
 use crate::dictation_materialization;
-use crate::dictation_provider::{ArkDictationOcrRecognizer, ArkDictationTemplateRecognizer};
+use crate::dictation_provider::{
+    ArkDictationOcrRecognizer, ArkDictationTemplateRecognizer, ArkHandwritingOcrRecognizer,
+};
 use crate::dictation_run::{
     self, BeginDictationOcrRun, BeginDictationTemplateRun, DictationTemplateRunResult,
     DictationTemplateStatus,
@@ -63,6 +66,7 @@ use crate::ordinary_paper_provider::ArkOrdinaryPaperRecognizer;
 use crate::ordinary_paper_run::{self, BeginOrdinaryPaperRun, OrdinaryPaperRunResult};
 use crate::secrets;
 use crate::state::AppState;
+use crate::subjective_run::{self, BeginSubjectiveOcrRun};
 use crate::vlm;
 use module_exam::service::ordered_activation::GroupedPageEvidence;
 
@@ -659,14 +663,117 @@ pub fn exam_ordinary_paper_confirm_page_structure(
 ///
 /// 本地完成四角校正、题区裁剪与像素差分 OMR；清晰结果和异常都只进入客观题建议，
 /// 不自动确认分数，也不自动发布成绩。
+async fn recognize_answer_sheet_subjective_region(
+    state: &State<'_, AppState>,
+    answer_region_revision_id: i64,
+    idempotency_key: String,
+) -> R<SubjectiveTranscriptionRevision> {
+    let creds = secrets::load(&state.data_dir).map_err(e)?;
+    let recognizer = ArkHandwritingOcrRecognizer::from_creds(&creds);
+    let descriptor = recognizer.descriptor();
+    let metadata = {
+        let conn = lock(state)?;
+        subjective_run::load_metadata(&conn, answer_region_revision_id).map_err(e)?
+    };
+    let input = std::sync::Arc::new(subjective_run::load_input(metadata).map_err(e)?);
+    let ai_run_id = {
+        let mut conn = lock(state)?;
+        match subjective_run::begin(&mut conn, &input, &descriptor, &idempotency_key).map_err(e)? {
+            BeginSubjectiveOcrRun::Execute { ai_run_id } => ai_run_id,
+            BeginSubjectiveOcrRun::Completed(result) => return Ok(*result),
+        }
+    };
+    let worker_input = std::sync::Arc::clone(&input);
+    let provider_result =
+        tauri::async_runtime::spawn_blocking(move || recognizer.recognize(&worker_input.request()))
+            .await
+            .unwrap_or_else(|_| {
+                Err(DictationFailure {
+                    schema_version: DICTATION_OCR_SCHEMA_VERSION,
+                    code: DictationErrorCode::Internal,
+                    safe_message: "手写识别任务意外中断，已保留题区等待重试".into(),
+                    retryable: true,
+                })
+            });
+    let mut conn = lock(state)?;
+    subjective_run::finish(&mut conn, &input, ai_run_id, provider_result).map_err(e)
+}
+
+/// 老师把当前 active 固定答题卡模板应用到一张已确认学生页面。
+///
+/// 本地完成四角校正、题区裁剪和客观题 OMR；主观区随后逐区调用只读手写 OCR。
+/// 单区异常不会抹掉已经完成的结构/客观题结果，而会返回显式失败供老师重试。
 #[tauri::command]
-pub fn exam_answer_sheet_process_page(
+pub async fn exam_answer_sheet_process_page(
     state: State<'_, AppState>,
     page_id: i64,
 ) -> R<AnswerSheetPageProcessingResult> {
-    let conn = lock(&state)?;
-    answer_sheet_materialization::process_page(&conn, &state.data_dir, page_id, LOCAL_TEACHER_ACTOR)
-        .map_err(e)
+    let mut result = {
+        let conn = lock(&state)?;
+        answer_sheet_materialization::process_page(
+            &conn,
+            &state.data_dir,
+            page_id,
+            LOCAL_TEACHER_ACTOR,
+        )
+        .map_err(e)?
+    };
+    for region in result.subjective_regions.clone() {
+        let key = format!(
+            "answer-sheet:page:{page_id}:region:{}:handwriting-ocr-v1",
+            region.answer_region_revision_id
+        );
+        match recognize_answer_sheet_subjective_region(
+            &state,
+            region.answer_region_revision_id,
+            key,
+        )
+        .await
+        {
+            Ok(transcription) => result.subjective_transcriptions.push(transcription),
+            Err(safe_message) => {
+                result.subjective_failures.push(
+                    answer_sheet_materialization::AnswerSheetSubjectiveRegionFailure {
+                        answer_region_revision_id: region.answer_region_revision_id,
+                        safe_message,
+                    },
+                );
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// 对单个答题卡主观题区主动重试手写 OCR；新请求使用新幂等键，不覆盖旧转写。
+#[tauri::command]
+pub async fn exam_answer_sheet_recognize_subjective_region(
+    state: State<'_, AppState>,
+    answer_region_revision_id: i64,
+    idempotency_key: String,
+) -> R<SubjectiveTranscriptionRevision> {
+    recognize_answer_sheet_subjective_region(
+        &state,
+        answer_region_revision_id,
+        idempotency_key,
+    )
+    .await
+}
+
+/// 老师只校正已存在的 OCR 文本；原始机器文本保留，新文本形成追加 revision。
+#[tauri::command]
+pub fn exam_answer_sheet_correct_subjective_transcription(
+    state: State<'_, AppState>,
+    answer_region_revision_id: i64,
+    corrected_text: String,
+) -> R<SubjectiveTranscriptionRevision> {
+    let mut conn = lock(&state)?;
+    module_exam::service::subjective::teacher_correct_transcription(
+        &mut conn,
+        answer_region_revision_id,
+        &corrected_text,
+        LOCAL_TEACHER_ACTOR,
+    )
+    .map_err(e)
 }
 
 /// 查询当前答题卡页是否已有老师确认的 active 空白模板。

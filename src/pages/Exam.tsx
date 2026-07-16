@@ -1116,6 +1116,14 @@ function FixedIntakeTab({
     (total, value) => total + value.subjectiveRegions.length,
     0,
   );
+  const answerSheetSubjectiveTranscriptions = answerSheetProcessedValues.flatMap(
+    (value) => value.subjectiveTranscriptions,
+  );
+  const answerSheetSubjectiveRecognizedCount = answerSheetSubjectiveTranscriptions.filter(
+    (value) => value.result_state === "recognized",
+  ).length;
+  const answerSheetSubjectiveReviewCount = answerSheetSubjectiveRegionCount
+    - answerSheetSubjectiveRecognizedCount;
   const answerSheetFailureCount = Object.keys(answerSheetPageFailures).length;
   const answerSheetPendingCount = Math.max(
     0,
@@ -1630,7 +1638,8 @@ function FixedIntakeTab({
                       <span>已处理 {answerSheetProcessedValues.length}/{answerSheetEligiblePages.length} 页</span>
                       <span className="ready">清晰题区 {answerSheetReadyObservationCount}</span>
                       <span className="review">需老师看 {answerSheetReviewObservationCount}</span>
-                      <span>主观区待识别 {answerSheetSubjectiveRegionCount}</span>
+                      <span className="ready">主观区已转写 {answerSheetSubjectiveRecognizedCount}</span>
+                      <span className="review">主观区需老师看 {answerSheetSubjectiveReviewCount}</span>
                       <span className="blocked">失败页 {answerSheetFailureCount}</span>
                       <span>待处理 {answerSheetPendingCount}</span>
                     </div>

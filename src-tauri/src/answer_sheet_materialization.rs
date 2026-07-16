@@ -17,6 +17,7 @@ use module_exam::service::answer_sheet_page::{
 };
 use module_exam::service::objective::ObjectiveObservationResult;
 use module_exam::service::ordinary_structure::crop_normalized_jpeg;
+use module_exam::service::subjective::SubjectiveTranscriptionRevision;
 use rusqlite::Connection;
 use serde::Serialize;
 use suite_core::domain::hashing;
@@ -34,6 +35,8 @@ pub struct AnswerSheetPageProcessingResult {
     pub structure: AnswerSheetPageMaterializationResult,
     pub observations: Vec<ObjectiveObservationResult>,
     pub subjective_regions: Vec<AnswerSheetSubjectiveRegionProcessingResult>,
+    pub subjective_transcriptions: Vec<SubjectiveTranscriptionRevision>,
+    pub subjective_failures: Vec<AnswerSheetSubjectiveRegionFailure>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -45,6 +48,13 @@ pub struct AnswerSheetSubjectiveRegionProcessingResult {
     pub crop_artifact_id: i64,
     pub state: &'static str,
     pub next_action: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnswerSheetSubjectiveRegionFailure {
+    pub answer_region_revision_id: i64,
+    pub safe_message: String,
 }
 
 struct PreparedRegion {
@@ -402,5 +412,7 @@ pub fn process_page(
         structure,
         observations,
         subjective_regions,
+        subjective_transcriptions: Vec::new(),
+        subjective_failures: Vec::new(),
     })
 }

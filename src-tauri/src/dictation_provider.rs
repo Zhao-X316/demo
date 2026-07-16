@@ -32,6 +32,13 @@ pub struct ArkDictationOcrRecognizer {
     endpoint: String,
 }
 
+/// 答题卡填空/简答题区只读手写 OCR；请求结构与默写一致，但提示词不假设材料是默写。
+pub struct ArkHandwritingOcrRecognizer {
+    api_key: String,
+    model: String,
+    endpoint: String,
+}
+
 fn model(creds: &VolcanoCreds) -> String {
     if creds.ark_model.trim().is_empty() {
         DEFAULT_MODEL.into()
@@ -60,6 +67,25 @@ impl ArkDictationTemplateRecognizer {
 }
 
 impl ArkDictationOcrRecognizer {
+    pub fn from_creds(creds: &VolcanoCreds) -> Self {
+        Self {
+            api_key: creds.ark_api_key.clone(),
+            model: model(creds),
+            endpoint: ARK_URL.into(),
+        }
+    }
+
+    #[cfg(test)]
+    fn for_test(endpoint: String) -> Self {
+        Self {
+            api_key: "test-key".into(),
+            model: "test-model".into(),
+            endpoint,
+        }
+    }
+}
+
+impl ArkHandwritingOcrRecognizer {
     pub fn from_creds(creds: &VolcanoCreds) -> Self {
         Self {
             api_key: creds.ark_api_key.clone(),
@@ -379,6 +405,72 @@ impl DictationOcrRecognizer for ArkDictationOcrRecognizer {
     }
 }
 
+impl DictationOcrRecognizer for ArkHandwritingOcrRecognizer {
+    fn descriptor(&self) -> DictationRecognizerDescriptor {
+        descriptor(
+            &self.model,
+            "answer-sheet-handwriting-ocr-v1",
+            "raw-handwriting-only-json-v1",
+        )
+    }
+
+    fn recognize(
+        &self,
+        request: &DictationOcrRequest<'_>,
+    ) -> Result<DictationOcrOutput, DictationFailure> {
+        request.validate().map_err(|_| {
+            failure(
+                DictationErrorCode::TemplateMismatch,
+                "主观题裁剪与当前题区不一致",
+                false,
+            )
+        })?;
+        let prompt = "你是中文历史试卷手写 OCR。只读取图片中学生实际写下的文字，不看也不猜标准答案，不判分，不纠正史实、错别字、人名、地名、年份或条约名。只输出 JSON：{state,raw_text,normalized_text,confidence,issue_codes}。state 为 recognized|not_written|unreadable|ambiguous_final；recognized 时原样保留 raw_text，normalized_text 只允许整理空白和标点，不能把疑似错字改成正确知识；其余状态三个文本/置信度字段必须为 null。涂改后无法确定最终答案时用 ambiguous_final。".to_string();
+        let value = request_json(
+            &self.endpoint,
+            &self.api_key,
+            &self.model,
+            prompt,
+            request.mime_type,
+            request.image_bytes,
+        )?;
+        let payload: OcrPayload = serde_json::from_value(value).map_err(|_| {
+            failure(
+                DictationErrorCode::InvalidOutput,
+                "手写 OCR 字段不完整，已转入老师复核",
+                false,
+            )
+        })?;
+        let output = DictationOcrOutput {
+            schema_version: DICTATION_OCR_SCHEMA_VERSION,
+            answer_region_revision_id: request.answer_region_revision_id,
+            crop_artifact_id: request.crop_artifact_id,
+            crop_artifact_sha256: request.crop_artifact_sha256.trim().to_ascii_lowercase(),
+            input_hash: request.input_hash().map_err(|_| {
+                failure(
+                    DictationErrorCode::TemplateMismatch,
+                    "手写 OCR 输入无法版本化",
+                    false,
+                )
+            })?,
+            descriptor: self.descriptor(),
+            state: payload.state,
+            raw_text: payload.raw_text,
+            normalized_text: payload.normalized_text,
+            confidence: payload.confidence,
+            issue_codes: payload.issue_codes,
+        };
+        output.validate_against(request).map_err(|_| {
+            failure(
+                DictationErrorCode::InvalidOutput,
+                "手写 OCR 未通过安全校验，已转入老师复核",
+                false,
+            )
+        })?;
+        Ok(output)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
@@ -477,5 +569,36 @@ mod tests {
         let sent = received.recv().unwrap();
         assert!(!sent.contains("1842"));
         assert!(sent.contains("不猜标准答案"));
+    }
+
+    #[test]
+    fn answer_sheet_handwriting_adapter_is_raw_ocr_not_grading() {
+        let bytes = b"student-short-answer";
+        let hash = hashing::sha256_hex(bytes);
+        let payload = json!({
+            "state": "recognized",
+            "raw_text": "因为只学技术没改制度",
+            "normalized_text": "因为只学技术没改制度",
+            "confidence": 0.96,
+            "issue_codes": []
+        });
+        let envelope = json!({"choices":[{"message":{"content":payload.to_string()}}]});
+        let (endpoint, received) = serve_once(envelope.to_string());
+        let recognizer = ArkHandwritingOcrRecognizer::for_test(endpoint);
+        let request = DictationOcrRequest {
+            answer_region_revision_id: 18,
+            crop_artifact_id: 19,
+            crop_artifact_sha256: &hash,
+            mime_type: "image/jpeg",
+            image_bytes: bytes,
+        };
+        let output = recognizer.recognize(&request).unwrap();
+        assert_eq!(
+            output.raw_text.as_deref(),
+            Some("因为只学技术没改制度")
+        );
+        let sent = received.recv().unwrap();
+        assert!(sent.contains("不看也不猜标准答案"));
+        assert!(sent.contains("不判分"));
     }
 }

@@ -25,6 +25,7 @@ mod ordinary_paper_run;
 mod pdf_pages;
 mod secrets;
 mod state;
+mod subjective_run;
 mod vlm;
 
 use tauri::Manager;
@@ -122,6 +123,8 @@ fn main() {
             exam_commands::exam_ordinary_paper_analyze_page,
             exam_commands::exam_ordinary_paper_confirm_page_structure,
             exam_commands::exam_answer_sheet_process_page,
+            exam_commands::exam_answer_sheet_recognize_subjective_region,
+            exam_commands::exam_answer_sheet_correct_subjective_transcription,
             exam_commands::exam_answer_sheet_template_status,
             exam_commands::exam_answer_sheet_analyze_template,
             exam_commands::exam_answer_sheet_confirm_template,

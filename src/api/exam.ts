@@ -457,6 +457,32 @@ export interface AnswerSheetPageProcessingResult {
     state: "awaiting_handwriting_recognition";
     nextAction: string;
   }>;
+  subjectiveTranscriptions: SubjectiveTranscriptionRevision[];
+  subjectiveFailures: Array<{
+    answerRegionRevisionId: number;
+    safeMessage: string;
+  }>;
+}
+
+export interface SubjectiveTranscriptionRevision {
+  id: number;
+  public_id: string;
+  attempt_id: number;
+  assessment_item_id: number;
+  answer_region_revision_id: number;
+  question_type: "fill_blank" | "short_answer";
+  revision: number;
+  source_ai_run_id: number | null;
+  result_state: "recognized" | "not_written" | "unreadable" | "recognize_failed" | "ambiguous_final";
+  raw_ocr_text: string | null;
+  normalized_text: string | null;
+  teacher_corrected_text: string | null;
+  confidence: number | null;
+  failure_meta_json: string | null;
+  corrected_by: string | null;
+  corrected_at: string | null;
+  state: "active" | "superseded" | "voided";
+  created_at: string;
 }
 
 export interface AnswerSheetTemplateRevision {
@@ -811,6 +837,25 @@ export const examAnswerSheetProcessPage = (page_id: number) =>
   call<AnswerSheetPageProcessingResult>("exam_answer_sheet_process_page", {
     pageId: page_id,
   });
+
+export const examAnswerSheetRecognizeSubjectiveRegion = (
+  answer_region_revision_id: number,
+  idempotency_key: string,
+) => call<SubjectiveTranscriptionRevision>("exam_answer_sheet_recognize_subjective_region", {
+  answerRegionRevisionId: answer_region_revision_id,
+  idempotencyKey: idempotency_key,
+});
+
+export const examAnswerSheetCorrectSubjectiveTranscription = (
+  answer_region_revision_id: number,
+  corrected_text: string,
+) => call<SubjectiveTranscriptionRevision>(
+  "exam_answer_sheet_correct_subjective_transcription",
+  {
+    answerRegionRevisionId: answer_region_revision_id,
+    correctedText: corrected_text,
+  },
+);
 
 export const examAnswerSheetTemplateStatus = (reference_page_id: number) =>
   call<AnswerSheetTemplateStatus>("exam_answer_sheet_template_status", {

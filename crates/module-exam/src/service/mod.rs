@@ -15,6 +15,7 @@ pub mod ordinary_structure;
 pub mod page_cycle;
 pub mod papers;
 pub mod question_ingest;
+pub mod subjective;
 
 #[cfg(test)]
 mod ordinary_structure_tests;
@@ -24,3 +25,6 @@ mod answer_sheet_page_tests;
 
 #[cfg(test)]
 mod dictation_pipeline_tests;
+
+#[cfg(test)]
+mod subjective_tests;
