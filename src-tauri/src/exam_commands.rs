@@ -36,7 +36,7 @@ use module_exam::service::objective::{
     self, ObjectiveObservationResult, ObjectiveReviewBatch, ObjectiveWorkbench, StrictBatchReview,
 };
 use module_exam::service::ordinary_structure::OrdinaryStructureConfirmationResult;
-use module_exam::service::subjective::SubjectiveTranscriptionRevision;
+use module_exam::service::subjective::{SubjectiveTranscriptionRevision, SubjectiveWorkbench};
 use module_exam::vlm::{self as exam_vlm, AnalyzedQuestion};
 
 use crate::answer_sheet_materialization::{self, AnswerSheetPageProcessingResult};
@@ -751,12 +751,8 @@ pub async fn exam_answer_sheet_recognize_subjective_region(
     answer_region_revision_id: i64,
     idempotency_key: String,
 ) -> R<SubjectiveTranscriptionRevision> {
-    recognize_answer_sheet_subjective_region(
-        &state,
-        answer_region_revision_id,
-        idempotency_key,
-    )
-    .await
+    recognize_answer_sheet_subjective_region(&state, answer_region_revision_id, idempotency_key)
+        .await
 }
 
 /// 老师只校正已存在的 OCR 文本；原始机器文本保留，新文本形成追加 revision。
@@ -774,6 +770,66 @@ pub fn exam_answer_sheet_correct_subjective_transcription(
         LOCAL_TEACHER_ACTOR,
     )
     .map_err(e)
+}
+
+/// 答题卡填空/简答题工作台：展示当前转写、已确认答案/评分点和老师终审 revision。
+#[tauri::command]
+pub fn exam_answer_sheet_subjective_workbench(
+    state: State<'_, AppState>,
+    assessment_version_id: Option<i64>,
+    limit: Option<i64>,
+) -> R<SubjectiveWorkbench> {
+    let conn = lock(&state)?;
+    module_exam::service::subjective::list_subjective_workbench(
+        &conn,
+        assessment_version_id,
+        limit.unwrap_or(1000),
+    )
+    .map_err(e)
+}
+
+/// 老师显式接受填空题当前确定性建议；简答题无机器得分时不能走此入口。
+#[tauri::command]
+pub fn exam_answer_sheet_subjective_accept(
+    state: State<'_, AppState>,
+    suggestion_id: i64,
+) -> R<GradeDecision> {
+    let conn = lock(&state)?;
+    module_exam::service::subjective::accept_subjective_suggestion(
+        &conn,
+        suggestion_id,
+        LOCAL_TEACHER_ACTOR,
+    )
+    .map_err(e)
+}
+
+/// 老师查看原图后对填空分歧或简答题人工记分；必须填写判定依据。
+#[tauri::command]
+pub fn exam_answer_sheet_subjective_correct(
+    state: State<'_, AppState>,
+    suggestion_id: i64,
+    teacher_score: f64,
+    teacher_note: Option<String>,
+) -> R<GradeDecision> {
+    let conn = lock(&state)?;
+    module_exam::service::subjective::correct_subjective_suggestion(
+        &conn,
+        suggestion_id,
+        teacher_score,
+        teacher_note.as_deref(),
+        LOCAL_TEACHER_ACTOR,
+    )
+    .map_err(e)
+}
+
+/// 显式发布已完成全部题目终审的答题卡；评分建议本身永远不会自动发布。
+#[tauri::command]
+pub fn exam_answer_sheet_subjective_publish_attempt(
+    state: State<'_, AppState>,
+    attempt_id: i64,
+) -> R<Publication> {
+    let conn = lock(&state)?;
+    assessment::publish_attempt(&conn, attempt_id, LOCAL_TEACHER_ACTOR).map_err(e)
 }
 
 /// 查询当前答题卡页是否已有老师确认的 active 空白模板。

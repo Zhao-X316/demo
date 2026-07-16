@@ -370,6 +370,81 @@ fn successful_run(fixture: &mut Fixture, key: &str, text: &str) -> i64 {
     run.id
 }
 
+fn add_short_answer_region(fixture: &mut Fixture) -> i64 {
+    let hash = "f".repeat(64);
+    fixture
+        .conn
+        .execute_batch(&format!(
+            r#"INSERT INTO k1_questions
+                 (public_id,owner_scope,owner_id,rights_status,sharing_allowed,created_at)
+                 VALUES ('question-short','personal','teacher','unknown',0,
+                         '2026-07-16T09:00:00.000Z');
+               INSERT INTO k1_question_versions
+                 (public_id,question_id,revision,question_type,stem,max_score,content_hash,
+                  quality_level,state,created_at)
+                 VALUES ('question-version-short',2,1,'short_answer',
+                         '概括洋务运动失败的原因',4,'{hash}','L3','published',
+                         '2026-07-16T09:00:00.000Z');
+               INSERT INTO k1_answer_key_versions
+                 (public_id,question_version_id,revision,answer_json,state,created_at,
+                  confirmed_by,confirmed_at)
+                 VALUES ('answer-short',2,1,
+                         '{{"schema_version":1,"reference_answer":"没有改变封建制度"}}',
+                         'confirmed','2026-07-16T09:00:00.000Z','teacher',
+                         '2026-07-16T09:00:00.000Z');
+               INSERT INTO k1_rubric_versions
+                 (public_id,question_version_id,revision,max_score,state,created_at,
+                  confirmed_by,confirmed_at)
+                 VALUES ('rubric-short',2,1,4,'confirmed','2026-07-16T09:00:00.000Z',
+                         'teacher','2026-07-16T09:00:00.000Z');
+               INSERT INTO k1_rubric_points
+                 (public_id,rubric_version_id,stable_id,order_index,canonical_text,
+                  max_score,created_at)
+                 VALUES ('rubric-point-short',2,'institution',0,'没有改变封建制度',4,
+                         '2026-07-16T09:00:00.000Z');
+               INSERT INTO k1_link_sets
+                 (public_id,question_version_id,knowledge_map_id,revision,state,created_at,
+                  confirmed_by,confirmed_at)
+                 VALUES ('link-short',2,1,1,'confirmed','2026-07-16T09:00:00.000Z',
+                         'teacher','2026-07-16T09:00:00.000Z');
+               INSERT INTO exam_assessment_items_v2
+                 (public_id,assessment_version_id,question_version_id,answer_key_version_id,
+                  rubric_version_id,link_set_id,order_index,score,presentation_snapshot_json,
+                  state,created_at)
+                 VALUES ('item-short',1,2,2,2,2,1,4,
+                         '{{"schema_version":1,"question_no":"2","page_no":1}}',
+                         'active','2026-07-16T09:00:00.000Z');"#
+        ))
+        .unwrap();
+    let region = papers::record_answer_region(
+        &fixture.conn,
+        &NewAnswerRegionRevision {
+            page_id: 1,
+            assessment_item_id: 2,
+            region_index: 0,
+            bbox_json: r#"{"schema_version":1,"x":0.1,"y":0.5,"width":0.8,"height":0.3}"#,
+            crop_artifact_id: Some(fixture.crop_id),
+            mapping_confidence: Some(0.99),
+            decision: "teacher_confirmed",
+            reason_code: Some("FIXTURE"),
+            confirmed_by: Some("teacher"),
+        },
+    )
+    .unwrap();
+    fixture
+        .conn
+        .execute(
+            "INSERT INTO exam_answer_sheet_region_routes_v2
+             (materialization_id,answer_region_revision_id,assessment_item_id,region_index,
+              recognition_route,question_type,created_at)
+             VALUES (1,?1,2,0,'handwriting_ocr','short_answer',
+                     '2026-07-16T09:00:00.000Z')",
+            [region.id],
+        )
+        .unwrap();
+    region.id
+}
+
 #[test]
 fn handwriting_ocr_persists_raw_text_without_answer_and_is_idempotent() {
     let mut fixture = setup();
@@ -390,6 +465,59 @@ fn handwriting_ocr_persists_raw_text_without_answer_and_is_idempotent() {
         )
         .unwrap();
     assert_eq!(count, 1);
+    let suggestion = subjective::list_subjective_workbench(&fixture.conn, Some(1), 10)
+        .unwrap()
+        .rows
+        .pop()
+        .unwrap();
+    assert_eq!(suggestion.suggestion_outcome, "incorrect");
+    assert_eq!(suggestion.suggested_score, Some(0.0));
+    assert!(!suggestion.batch_eligible);
+    assert_eq!(
+        suggestion.exclusion_reason.as_deref(),
+        Some("ANSWER_MISMATCH_REQUIRES_REVIEW")
+    );
+    let decisions: i64 = fixture
+        .conn
+        .query_row("SELECT COUNT(*) FROM exam_grade_decisions_v2", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(decisions, 0);
+}
+
+#[test]
+fn exact_fill_suggestion_never_becomes_a_grade_until_teacher_accepts() {
+    let mut fixture = setup();
+    let run_id = successful_run(&mut fixture, "subjective-ocr-exact", "1842 年");
+    subjective::record_ocr_ai_run_transcription(&mut fixture.conn, run_id).unwrap();
+    let workbench = subjective::list_subjective_workbench(&fixture.conn, Some(1), 10).unwrap();
+    let row = &workbench.rows[0];
+    assert_eq!(row.suggestion_outcome, "correct");
+    assert_eq!(row.suggested_score, Some(1.0));
+    assert!(row.batch_eligible);
+    assert_eq!(workbench.attempts[0].confirmed_count, 0);
+
+    let decision =
+        subjective::accept_subjective_suggestion(&fixture.conn, row.suggestion_id, "teacher")
+            .unwrap();
+    assert_eq!(decision.teacher_score, 1.0);
+    assert_eq!(decision.confirmation_level, "teacher_accepted");
+    let publication_count: i64 = fixture
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM exam_grade_publications_v2",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let evidence_count: i64 = fixture
+        .conn
+        .query_row("SELECT COUNT(*) FROM learning_evidence", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!((publication_count, evidence_count), (0, 0));
 }
 
 #[test]
@@ -400,16 +528,13 @@ fn teacher_correction_appends_revision_and_preserves_machine_text() {
     let corrected = subjective::teacher_correct_transcription(
         &mut fixture.conn,
         fixture.region_id,
-        "一八四二年",
+        "1842 年",
         "teacher",
     )
     .unwrap();
     assert_eq!(corrected.revision, 2);
     assert_eq!(corrected.raw_ocr_text.as_deref(), Some("一八四零年"));
-    assert_eq!(
-        corrected.teacher_corrected_text.as_deref(),
-        Some("一八四二年")
-    );
+    assert_eq!(corrected.teacher_corrected_text.as_deref(), Some("1842 年"));
     let old_state: String = fixture
         .conn
         .query_row(
@@ -419,6 +544,61 @@ fn teacher_correction_appends_revision_and_preserves_machine_text() {
         )
         .unwrap();
     assert_eq!(old_state, "superseded");
+    let suggestion_states: Vec<String> = fixture
+        .conn
+        .prepare("SELECT state FROM exam_subjective_grade_suggestions_v2 ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(suggestion_states, vec!["superseded", "active"]);
+    let current = subjective::list_subjective_workbench(&fixture.conn, Some(1), 10)
+        .unwrap()
+        .rows
+        .pop()
+        .unwrap();
+    assert_eq!(current.suggestion_outcome, "correct");
+    assert_eq!(current.suggested_score, Some(1.0));
+}
+
+#[test]
+fn short_answer_stays_unscored_until_teacher_or_rubric_ai_reviews_it() {
+    let mut fixture = setup();
+    let region_id = add_short_answer_region(&mut fixture);
+    fixture.region_id = region_id;
+    let run_id = successful_run(
+        &mut fixture,
+        "subjective-ocr-short",
+        "只学习技术，没有改变封建制度",
+    );
+    subjective::record_ocr_ai_run_transcription(&mut fixture.conn, run_id).unwrap();
+    let workbench = subjective::list_subjective_workbench(&fixture.conn, Some(1), 10).unwrap();
+    let row = workbench
+        .rows
+        .iter()
+        .find(|row| row.question_type == "short_answer")
+        .unwrap();
+    assert_eq!(row.suggestion_outcome, "unscored");
+    assert_eq!(row.suggested_score, None);
+    assert_eq!(
+        row.exclusion_reason.as_deref(),
+        Some("SHORT_ANSWER_AI_REQUIRED")
+    );
+    assert!(
+        subjective::accept_subjective_suggestion(&fixture.conn, row.suggestion_id, "teacher")
+            .is_err()
+    );
+    let decision = subjective::correct_subjective_suggestion(
+        &fixture.conn,
+        row.suggestion_id,
+        3.0,
+        Some("原图覆盖制度局限，但缺少其他原因"),
+        "teacher",
+    )
+    .unwrap();
+    assert_eq!(decision.teacher_score, 3.0);
+    assert_eq!(decision.confirmation_level, "teacher_corrected");
 }
 
 #[test]

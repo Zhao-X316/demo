@@ -485,6 +485,53 @@ export interface SubjectiveTranscriptionRevision {
   created_at: string;
 }
 
+export interface SubjectiveWorkbenchRow {
+  assessment_id: number;
+  assessment_version_id: number;
+  assessment_title: string;
+  attempt_id: number;
+  attempt_state: "ingesting" | "grading" | "ready_to_publish" | "published";
+  active_publication_id: number | null;
+  student_id: number;
+  student_no: string;
+  student_name: string;
+  assessment_item_id: number;
+  order_index: number;
+  question_no: string;
+  question_type: "fill_blank" | "short_answer";
+  question_stem: string;
+  max_score: number;
+  answer_region_revision_id: number;
+  crop_path: string | null;
+  transcription_revision_id: number;
+  transcription_revision: number;
+  result_state: "recognized" | "not_written" | "unreadable" | "recognize_failed" | "ambiguous_final";
+  raw_ocr_text: string | null;
+  normalized_text: string | null;
+  teacher_corrected_text: string | null;
+  confidence: number | null;
+  answer_json: string;
+  rubric_points_json: string;
+  suggestion_id: number;
+  suggestion_outcome: "correct" | "incorrect" | "partial" | "unscored";
+  suggested_score: number | null;
+  suggestion_result_json: string;
+  batch_eligible: boolean;
+  exclusion_reason: string | null;
+  grade_decision_id: number | null;
+  grade_decision_revision: number | null;
+  teacher_score: number | null;
+  confirmation_level: "teacher_accepted" | "teacher_corrected" | null;
+  review_mode: "single" | "teacher_corrected" | null;
+  current_suggestion_confirmed: boolean;
+  decided_at: string | null;
+}
+
+export interface SubjectiveWorkbench {
+  rows: SubjectiveWorkbenchRow[];
+  attempts: ObjectiveAttemptSummary[];
+}
+
 export interface AnswerSheetTemplateRevision {
   id: number;
   public_id: string;
@@ -856,6 +903,34 @@ export const examAnswerSheetCorrectSubjectiveTranscription = (
     correctedText: corrected_text,
   },
 );
+
+export const examAnswerSheetSubjectiveWorkbench = (
+  assessment_version_id: number | null = null,
+  limit = 1000,
+) => call<SubjectiveWorkbench>("exam_answer_sheet_subjective_workbench", {
+  assessmentVersionId: assessment_version_id,
+  limit,
+});
+
+export const examAnswerSheetSubjectiveAccept = (suggestion_id: number) =>
+  call<GradeDecision>("exam_answer_sheet_subjective_accept", {
+    suggestionId: suggestion_id,
+  });
+
+export const examAnswerSheetSubjectiveCorrect = (
+  suggestion_id: number,
+  teacher_score: number,
+  teacher_note: string,
+) => call<GradeDecision>("exam_answer_sheet_subjective_correct", {
+  suggestionId: suggestion_id,
+  teacherScore: teacher_score,
+  teacherNote: teacher_note,
+});
+
+export const examAnswerSheetSubjectivePublishAttempt = (attempt_id: number) =>
+  call<GradePublication>("exam_answer_sheet_subjective_publish_attempt", {
+    attemptId: attempt_id,
+  });
 
 export const examAnswerSheetTemplateStatus = (reference_page_id: number) =>
   call<AnswerSheetTemplateStatus>("exam_answer_sheet_template_status", {

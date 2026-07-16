@@ -21,6 +21,8 @@ import {
   KnowledgePoint,
   ObjectiveWorkbench,
   ObjectiveWorkbenchRow,
+  SubjectiveWorkbench,
+  SubjectiveWorkbenchRow,
   Question,
   QuestionInput,
   examAnswerHumanDecide,
@@ -31,6 +33,12 @@ import {
   examAnswerSheetAnalyzeTemplate,
   examAnswerSheetConfirmTemplate,
   examAnswerSheetProcessPage,
+  examAnswerSheetRecognizeSubjectiveRegion,
+  examAnswerSheetCorrectSubjectiveTranscription,
+  examAnswerSheetSubjectiveAccept,
+  examAnswerSheetSubjectiveCorrect,
+  examAnswerSheetSubjectivePublishAttempt,
+  examAnswerSheetSubjectiveWorkbench,
   examAnswerSheetTemplateStatus,
   examAnswerSuggest,
   examAnswersList,
@@ -68,7 +76,7 @@ import {
 } from "../api/exam";
 import { Student, studentsList } from "../api/manage";
 
-type Tab = "intake" | "objective" | "dictation" | "grade" | "questions" | "knowledge";
+type Tab = "intake" | "objective" | "subjective" | "dictation" | "grade" | "questions" | "knowledge";
 
 const TYPE_LABEL: Record<string, string> = {
   single: "单选",
@@ -167,6 +175,8 @@ function answerJsonLabel(raw: string | null) {
     const value = JSON.parse(raw) as Record<string, unknown>;
     if (Array.isArray(value.correct_labels)) return value.correct_labels.join("、");
     if (typeof value.correct === "boolean") return value.correct ? "正确" : "错误";
+    if (Array.isArray(value.values)) return value.values.join(" / ");
+    if (Array.isArray(value.canonical_answers)) return value.canonical_answers.join(" / ");
     if (Array.isArray(value.slots)) {
       return value.slots.map((slot) => {
         const item = slot as Record<string, unknown>;
@@ -210,6 +220,7 @@ export default function Exam() {
   const [knowledge, setKnowledge] = useState<KnowledgePoint[]>([]);
   const [answers, setAnswers] = useState<AnswerDetail[]>([]);
   const [objectiveWorkbench, setObjectiveWorkbench] = useState<ObjectiveWorkbench>({ rows: [], attempts: [] });
+  const [subjectiveWorkbench, setSubjectiveWorkbench] = useState<SubjectiveWorkbench>({ rows: [], attempts: [] });
   const [dictationWorkbench, setDictationWorkbench] = useState<DictationWorkbench>({ rows: [], attempts: [] });
   const [intakeOptions, setIntakeOptions] = useState<FixedIntakeOption[]>([]);
   const [loading, setLoading] = useState(true);
@@ -219,12 +230,13 @@ export default function Exam() {
   const load = async () => {
     setError("");
     try {
-      const [studentRows, questionRows, kpRows, answerRows, workbench, dictationRows, fixedOptions] = await Promise.all([
+      const [studentRows, questionRows, kpRows, answerRows, workbench, subjectiveRows, dictationRows, fixedOptions] = await Promise.all([
         studentsList(),
         questionsList(),
         kpList(),
         examAnswersList(),
         examObjectiveWorkbench(),
+        examAnswerSheetSubjectiveWorkbench(),
         examDictationWorkbench(),
         examFixedIntakeOptions(),
       ]);
@@ -233,6 +245,7 @@ export default function Exam() {
       setKnowledge(kpRows);
       setAnswers(answerRows);
       setObjectiveWorkbench(workbench);
+      setSubjectiveWorkbench(subjectiveRows);
       setDictationWorkbench(dictationRows);
       setIntakeOptions(fixedOptions);
     } catch (err) {
@@ -268,6 +281,7 @@ export default function Exam() {
       <div className="tabs">
         <button className={tab === "intake" ? "tab active" : "tab"} onClick={() => setTab("intake")}>上传批改</button>
         <button className={tab === "objective" ? "tab active" : "tab"} onClick={() => setTab("objective")}>标准卷终审</button>
+        <button className={tab === "subjective" ? "tab active" : "tab"} onClick={() => setTab("subjective")}>答题卡主观题</button>
         <button className={tab === "dictation" ? "tab active" : "tab"} onClick={() => setTab("dictation")}>默写复核</button>
         <button className={tab === "grade" ? "tab active" : "tab"} onClick={() => setTab("grade")}>老师补录</button>
         <button className={tab === "questions" ? "tab active" : "tab"} onClick={() => setTab("questions")}>题库</button>
@@ -290,6 +304,13 @@ export default function Exam() {
           {tab === "objective" && (
             <ObjectiveReviewTab
               workbench={objectiveWorkbench}
+              onDone={done}
+              onError={(message) => setError(message)}
+            />
+          )}
+          {tab === "subjective" && (
+            <SubjectiveReviewTab
+              workbench={subjectiveWorkbench}
               onDone={done}
               onError={(message) => setError(message)}
             />
@@ -337,7 +358,7 @@ function FixedIntakeTab({
   onError,
 }: {
   options: FixedIntakeOption[];
-  onOpenReview: (tab: "objective" | "dictation") => void;
+  onOpenReview: (tab: "objective" | "subjective" | "dictation") => void;
   onError: (message: string) => void;
 }) {
   const classOptions = useMemo(() => {
@@ -1766,13 +1787,305 @@ function FixedIntakeTab({
               <b>{result.nextAction}</b>
               <button
                 disabled={result.route === "blocked" || result.groupingRoute === "blocked" || result.materialTypeNeedsConfirmation || !result.groupingConfirmed || !result.qualityReviewCompleted}
-                onClick={() => onOpenReview(result.materialType === "dictation" ? "dictation" : "objective")}
+                onClick={() => onOpenReview(
+                  result.materialType === "dictation"
+                    ? "dictation"
+                    : result.materialType === "answer_sheet" && answerSheetSubjectiveRegionCount > 0
+                      ? "subjective"
+                      : "objective",
+                )}
               >进入批改终审</button>
             </div>
           </>
         )}
       </aside>
     </div>
+  );
+}
+
+function subjectiveStateLabel(row: SubjectiveWorkbenchRow) {
+  if (row.result_state === "not_written") return "未作答";
+  if (row.result_state === "unreadable") return "无法辨认";
+  if (row.result_state === "recognize_failed") return "识别失败";
+  if (row.result_state === "ambiguous_final") return "涂改结果不明确";
+  if (row.suggestion_outcome === "correct") return "与已确认答案一致";
+  if (row.suggestion_outcome === "incorrect") return "与已确认答案不一致";
+  if (row.question_type === "short_answer") return "等待按评分点终审";
+  return "无法自动计分";
+}
+
+function SubjectiveReviewTab({
+  workbench,
+  onDone,
+  onError,
+}: {
+  workbench: SubjectiveWorkbench;
+  onDone: (message: string) => void;
+  onError: (message: string) => void;
+}) {
+  const assessmentVersions = useMemo(() => {
+    const unique = new Map<number, string>();
+    workbench.rows.forEach((row) => unique.set(row.assessment_version_id, row.assessment_title));
+    return Array.from(unique, ([id, title]) => ({ id, title }));
+  }, [workbench.rows]);
+  const [assessmentVersionId, setAssessmentVersionId] = useState(assessmentVersions[0]?.id ?? 0);
+  const [assessmentItemId, setAssessmentItemId] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [corrections, setCorrections] = useState<Record<number, string>>({});
+  const [manualScores, setManualScores] = useState<Record<number, string>>({});
+  const [manualNotes, setManualNotes] = useState<Record<number, string>>({});
+
+  useEffect(() => {
+    if (!assessmentVersions.some((version) => version.id === assessmentVersionId)) {
+      setAssessmentVersionId(assessmentVersions[0]?.id ?? 0);
+    }
+  }, [assessmentVersionId, assessmentVersions]);
+
+  const itemOptions = useMemo(() => {
+    const unique = new Map<number, SubjectiveWorkbenchRow>();
+    workbench.rows
+      .filter((row) => row.assessment_version_id === assessmentVersionId)
+      .forEach((row) => unique.set(row.assessment_item_id, row));
+    return Array.from(unique.values()).sort((left, right) => left.order_index - right.order_index);
+  }, [assessmentVersionId, workbench.rows]);
+
+  useEffect(() => {
+    if (!itemOptions.some((row) => row.assessment_item_id === assessmentItemId)) {
+      setAssessmentItemId(itemOptions[0]?.assessment_item_id ?? 0);
+    }
+  }, [assessmentItemId, itemOptions]);
+
+  const rows = workbench.rows
+    .filter((row) => row.assessment_version_id === assessmentVersionId && row.assessment_item_id === assessmentItemId)
+    .sort((left, right) => left.student_no.localeCompare(right.student_no, "zh-CN", { numeric: true }));
+  const attempts = workbench.attempts.filter((attempt) => attempt.assessment_version_id === assessmentVersionId);
+  const confirmedCount = rows.filter((row) => row.current_suggestion_confirmed).length;
+  const directCount = rows.filter((row) => !row.current_suggestion_confirmed && row.suggested_score != null).length;
+  const exceptionCount = rows.length - confirmedCount - directCount;
+
+  async function correctTranscription(row: SubjectiveWorkbenchRow) {
+    const value = (corrections[row.answer_region_revision_id]
+      ?? row.teacher_corrected_text
+      ?? row.raw_ocr_text
+      ?? "").trim();
+    if (!value) {
+      onError("请先按原图填写学生实际写下的内容");
+      return;
+    }
+    setBusy(true);
+    try {
+      await examAnswerSheetCorrectSubjectiveTranscription(row.answer_region_revision_id, value);
+      onDone(`${row.student_name}第${row.question_no}题已保存老师校正文本；机器原文仍保留`);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function retry(row: SubjectiveWorkbenchRow) {
+    setBusy(true);
+    try {
+      await examAnswerSheetRecognizeSubjectiveRegion(
+        row.answer_region_revision_id,
+        `answer-sheet:subjective:${row.answer_region_revision_id}:retry:${crypto.randomUUID()}`,
+      );
+      onDone(`${row.student_no}号第${row.question_no}题已重新识别；旧转写仍保留`);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function accept(row: SubjectiveWorkbenchRow) {
+    setBusy(true);
+    try {
+      await examAnswerSheetSubjectiveAccept(row.suggestion_id);
+      onDone(`已终审 ${row.student_name} 的第${row.question_no}题；整份答题卡仍需显式发布`);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function correctGrade(row: SubjectiveWorkbenchRow) {
+    const score = Number(manualScores[row.suggestion_id] ?? String(row.suggested_score ?? ""));
+    const note = (manualNotes[row.suggestion_id] ?? "").trim();
+    if (!Number.isFinite(score) || score < 0 || score > row.max_score) {
+      onError(`人工得分必须位于 0~${row.max_score} 分`);
+      return;
+    }
+    if (!note) {
+      onError("人工记分必须填写查看原图或评分点后的判定依据");
+      return;
+    }
+    setBusy(true);
+    try {
+      await examAnswerSheetSubjectiveCorrect(row.suggestion_id, score, note);
+      onDone(`已人工确认 ${row.student_name} 的第${row.question_no}题为 ${score} 分`);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function publishAttempt(attemptId: number, studentName: string) {
+    if (!window.confirm(`确认发布 ${studentName} 的本次答题卡成绩？只采用当前老师终审 revision。`)) return;
+    setBusy(true);
+    try {
+      const publication = await examAnswerSheetSubjectivePublishAttempt(attemptId);
+      onDone(`${studentName} 的答题卡成绩已发布：${publication.total_score} 分（revision ${publication.revision}）`);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!workbench.rows.length) {
+    return (
+      <div className="empty-state objective-empty">
+        <b>还没有答题卡主观题转写。</b>
+        <span>上传并处理答题卡后，填空题会做确定性答案比对；简答题先按评分点交给老师终审。</span>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <section className="objective-toolbar exam-card">
+        <label className="field">
+          <span className="fl">作业版本</span>
+          <select value={assessmentVersionId} onChange={(event) => setAssessmentVersionId(Number(event.target.value))}>
+            {assessmentVersions.map((version) => <option value={version.id} key={version.id}>{version.title} · v{version.id}</option>)}
+          </select>
+        </label>
+        <label className="field">
+          <span className="fl">按题终审</span>
+          <select value={assessmentItemId} onChange={(event) => setAssessmentItemId(Number(event.target.value))}>
+            {itemOptions.map((row) => (
+              <option value={row.assessment_item_id} key={row.assessment_item_id}>
+                第{row.question_no}题 · {row.question_type === "fill_blank" ? "填空" : "简答"} · {row.question_stem.slice(0, 28)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="objective-stats">
+          <span><b>{rows.length}</b> 份作答</span>
+          <span className="ok-text"><b>{confirmedCount}</b> 已确认</span>
+          <span><b>{directCount}</b> 有明确建议</span>
+          <span className={exceptionCount ? "bad-text" : ""}><b>{exceptionCount}</b> 需人工记分</span>
+        </div>
+        <div className="meta objective-batch-note">填空题只做已确认答案的精确匹配；简答题不会按文本相似度直接给分。</div>
+      </section>
+
+      <div className="sech">本题证据 <span className="n">按学号排序</span></div>
+      <div className="objective-review-list">
+        {rows.map((row) => {
+          const value = corrections[row.answer_region_revision_id]
+            ?? row.teacher_corrected_text
+            ?? row.raw_ocr_text
+            ?? "";
+          const rubricPoints = shortAnswerRubricPoints(row.rubric_points_json);
+          return (
+            <article className={row.current_suggestion_confirmed ? "objective-review-row confirmed" : "objective-review-row"} key={row.suggestion_id}>
+              <div className="objective-student">
+                <b>{row.student_name}</b>
+                <span>{row.student_no}号 · 第{row.question_no}题</span>
+                <span>{row.question_type === "fill_blank" ? "填空" : "简答"} · 满分 {row.max_score}</span>
+                <span className={row.current_suggestion_confirmed ? "tag pass" : row.suggested_score == null ? "tag fail" : "tag wait"}>
+                  {row.current_suggestion_confirmed ? "已终审" : row.suggested_score == null ? "需老师处理" : "有评分建议"}
+                </span>
+              </div>
+              <div className="objective-evidence">
+                {row.crop_path
+                  ? <img className="objective-crop" src={convertFileSrc(row.crop_path)} alt={`${row.student_name} 第${row.question_no}题作答`} />
+                  : <div className="objective-crop missing">裁剪图不可用</div>}
+                <div className="objective-facts">
+                  <span>机器状态 <b>{subjectiveStateLabel(row)}</b></span>
+                  <span>机器原文 <b>{row.raw_ocr_text || "—"}</b></span>
+                  {row.teacher_corrected_text && <span>老师校正 <b>{row.teacher_corrected_text}</b></span>}
+                  <span>标准答案 <b>{answerJsonLabel(row.answer_json)}</b></span>
+                  <span>置信度 <b>{row.confidence == null ? "—" : `${Math.round(row.confidence * 100)}%`}</b></span>
+                  <span>建议得分 <b>{row.suggested_score == null ? "—" : `${row.suggested_score} / ${row.max_score}`}</b></span>
+                  {row.current_suggestion_confirmed && <span>老师终审 <b>{row.teacher_score} 分 · {row.confirmation_level === "teacher_corrected" ? "人工修正" : "接受建议"}</b></span>}
+                </div>
+              </div>
+              {row.question_type === "short_answer" && (
+                <div className="intake-reasons">
+                  {rubricPoints.length > 0
+                    ? rubricPoints.map((point) => <span key={`${point.orderIndex}-${point.canonicalText}`}>{point.canonicalText}（{point.maxScore}分）</span>)
+                    : <span>评分点尚未完整，必须老师人工核对</span>}
+                </div>
+              )}
+              <div className="objective-actions">
+                {!row.current_suggestion_confirmed && row.suggested_score != null && (
+                  <button className="primary" disabled={busy} onClick={() => void accept(row)}>接受本条建议</button>
+                )}
+                {!row.current_suggestion_confirmed && row.result_state === "recognized" && (
+                  <details>
+                    <summary>校正机器原文</summary>
+                    <input
+                      value={value}
+                      aria-label={`${row.student_name} 第${row.question_no}题实际书写`}
+                      onChange={(event) => setCorrections((current) => ({
+                        ...current,
+                        [row.answer_region_revision_id]: event.target.value,
+                      }))}
+                    />
+                    <button disabled={busy} onClick={() => void correctTranscription(row)}>按原图保存实际书写</button>
+                  </details>
+                )}
+                {!row.current_suggestion_confirmed && row.result_state === "recognize_failed" && (
+                  <button disabled={busy} onClick={() => void retry(row)}>重新识别本题</button>
+                )}
+                {!row.current_suggestion_confirmed && (
+                  <details open={row.question_type === "short_answer" || row.suggested_score == null}>
+                    <summary>人工记分</summary>
+                    <label className="field">
+                      <span className="fl">得分（满分 {row.max_score}）</span>
+                      <input type="number" min="0" max={row.max_score} step="0.5"
+                        value={manualScores[row.suggestion_id] ?? String(row.suggested_score ?? "")}
+                        onChange={(event) => setManualScores((current) => ({ ...current, [row.suggestion_id]: event.target.value }))} />
+                    </label>
+                    <label className="field">
+                      <span className="fl">判定依据（必填）</span>
+                      <input type="text" placeholder="如：覆盖评分点1和2，缺少影响"
+                        value={manualNotes[row.suggestion_id] ?? ""}
+                        onChange={(event) => setManualNotes((current) => ({ ...current, [row.suggestion_id]: event.target.value }))} />
+                    </label>
+                    <button disabled={busy} onClick={() => void correctGrade(row)}>保存人工 revision</button>
+                  </details>
+                )}
+              </div>
+            </article>
+          );
+        })}
+      </div>
+
+      <div className="sech">整份答题卡发布 <span className="n">所有题型终审完成后才可发布</span></div>
+      <div className="objective-publish-grid">
+        {attempts.map((attempt) => (
+          <article className="exam-card objective-attempt" key={attempt.attempt_id}>
+            <div className="exam-card-head">
+              <div><b>{attempt.student_name}</b><div className="meta">{attempt.student_no}</div></div>
+              <span className={attempt.attempt_state === "published" ? "tag pass" : attempt.can_publish ? "tag wait" : "tag"}>
+                {attempt.attempt_state === "published" ? "已发布" : attempt.can_publish ? "待发布" : "终审中"}
+              </span>
+            </div>
+            <div className="objective-attempt-score"><b>{attempt.teacher_total_score}</b><span>/ {attempt.max_total_score} 分</span></div>
+            <div className="meta">已终审 {attempt.confirmed_count} / {attempt.item_count} 题</div>
+            {attempt.published_total_score != null && <div className="meta">当前已发布总分：{attempt.published_total_score}</div>}
+            <button className="primary" disabled={busy || !attempt.can_publish} onClick={() => void publishAttempt(attempt.attempt_id, attempt.student_name)}>
+              {attempt.attempt_state === "published" ? "已发布" : attempt.can_publish ? "确认发布整份答题卡" : "完成全部终审后发布"}
+            </button>
+          </article>
+        ))}
+      </div>
+    </>
   );
 }
 
