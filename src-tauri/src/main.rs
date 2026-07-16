@@ -117,6 +117,7 @@ fn main() {
             exam_commands::exam_answer_source_analyze,
             exam_commands::exam_answer_source_confirm_matches,
             exam_commands::exam_answer_source_keep_bound,
+            exam_commands::exam_answer_source_adopt_new_version,
             exam_commands::exam_objective_recognize_region,
             exam_commands::exam_ordinary_paper_analyze_page,
             exam_commands::exam_ordinary_paper_confirm_page_structure,

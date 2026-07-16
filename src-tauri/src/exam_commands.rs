@@ -458,6 +458,25 @@ pub fn exam_answer_source_keep_bound(
     Ok(result)
 }
 
+/// 将高置信冲突答案另存为新的 K1/作业版本；当前批次继续固定引用旧版本。
+#[tauri::command]
+pub fn exam_answer_source_adopt_new_version(
+    state: State<'_, AppState>,
+    batch_id: i64,
+    source_ai_run_id: i64,
+) -> R<AnswerSourceReviewSummary> {
+    let mut conn = lock(&state)?;
+    let result = answer_source::adopt_conflicts_as_new_version(
+        &mut conn,
+        batch_id,
+        source_ai_run_id,
+        LOCAL_TEACHER_ACTOR,
+    )
+    .map_err(e)?;
+    refresh_fixed_preflight(&conn, batch_id)?;
+    Ok(result)
+}
+
 #[tauri::command]
 pub fn exam_fixed_intake_confirm_material_type(
     state: State<'_, AppState>,

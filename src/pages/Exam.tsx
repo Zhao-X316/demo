@@ -23,6 +23,7 @@ import {
   Question,
   QuestionInput,
   examAnswerHumanDecide,
+  examAnswerSourceAdoptNewVersion,
   examAnswerSourceAnalyze,
   examAnswerSourceConfirmMatches,
   examAnswerSourceKeepBound,
@@ -575,6 +576,24 @@ function FixedIntakeTab({
       replaceAnswerSourceReason(null);
     } catch (err) {
       onError(`沿用当前答案失败：${String(err)}`);
+    } finally {
+      setAnswerSourceBusy(false);
+    }
+  }
+
+  async function adoptAnswerSourceAsNewVersion() {
+    const review = answerSourceAnalysis?.review;
+    if (!result || !review) return;
+    setAnswerSourceBusy(true);
+    try {
+      const confirmed = await examAnswerSourceAdoptNewVersion(
+        result.batchId,
+        review.sourceAiRunId,
+      );
+      setAnswerSourceAnalysis({ ...answerSourceAnalysis, review: confirmed });
+      replaceAnswerSourceReason(null);
+    } catch (err) {
+      onError(`另存答案新版本失败：${String(err)}`);
     } finally {
       setAnswerSourceBusy(false);
     }
@@ -1225,8 +1244,10 @@ function FixedIntakeTab({
                       ? "正在整理"
                       : answerSourceAnalysis?.review?.route === "confirmed"
                         ? "已确认一致"
-                        : answerSourceAnalysis?.review?.route === "kept_bound"
+                      : answerSourceAnalysis?.review?.route === "kept_bound"
                           ? "已沿用当前答案"
+                          : answerSourceAnalysis?.review?.route === "adopted_new_version"
+                            ? "已另存新版本"
                           : "等待核对"}
                   </strong>
                 </div>
@@ -1265,6 +1286,11 @@ function FixedIntakeTab({
                         )}
                       </div>
                     )}
+                    {answerSourceAnalysis.review.route === "adopted_new_version" && answerSourceAnalysis.review.adoption && (
+                      <div className="muted">
+                        已把 {answerSourceAnalysis.review.adoption.changedItemCount} 道冲突题保存为作业第 {answerSourceAnalysis.review.adoption.adoptedAssessmentRevision} 版；本批学生照片仍按原答案批改，不会被重写。
+                      </div>
+                    )}
                     {answerSourceAnalysis.review.route === "blocked" && (
                       <div className="muted">
                         当前纵切不会用冲突答案改写既有作业；如暂不采纳上传资料，可一次沿用当前已确认答案继续。
@@ -1279,7 +1305,16 @@ function FixedIntakeTab({
                     </button>
                   )}
                   {!answerSourceBusy && answerSourceAnalysis?.review?.route === "blocked" && (
-                    <button onClick={() => void keepCurrentBoundAnswers()}>
+                    answerSourceAnalysis.review.sourceState === "ready"
+                    && answerSourceAnalysis.review.conflictCount > 0
+                    && answerSourceAnalysis.review.missingCount === 0 && (
+                      <button onClick={() => void adoptAnswerSourceAsNewVersion()}>
+                        采用上传答案，另存新版本
+                      </button>
+                    )
+                  )}
+                  {!answerSourceBusy && answerSourceAnalysis?.review?.route === "blocked" && (
+                    <button className="secondary" onClick={() => void keepCurrentBoundAnswers()}>
                       沿用当前作业答案继续
                     </button>
                   )}

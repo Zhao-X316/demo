@@ -254,11 +254,19 @@ export interface AnswerSourceReviewSummary {
   ingestBatchId: number;
   sourceAiRunId: number;
   sourceState: "ready" | "needs_review" | "blocked";
-  route: "ready_to_confirm" | "blocked" | "confirmed" | "kept_bound";
+  route: "ready_to_confirm" | "blocked" | "confirmed" | "kept_bound" | "adopted_new_version";
   matchedCount: number;
   conflictCount: number;
   missingCount: number;
   resolution: "confirmed_matches" | "kept_bound" | null;
+  adoption: {
+    sourceAssessmentVersionId: number;
+    adoptedAssessmentVersionId: number;
+    adoptedAssessmentVersionPublicId: string;
+    adoptedAssessmentRevision: number;
+    changedItemCount: number;
+    currentBatchUnchanged: boolean;
+  } | null;
   items: AnswerSourceReviewItem[];
 }
 
@@ -655,6 +663,12 @@ export const examAnswerSourceConfirmMatches = (batch_id: number, source_ai_run_i
 
 export const examAnswerSourceKeepBound = (batch_id: number, source_ai_run_id: number) =>
   call<AnswerSourceReviewSummary>("exam_answer_source_keep_bound", {
+    batchId: batch_id,
+    sourceAiRunId: source_ai_run_id,
+  });
+
+export const examAnswerSourceAdoptNewVersion = (batch_id: number, source_ai_run_id: number) =>
+  call<AnswerSourceReviewSummary>("exam_answer_source_adopt_new_version", {
     batchId: batch_id,
     sourceAiRunId: source_ai_run_id,
   });
