@@ -8,7 +8,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "acceptance:t6:build": "tauri build --debug --bundles app --config src-tauri/tauri.acceptance.conf.json"
+    "acceptance:t6:build": "tauri build --debug --bundles app --config src-tauri/tauri.acceptance.conf.json",
+    "acceptance:subjective:build": "tauri build --debug --bundles app --config src-tauri/tauri.subjective-acceptance.conf.json"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
