@@ -36,7 +36,13 @@ use module_exam::service::objective::{
     self, ObjectiveObservationResult, ObjectiveReviewBatch, ObjectiveWorkbench, StrictBatchReview,
 };
 use module_exam::service::ordinary_structure::OrdinaryStructureConfirmationResult;
-use module_exam::service::subjective::{SubjectiveTranscriptionRevision, SubjectiveWorkbench};
+use module_exam::service::subjective::{
+    ShortAnswerGradeAnalysis, SubjectiveTranscriptionRevision, SubjectiveWorkbench,
+};
+use module_exam::short_answer_grading::{
+    ShortAnswerGradeErrorCode, ShortAnswerGradeFailure, ShortAnswerGrader,
+    SHORT_ANSWER_GRADE_SCHEMA_VERSION,
+};
 use module_exam::vlm::{self as exam_vlm, AnalyzedQuestion};
 
 use crate::answer_sheet_materialization::{self, AnswerSheetPageProcessingResult};
@@ -65,6 +71,8 @@ use crate::ordinary_paper_materialization;
 use crate::ordinary_paper_provider::ArkOrdinaryPaperRecognizer;
 use crate::ordinary_paper_run::{self, BeginOrdinaryPaperRun, OrdinaryPaperRunResult};
 use crate::secrets;
+use crate::short_answer_provider::ArkShortAnswerGrader;
+use crate::short_answer_run::{self, BeginShortAnswerGradeRun};
 use crate::state::AppState;
 use crate::subjective_run::{self, BeginSubjectiveOcrRun};
 use crate::vlm;
@@ -699,6 +707,45 @@ async fn recognize_answer_sheet_subjective_region(
     subjective_run::finish(&mut conn, &input, ai_run_id, provider_result).map_err(e)
 }
 
+/// 为一个 active recognized 简答转写生成逐评分点机器建议。
+///
+/// 输入在数据库锁内冻结，方舟调用在锁外执行；返回结果仍需老师显式终审。
+async fn grade_answer_sheet_short_answer(
+    state: &State<'_, AppState>,
+    transcription_revision_id: i64,
+    idempotency_key: String,
+) -> R<ShortAnswerGradeAnalysis> {
+    let creds = secrets::load(&state.data_dir).map_err(e)?;
+    let grader = ArkShortAnswerGrader::from_creds(&creds);
+    let descriptor = grader.descriptor();
+    let input = {
+        let conn = lock(state)?;
+        short_answer_run::load_input(&conn, transcription_revision_id).map_err(e)?
+    };
+    let input = std::sync::Arc::new(input);
+    let ai_run_id = {
+        let mut conn = lock(state)?;
+        match short_answer_run::begin(&mut conn, &input, &descriptor, &idempotency_key).map_err(e)? {
+            BeginShortAnswerGradeRun::Execute { ai_run_id } => ai_run_id,
+            BeginShortAnswerGradeRun::Completed(result) => return Ok(*result),
+        }
+    };
+    let worker_input = std::sync::Arc::clone(&input);
+    let provider_result =
+        tauri::async_runtime::spawn_blocking(move || grader.grade(&worker_input))
+            .await
+            .unwrap_or_else(|_| {
+                Err(ShortAnswerGradeFailure {
+                    schema_version: SHORT_ANSWER_GRADE_SCHEMA_VERSION,
+                    code: ShortAnswerGradeErrorCode::Internal,
+                    safe_message: "简答题评分任务意外中断，已保留转写等待重试".into(),
+                    retryable: true,
+                })
+            });
+    let mut conn = lock(state)?;
+    short_answer_run::finish(&mut conn, &input, ai_run_id, provider_result).map_err(e)
+}
+
 /// 老师把当前 active 固定答题卡模板应用到一张已确认学生页面。
 ///
 /// 本地完成四角校正、题区裁剪和客观题 OMR；主观区随后逐区调用只读手写 OCR。
@@ -730,7 +777,33 @@ pub async fn exam_answer_sheet_process_page(
         )
         .await
         {
-            Ok(transcription) => result.subjective_transcriptions.push(transcription),
+            Ok(transcription) => {
+                if transcription.question_type == "short_answer"
+                    && transcription.result_state == "recognized"
+                {
+                    let grade_key = format!(
+                        "answer-sheet:transcription:{}:answer-grade-v1",
+                        transcription.id
+                    );
+                    if let Err(safe_message) = grade_answer_sheet_short_answer(
+                        &state,
+                        transcription.id,
+                        grade_key,
+                    )
+                    .await
+                    {
+                        result.subjective_failures.push(
+                            answer_sheet_materialization::AnswerSheetSubjectiveRegionFailure {
+                                answer_region_revision_id: region.answer_region_revision_id,
+                                safe_message: format!(
+                                    "手写已识别，但简答评分建议未生成：{safe_message}"
+                                ),
+                            },
+                        );
+                    }
+                }
+                result.subjective_transcriptions.push(transcription);
+            }
             Err(safe_message) => {
                 result.subjective_failures.push(
                     answer_sheet_materialization::AnswerSheetSubjectiveRegionFailure {
@@ -772,6 +845,16 @@ pub fn exam_answer_sheet_correct_subjective_transcription(
     .map_err(e)
 }
 
+/// 老师校正转写后或失败重试时，主动重新生成简答题逐点评分建议。
+#[tauri::command]
+pub async fn exam_answer_sheet_grade_short_answer(
+    state: State<'_, AppState>,
+    transcription_revision_id: i64,
+    idempotency_key: String,
+) -> R<ShortAnswerGradeAnalysis> {
+    grade_answer_sheet_short_answer(&state, transcription_revision_id, idempotency_key).await
+}
+
 /// 答题卡填空/简答题工作台：展示当前转写、已确认答案/评分点和老师终审 revision。
 #[tauri::command]
 pub fn exam_answer_sheet_subjective_workbench(
@@ -788,7 +871,7 @@ pub fn exam_answer_sheet_subjective_workbench(
     .map_err(e)
 }
 
-/// 老师显式接受填空题当前确定性建议；简答题无机器得分时不能走此入口。
+/// 老师显式接受填空题确定性建议或简答题逐点评分建议；两者都只做单条终审。
 #[tauri::command]
 pub fn exam_answer_sheet_subjective_accept(
     state: State<'_, AppState>,

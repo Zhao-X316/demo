@@ -13,6 +13,10 @@ use suite_core::models::{AiRunStatus, AuditActorType};
 
 use crate::dictation::DictationRecognitionState;
 use crate::dictation_recognition::DictationOcrOutput;
+use crate::short_answer_grading::{
+    ShortAnswerGradeOutput, ShortAnswerGradeRequest, ShortAnswerGradeState,
+    ShortAnswerRubricPointSpec,
+};
 
 use super::assessment::{decide_grade_in_transaction, GradeDecision, NewGradeDecision};
 use super::objective::ObjectiveAttemptSummary;
@@ -68,6 +72,26 @@ pub struct SubjectiveGradeSuggestion {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShortAnswerGradeAnalysis {
+    pub id: i64,
+    pub public_id: String,
+    pub transcription_revision_id: i64,
+    pub suggestion_id: i64,
+    pub attempt_id: i64,
+    pub assessment_item_id: i64,
+    pub answer_key_version_id: i64,
+    pub rubric_version_id: i64,
+    pub machine_grade_ai_run_id: i64,
+    pub outcome: String,
+    pub suggested_score: f64,
+    pub result_json: String,
+    pub confidence: f64,
+    pub exclusion_reason: String,
+    pub state: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubjectiveWorkbenchRow {
     pub assessment_id: i64,
     pub assessment_version_id: i64,
@@ -96,6 +120,8 @@ pub struct SubjectiveWorkbenchRow {
     pub answer_json: String,
     pub rubric_points_json: String,
     pub suggestion_id: i64,
+    pub short_answer_analysis_id: Option<i64>,
+    pub machine_grade_ai_run_id: Option<i64>,
     pub suggestion_outcome: String,
     pub suggested_score: Option<f64>,
     pub suggestion_result_json: String,
@@ -128,6 +154,7 @@ struct SuggestionScope {
 #[derive(Debug)]
 struct ReviewScope {
     suggestion: SubjectiveGradeSuggestion,
+    short_answer_analysis_id: Option<i64>,
     max_score: f64,
     transcription_state: String,
     region_state: String,
@@ -185,6 +212,29 @@ fn suggestion_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SubjectiveGradeSu
     })
 }
 
+fn short_answer_analysis_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ShortAnswerGradeAnalysis> {
+    Ok(ShortAnswerGradeAnalysis {
+        id: row.get(0)?,
+        public_id: row.get(1)?,
+        transcription_revision_id: row.get(2)?,
+        suggestion_id: row.get(3)?,
+        attempt_id: row.get(4)?,
+        assessment_item_id: row.get(5)?,
+        answer_key_version_id: row.get(6)?,
+        rubric_version_id: row.get(7)?,
+        machine_grade_ai_run_id: row.get(8)?,
+        outcome: row.get(9)?,
+        suggested_score: row.get(10)?,
+        result_json: row.get(11)?,
+        confidence: row.get(12)?,
+        exclusion_reason: row.get(13)?,
+        state: row.get(14)?,
+        created_at: row.get(15)?,
+    })
+}
+
 pub fn get_subjective_suggestion(
     conn: &Connection,
     id: i64,
@@ -198,6 +248,24 @@ pub fn get_subjective_suggestion(
              FROM exam_subjective_grade_suggestions_v2 WHERE id=?1",
             [id],
             suggestion_row,
+        )
+        .optional()?)
+}
+
+pub fn get_short_answer_analysis_by_run(
+    conn: &Connection,
+    ai_run_id: i64,
+) -> CoreResult<Option<ShortAnswerGradeAnalysis>> {
+    Ok(conn
+        .query_row(
+            "SELECT id,public_id,transcription_revision_id,suggestion_id,attempt_id,
+                    assessment_item_id,answer_key_version_id,rubric_version_id,
+                    machine_grade_ai_run_id,outcome,suggested_score,result_json,
+                    confidence,exclusion_reason,state,created_at
+             FROM exam_short_answer_grade_analyses_v2
+             WHERE machine_grade_ai_run_id=?1",
+            [ai_run_id],
+            short_answer_analysis_row,
         )
         .optional()?)
 }
@@ -317,6 +385,11 @@ fn append_transcription(
         |row| row.get(0),
     )?;
     conn.execute(
+        "UPDATE exam_short_answer_grade_analyses_v2 SET state='superseded'
+         WHERE attempt_id=?1 AND assessment_item_id=?2 AND state='active'",
+        (scope.attempt_id, scope.assessment_item_id),
+    )?;
+    conn.execute(
         "UPDATE exam_subjective_grade_suggestions_v2 SET state='superseded'
          WHERE attempt_id=?1 AND assessment_item_id=?2 AND state='active'",
         (scope.attempt_id, scope.assessment_item_id),
@@ -416,6 +489,26 @@ fn fill_answer_values(answer: &Value) -> Vec<String> {
     values.sort();
     values.dedup();
     values
+}
+
+fn json_string_array(raw: Option<String>, field: &str) -> CoreResult<Vec<String>> {
+    match raw {
+        None => Ok(Vec::new()),
+        Some(raw) => {
+            let value: Value = serde_json::from_str(&raw)
+                .map_err(|error| CoreError::Parse(format!("简答题{field} JSON 损坏：{error}")))?;
+            let array = value
+                .as_array()
+                .ok_or_else(|| CoreError::Invalid(format!("简答题{field}必须是数组")))?;
+            Ok(array
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect())
+        }
+    }
 }
 
 fn suggestion_scope(conn: &Connection, transcription_id: i64) -> CoreResult<SuggestionScope> {
@@ -635,6 +728,295 @@ fn ensure_subjective_suggestion(
         .ok_or_else(|| CoreError::NotFound("刚创建的主观题评分建议".into()))
 }
 
+/// 加载一次简答题评分所需的完整、版本冻结输入。调用方可在释放数据库锁后交给 provider。
+pub fn load_short_answer_grade_request(
+    conn: &Connection,
+    transcription_id: i64,
+) -> CoreResult<ShortAnswerGradeRequest> {
+    let (
+        attempt_id,
+        assessment_item_id,
+        answer_region_revision_id,
+        crop_artifact_id,
+        question_stem,
+        student_answer,
+        answer_key_version_id,
+        rubric_version_id,
+        answer_json,
+        max_score,
+    ): (i64, i64, i64, i64, String, String, i64, i64, String, f64) = conn
+        .query_row(
+            "SELECT t.attempt_id,t.assessment_item_id,t.answer_region_revision_id,
+                    region.crop_artifact_id,question.stem,
+                    COALESCE(t.teacher_corrected_text,t.normalized_text),
+                    item.answer_key_version_id,item.rubric_version_id,
+                    answer.answer_json,item.score
+             FROM exam_subjective_transcription_revisions_v2 t
+             JOIN exam_answer_region_revisions_v2 region
+               ON region.id=t.answer_region_revision_id
+              AND region.state='active' AND region.decision='teacher_confirmed'
+             JOIN exam_attempts_v2 attempt
+               ON attempt.id=t.attempt_id AND attempt.state<>'voided'
+             JOIN exam_assessment_items_v2 item
+               ON item.id=t.assessment_item_id
+              AND item.assessment_version_id=attempt.assessment_version_id
+              AND item.state='active'
+             JOIN k1_question_versions question
+               ON question.id=item.question_version_id
+              AND question.state='published' AND question.question_type='short_answer'
+             JOIN k1_answer_key_versions answer
+               ON answer.id=item.answer_key_version_id AND answer.state='confirmed'
+             JOIN k1_rubric_versions rubric
+               ON rubric.id=item.rubric_version_id AND rubric.state='confirmed'
+             WHERE t.id=?1 AND t.state='active' AND t.question_type='short_answer'
+               AND t.result_state='recognized' AND region.crop_artifact_id IS NOT NULL",
+            [transcription_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| {
+            CoreError::Invalid(
+                "简答题评分只允许使用当前老师确认题区的 active recognized 转写".into(),
+            )
+        })?;
+
+    let answer: Value = serde_json::from_str(&answer_json)
+        .map_err(|error| CoreError::Parse(format!("简答题答案 JSON 损坏：{error}")))?;
+    let reference_answer = answer
+        .get("reference_answer")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| CoreError::Invalid("简答题已确认答案缺少 reference_answer".into()))?
+        .to_string();
+
+    let mut point_stmt = conn.prepare(
+        "SELECT id,public_id,stable_id,order_index,canonical_text,
+                allowed_paraphrases_json,required_concepts_json,max_score
+         FROM k1_rubric_points
+         WHERE rubric_version_id=?1 ORDER BY order_index,id",
+    )?;
+    let mut rubric_points = point_stmt
+        .query_map([rubric_version_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, f64>(7)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .map(
+            |(
+                id,
+                public_id,
+                stable_id,
+                order_index,
+                canonical_text,
+                allowed,
+                required,
+                point_score,
+            )| {
+                Ok(ShortAnswerRubricPointSpec {
+                    rubric_point_id: id,
+                    public_id,
+                    stable_id,
+                    order_index,
+                    canonical_text,
+                    allowed_paraphrases: json_string_array(allowed, "允许改述")?,
+                    required_concepts: json_string_array(required, "必需概念")?,
+                    contradiction_rules: Vec::new(),
+                    max_score: point_score,
+                })
+            },
+        )
+        .collect::<CoreResult<Vec<_>>>()?;
+    drop(point_stmt);
+
+    let point_indexes = rubric_points
+        .iter()
+        .enumerate()
+        .map(|(index, point)| (point.rubric_point_id, index))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut rule_stmt = conn.prepare(
+        "SELECT rule.rubric_point_id,rule.rule_type,rule.rule_json
+         FROM k1_contradiction_rules rule
+         JOIN k1_rubric_points point ON point.id=rule.rubric_point_id
+         WHERE point.rubric_version_id=?1 ORDER BY rule.id",
+    )?;
+    let rules = rule_stmt
+        .query_map([rubric_version_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (point_id, rule_type, raw_rule) in rules {
+        let rule: Value = serde_json::from_str(&raw_rule)
+            .map_err(|error| CoreError::Parse(format!("简答题矛盾规则 JSON 损坏：{error}")))?;
+        let index = point_indexes
+            .get(&point_id)
+            .copied()
+            .ok_or_else(|| CoreError::Invalid("简答题矛盾规则绑定了外部评分点".into()))?;
+        rubric_points[index]
+            .contradiction_rules
+            .push(serde_json::json!({
+                "rule_type": rule_type,
+                "rule": rule
+            }));
+    }
+
+    let request = ShortAnswerGradeRequest {
+        transcription_revision_id: transcription_id,
+        attempt_id,
+        assessment_item_id,
+        answer_region_revision_id,
+        crop_artifact_id,
+        question_stem,
+        student_answer,
+        reference_answer,
+        answer_key_version_id,
+        rubric_version_id,
+        max_score,
+        rubric_points,
+    };
+    request.validate()?;
+    Ok(request)
+}
+
+/// 将成功的 answer_grade run 固化为追加式分析。这里只更新机器建议，不写老师成绩。
+pub fn record_short_answer_grade_ai_run(
+    conn: &mut Connection,
+    ai_run_id: i64,
+) -> CoreResult<ShortAnswerGradeAnalysis> {
+    if let Some(existing) = get_short_answer_analysis_by_run(conn, ai_run_id)? {
+        return Ok(existing);
+    }
+    let run = ai_runs::get_by_id(conn, ai_run_id)?
+        .ok_or_else(|| CoreError::NotFound(format!("ai_run#{ai_run_id}")))?;
+    if run.run_type != "answer_grade"
+        || run.source_module != "exam"
+        || run.business_ref_type != "subjective_transcription_revision"
+        || run.status != AiRunStatus::Succeeded
+    {
+        return Err(CoreError::Invalid(
+            "当前 AI run 不是已成功的答题卡简答题评分".into(),
+        ));
+    }
+    let transcription_id = run
+        .business_ref_id
+        .parse::<i64>()
+        .map_err(|_| CoreError::Invalid("简答题评分业务引用无效".into()))?;
+    let request = load_short_answer_grade_request(conn, transcription_id)?;
+    if run.input_artifact_id != Some(request.crop_artifact_id)
+        || run.input_hash != request.input_hash()?
+    {
+        return Err(CoreError::Invalid(
+            "简答题评分 run 与当前转写/裁剪/版本不一致".into(),
+        ));
+    }
+    let output_json = run
+        .output_json
+        .as_deref()
+        .ok_or_else(|| CoreError::Invalid("成功的简答题评分缺少输出".into()))?;
+    let output: ShortAnswerGradeOutput = serde_json::from_str(output_json)
+        .map_err(|error| CoreError::Parse(format!("简答题评分输出损坏：{error}")))?;
+    output.validate_against(&request)?;
+    if output.descriptor.provider != run.provider
+        || output.descriptor.model_name != run.model_name
+        || output.descriptor.model_version != run.model_version
+        || output.descriptor.config_version != run.config_version
+        || output.descriptor.rule_version != run.prompt_or_rule_version
+    {
+        return Err(CoreError::Invalid(
+            "简答题评分输出的模型描述与 AI run 不一致".into(),
+        ));
+    }
+    let suggestion = ensure_subjective_suggestion(conn, transcription_id)?;
+    if suggestion.outcome != "unscored" {
+        return Err(CoreError::Invalid("简答题基础建议状态异常".into()));
+    }
+    let outcome = if output.suggested_score <= 0.000_001 {
+        "incorrect"
+    } else if (output.suggested_score - request.max_score).abs() <= 0.000_001 {
+        "correct"
+    } else {
+        "partial"
+    };
+    let exclusion_reason = match output.state {
+        ShortAnswerGradeState::Ready => "SHORT_ANSWER_TEACHER_REVIEW_REQUIRED".to_string(),
+        ShortAnswerGradeState::NeedsReview => format!(
+            "SHORT_ANSWER_MACHINE_REVIEW_REQUIRED:{}",
+            output.issue_codes.join(",")
+        ),
+    };
+    let tx = conn.transaction()?;
+    tx.execute(
+        "UPDATE exam_short_answer_grade_analyses_v2 SET state='superseded'
+         WHERE transcription_revision_id=?1 AND state='active'",
+        [transcription_id],
+    )?;
+    let public_id = ids::new_public_id();
+    let now = time::utc_now_rfc3339();
+    tx.execute(
+        "INSERT INTO exam_short_answer_grade_analyses_v2
+         (public_id,transcription_revision_id,suggestion_id,attempt_id,assessment_item_id,
+          answer_key_version_id,rubric_version_id,machine_grade_ai_run_id,outcome,
+          suggested_score,result_json,confidence,exclusion_reason,state,created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'active',?14)",
+        rusqlite::params![
+            &public_id,
+            transcription_id,
+            suggestion.id,
+            request.attempt_id,
+            request.assessment_item_id,
+            request.answer_key_version_id,
+            request.rubric_version_id,
+            ai_run_id,
+            outcome,
+            output.suggested_score,
+            output_json,
+            output.confidence,
+            &exclusion_reason,
+            &now,
+        ],
+    )?;
+    let analysis_id = tx.last_insert_rowid();
+    let analysis = tx
+        .query_row(
+            "SELECT id,public_id,transcription_revision_id,suggestion_id,attempt_id,
+                    assessment_item_id,answer_key_version_id,rubric_version_id,
+                    machine_grade_ai_run_id,outcome,suggested_score,result_json,
+                    confidence,exclusion_reason,state,created_at
+             FROM exam_short_answer_grade_analyses_v2 WHERE id=?1",
+            [analysis_id],
+            short_answer_analysis_row,
+        )
+        .map_err(CoreError::from)?;
+    tx.commit()?;
+    Ok(analysis)
+}
+
 pub fn record_ocr_ai_run_transcription(
     conn: &mut Connection,
     ai_run_id: i64,
@@ -771,12 +1153,18 @@ fn review_scope(conn: &Connection, suggestion_id: i64) -> CoreResult<ReviewScope
     conn.query_row(
         "SELECT s.id,s.public_id,s.transcription_revision_id,s.attempt_id,
                 s.assessment_item_id,s.answer_key_version_id,s.rubric_version_id,
-                s.machine_grade_ai_run_id,s.outcome,s.suggested_score,s.result_json,
-                s.confidence,s.batch_eligible,s.exclusion_reason,s.state,
-                item.score,t.state,region.state,region.decision
+                COALESCE(analysis.machine_grade_ai_run_id,s.machine_grade_ai_run_id),
+                COALESCE(analysis.outcome,s.outcome),
+                COALESCE(analysis.suggested_score,s.suggested_score),
+                COALESCE(analysis.result_json,s.result_json),
+                COALESCE(analysis.confidence,s.confidence),
+                s.batch_eligible,COALESCE(analysis.exclusion_reason,s.exclusion_reason),s.state,
+                analysis.id,item.score,t.state,region.state,region.decision
          FROM exam_subjective_grade_suggestions_v2 s
          JOIN exam_subjective_transcription_revisions_v2 t
            ON t.id=s.transcription_revision_id
+         LEFT JOIN exam_short_answer_grade_analyses_v2 analysis
+           ON analysis.suggestion_id=s.id AND analysis.state='active'
          JOIN exam_answer_region_revisions_v2 region
            ON region.id=t.answer_region_revision_id
          JOIN exam_attempts_v2 attempt
@@ -808,10 +1196,11 @@ fn review_scope(conn: &Connection, suggestion_id: i64) -> CoreResult<ReviewScope
                     exclusion_reason: row.get(13)?,
                     state: row.get(14)?,
                 },
-                max_score: row.get(15)?,
-                transcription_state: row.get(16)?,
-                region_state: row.get(17)?,
-                region_decision: row.get(18)?,
+                short_answer_analysis_id: row.get(15)?,
+                max_score: row.get(16)?,
+                transcription_state: row.get(17)?,
+                region_state: row.get(18)?,
+                region_decision: row.get(19)?,
             })
         },
     )
@@ -859,6 +1248,43 @@ fn link_decision_source(
         return Err(CoreError::Invalid(
             "评分 revision 已绑定不同的答题卡主观题证据".into(),
         ));
+    }
+    if let Some(analysis_id) = scope.short_answer_analysis_id {
+        let machine_grade_ai_run_id = scope
+            .suggestion
+            .machine_grade_ai_run_id
+            .ok_or_else(|| CoreError::Invalid("简答题评分分析缺少 answer_grade run".into()))?;
+        conn.execute(
+            "INSERT INTO exam_grade_decision_short_answer_sources_v2
+             (grade_decision_id,analysis_id,machine_grade_ai_run_id,reviewed_by,created_at)
+             VALUES (?1,?2,?3,?4,?5)
+             ON CONFLICT(grade_decision_id) DO NOTHING",
+            (
+                decision_id,
+                analysis_id,
+                machine_grade_ai_run_id,
+                reviewed_by,
+                created_at,
+            ),
+        )?;
+        let linked: (i64, i64, String) = conn.query_row(
+            "SELECT analysis_id,machine_grade_ai_run_id,reviewed_by
+             FROM exam_grade_decision_short_answer_sources_v2
+             WHERE grade_decision_id=?1",
+            [decision_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if linked
+            != (
+                analysis_id,
+                machine_grade_ai_run_id,
+                reviewed_by.to_string(),
+            )
+        {
+            return Err(CoreError::Invalid(
+                "评分 revision 已绑定不同的简答题分析".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -997,16 +1423,25 @@ pub fn list_subjective_workbench(
                   FROM k1_rubric_points point
                   WHERE point.rubric_version_id=item.rubric_version_id),
                   '{\"schema_version\":1,\"rubric_points\":[]}'),
-                suggestion.id,suggestion.outcome,suggestion.suggested_score,
-                suggestion.result_json,suggestion.batch_eligible,suggestion.exclusion_reason,
+                suggestion.id,analysis.id,
+                COALESCE(analysis.machine_grade_ai_run_id,suggestion.machine_grade_ai_run_id),
+                COALESCE(analysis.outcome,suggestion.outcome),
+                COALESCE(analysis.suggested_score,suggestion.suggested_score),
+                COALESCE(analysis.result_json,suggestion.result_json),
+                suggestion.batch_eligible,
+                COALESCE(analysis.exclusion_reason,suggestion.exclusion_reason),
                 decision.id,decision.revision,decision.teacher_score,
                 decision.confirmation_level,source.review_mode,
-                CASE WHEN source.suggestion_id=suggestion.id THEN 1 ELSE 0 END,
+                CASE WHEN source.suggestion_id=suggestion.id
+                       AND (analysis.id IS NULL OR short_source.analysis_id=analysis.id)
+                     THEN 1 ELSE 0 END,
                 decision.decided_at
          FROM exam_subjective_grade_suggestions_v2 suggestion
          JOIN exam_subjective_transcription_revisions_v2 transcription
            ON transcription.id=suggestion.transcription_revision_id
           AND transcription.state='active'
+         LEFT JOIN exam_short_answer_grade_analyses_v2 analysis
+           ON analysis.suggestion_id=suggestion.id AND analysis.state='active'
          JOIN exam_answer_region_revisions_v2 region
            ON region.id=transcription.answer_region_revision_id AND region.state='active'
          LEFT JOIN artifacts artifact ON artifact.id=region.crop_artifact_id
@@ -1025,6 +1460,8 @@ pub fn list_subjective_workbench(
           AND decision.assessment_item_id=item.id AND decision.state='active'
          LEFT JOIN exam_grade_decision_subjective_sources_v2 source
            ON source.grade_decision_id=decision.id
+         LEFT JOIN exam_grade_decision_short_answer_sources_v2 short_source
+           ON short_source.grade_decision_id=decision.id
          WHERE suggestion.state='active' AND (?1 IS NULL OR version.id=?1)
          ORDER BY version.id DESC,item.order_index,student.student_no,attempt.attempt_no
          LIMIT ?2",
@@ -1059,18 +1496,20 @@ pub fn list_subjective_workbench(
                 answer_json: row.get(24)?,
                 rubric_points_json: row.get(25)?,
                 suggestion_id: row.get(26)?,
-                suggestion_outcome: row.get(27)?,
-                suggested_score: row.get(28)?,
-                suggestion_result_json: row.get(29)?,
-                batch_eligible: row.get(30)?,
-                exclusion_reason: row.get(31)?,
-                grade_decision_id: row.get(32)?,
-                grade_decision_revision: row.get(33)?,
-                teacher_score: row.get(34)?,
-                confirmation_level: row.get(35)?,
-                review_mode: row.get(36)?,
-                current_suggestion_confirmed: row.get(37)?,
-                decided_at: row.get(38)?,
+                short_answer_analysis_id: row.get(27)?,
+                machine_grade_ai_run_id: row.get(28)?,
+                suggestion_outcome: row.get(29)?,
+                suggested_score: row.get(30)?,
+                suggestion_result_json: row.get(31)?,
+                batch_eligible: row.get(32)?,
+                exclusion_reason: row.get(33)?,
+                grade_decision_id: row.get(34)?,
+                grade_decision_revision: row.get(35)?,
+                teacher_score: row.get(36)?,
+                confirmation_level: row.get(37)?,
+                review_mode: row.get(38)?,
+                current_suggestion_confirmed: row.get(39)?,
+                decided_at: row.get(40)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

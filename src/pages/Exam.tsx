@@ -35,6 +35,7 @@ import {
   examAnswerSheetProcessPage,
   examAnswerSheetRecognizeSubjectiveRegion,
   examAnswerSheetCorrectSubjectiveTranscription,
+  examAnswerSheetGradeShortAnswer,
   examAnswerSheetSubjectiveAccept,
   examAnswerSheetSubjectiveCorrect,
   examAnswerSheetSubjectivePublishAttempt,
@@ -199,6 +200,7 @@ function shortAnswerRubricPoints(raw: string | null) {
     return value.rubric_points.map((rawPoint, index) => {
       const point = rawPoint as Record<string, unknown>;
       return {
+        stableId: typeof point.stable_id === "string" ? point.stable_id : `point-${index}`,
         orderIndex: typeof point.order_index === "number" ? point.order_index : index,
         canonicalText: typeof point.canonical_text === "string" ? point.canonical_text : "未识别评分点",
         maxScore: typeof point.max_score === "number" ? point.max_score : 0,
@@ -208,6 +210,36 @@ function shortAnswerRubricPoints(raw: string | null) {
     return [];
   }
 }
+
+function shortAnswerPointResults(raw: string | null) {
+  if (!raw) return [];
+  try {
+    const value = JSON.parse(raw) as Record<string, unknown>;
+    if (!Array.isArray(value.point_results)) return [];
+    return value.point_results.map((rawPoint) => {
+      const point = rawPoint as Record<string, unknown>;
+      return {
+        stableId: typeof point.stable_id === "string" ? point.stable_id : "unknown",
+        status: typeof point.status === "string" ? point.status : "uncertain",
+        suggestedScore: typeof point.suggested_score === "number" ? point.suggested_score : 0,
+        evidenceSnippets: Array.isArray(point.evidence_snippets)
+          ? point.evidence_snippets.filter((item): item is string => typeof item === "string")
+          : [],
+        reason: typeof point.reason === "string" ? point.reason : "",
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+const SHORT_ANSWER_POINT_STATUS: Record<string, string> = {
+  covered: "已覆盖",
+  partial: "部分覆盖",
+  missing: "未覆盖",
+  contradicted: "存在矛盾",
+  uncertain: "无法确定",
+};
 
 function displayTime(value: string) {
   return value.replace("T", " ").slice(0, 16);
@@ -1808,6 +1840,11 @@ function subjectiveStateLabel(row: SubjectiveWorkbenchRow) {
   if (row.result_state === "unreadable") return "无法辨认";
   if (row.result_state === "recognize_failed") return "识别失败";
   if (row.result_state === "ambiguous_final") return "涂改结果不明确";
+  if (row.question_type === "short_answer" && row.short_answer_analysis_id != null) {
+    if (row.suggestion_outcome === "correct") return "逐点评分建议：全部覆盖";
+    if (row.suggestion_outcome === "partial") return "逐点评分建议：部分覆盖";
+    if (row.suggestion_outcome === "incorrect") return "逐点评分建议：未覆盖";
+  }
   if (row.suggestion_outcome === "correct") return "与已确认答案一致";
   if (row.suggestion_outcome === "incorrect") return "与已确认答案不一致";
   if (row.question_type === "short_answer") return "等待按评分点终审";
@@ -1874,8 +1911,20 @@ function SubjectiveReviewTab({
     }
     setBusy(true);
     try {
-      await examAnswerSheetCorrectSubjectiveTranscription(row.answer_region_revision_id, value);
-      onDone(`${row.student_name}第${row.question_no}题已保存老师校正文本；机器原文仍保留`);
+      const revision = await examAnswerSheetCorrectSubjectiveTranscription(row.answer_region_revision_id, value);
+      let gradeMessage = "";
+      if (row.question_type === "short_answer") {
+        try {
+          await examAnswerSheetGradeShortAnswer(
+            revision.id,
+            `answer-sheet:transcription:${revision.id}:answer-grade:${crypto.randomUUID()}`,
+          );
+          gradeMessage = "；已按新文本生成逐点评分建议";
+        } catch (gradeError) {
+          gradeMessage = `；评分建议暂未生成（${String(gradeError)}）`;
+        }
+      }
+      onDone(`${row.student_name}第${row.question_no}题已保存老师校正文本；机器原文仍保留${gradeMessage}`);
     } catch (err) {
       onError(String(err));
     } finally {
@@ -1886,11 +1935,38 @@ function SubjectiveReviewTab({
   async function retry(row: SubjectiveWorkbenchRow) {
     setBusy(true);
     try {
-      await examAnswerSheetRecognizeSubjectiveRegion(
+      const revision = await examAnswerSheetRecognizeSubjectiveRegion(
         row.answer_region_revision_id,
         `answer-sheet:subjective:${row.answer_region_revision_id}:retry:${crypto.randomUUID()}`,
       );
-      onDone(`${row.student_no}号第${row.question_no}题已重新识别；旧转写仍保留`);
+      let gradeMessage = "";
+      if (revision.question_type === "short_answer" && revision.result_state === "recognized") {
+        try {
+          await examAnswerSheetGradeShortAnswer(
+            revision.id,
+            `answer-sheet:transcription:${revision.id}:answer-grade:${crypto.randomUUID()}`,
+          );
+          gradeMessage = "；已生成逐点评分建议";
+        } catch (gradeError) {
+          gradeMessage = `；评分建议暂未生成（${String(gradeError)}）`;
+        }
+      }
+      onDone(`${row.student_no}号第${row.question_no}题已重新识别；旧转写仍保留${gradeMessage}`);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function generateShortAnswerGrade(row: SubjectiveWorkbenchRow) {
+    setBusy(true);
+    try {
+      await examAnswerSheetGradeShortAnswer(
+        row.transcription_revision_id,
+        `answer-sheet:transcription:${row.transcription_revision_id}:answer-grade:${crypto.randomUUID()}`,
+      );
+      onDone(`${row.student_name}第${row.question_no}题已生成逐评分点建议，等待老师终审`);
     } catch (err) {
       onError(String(err));
     } finally {
@@ -1949,7 +2025,7 @@ function SubjectiveReviewTab({
     return (
       <div className="empty-state objective-empty">
         <b>还没有答题卡主观题转写。</b>
-        <span>上传并处理答题卡后，填空题会做确定性答案比对；简答题先按评分点交给老师终审。</span>
+        <span>上传并处理答题卡后，填空题会做确定性答案比对；篇幅受控简答题会自动按评分点整理原文证据。</span>
       </div>
     );
   }
@@ -1979,7 +2055,7 @@ function SubjectiveReviewTab({
           <span><b>{directCount}</b> 有明确建议</span>
           <span className={exceptionCount ? "bad-text" : ""}><b>{exceptionCount}</b> 需人工记分</span>
         </div>
-        <div className="meta objective-batch-note">填空题只做已确认答案的精确匹配；简答题不会按文本相似度直接给分。</div>
+        <div className="meta objective-batch-note">填空题只做已确认答案的精确匹配；简答题逐点引用学生原文给建议，不按整段相似度直接给分，也不自动确认。</div>
       </section>
 
       <div className="sech">本题证据 <span className="n">按学号排序</span></div>
@@ -1990,6 +2066,9 @@ function SubjectiveReviewTab({
             ?? row.raw_ocr_text
             ?? "";
           const rubricPoints = shortAnswerRubricPoints(row.rubric_points_json);
+          const pointResults = row.short_answer_analysis_id == null
+            ? []
+            : shortAnswerPointResults(row.suggestion_result_json);
           return (
             <article className={row.current_suggestion_confirmed ? "objective-review-row confirmed" : "objective-review-row"} key={row.suggestion_id}>
               <div className="objective-student">
@@ -2015,13 +2094,39 @@ function SubjectiveReviewTab({
                 </div>
               </div>
               {row.question_type === "short_answer" && (
-                <div className="intake-reasons">
-                  {rubricPoints.length > 0
-                    ? rubricPoints.map((point) => <span key={`${point.orderIndex}-${point.canonicalText}`}>{point.canonicalText}（{point.maxScore}分）</span>)
-                    : <span>评分点尚未完整，必须老师人工核对</span>}
-                </div>
+                pointResults.length > 0 ? (
+                  <div className="short-answer-analysis">
+                    {pointResults.map((result) => {
+                      const rubric = rubricPoints.find((point) => point.stableId === result.stableId);
+                      return (
+                        <div className={`short-answer-point ${result.status}`} key={result.stableId}>
+                          <div>
+                            <b>{rubric?.canonicalText || result.stableId}</b>
+                            <span>{SHORT_ANSWER_POINT_STATUS[result.status] || result.status} · {result.suggestedScore} / {rubric?.maxScore ?? "—"} 分</span>
+                          </div>
+                          <p>{result.reason || "等待老师结合原图核对"}</p>
+                          {result.evidenceSnippets.length > 0
+                            ? result.evidenceSnippets.map((snippet) => <q key={snippet}>{snippet}</q>)
+                            : <em>学生答案中未定位到可引用片段</em>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="intake-reasons short-answer-rubric">
+                    {rubricPoints.length > 0
+                      ? rubricPoints.map((point) => <span key={`${point.orderIndex}-${point.canonicalText}`}>{point.canonicalText}（{point.maxScore}分）</span>)
+                      : <span>评分点尚未完整，必须老师人工核对</span>}
+                  </div>
+                )
               )}
               <div className="objective-actions">
+                {!row.current_suggestion_confirmed
+                  && row.question_type === "short_answer"
+                  && row.result_state === "recognized"
+                  && row.short_answer_analysis_id == null && (
+                    <button disabled={busy} onClick={() => void generateShortAnswerGrade(row)}>生成逐点评分建议</button>
+                  )}
                 {!row.current_suggestion_confirmed && row.suggested_score != null && (
                   <button className="primary" disabled={busy} onClick={() => void accept(row)}>接受本条建议</button>
                 )}

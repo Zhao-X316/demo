@@ -16,6 +16,7 @@ pub mod pilot_data_gate;
 pub mod pilot_data_rights;
 pub mod service;
 pub mod shadow_pilot;
+pub mod short_answer_grading;
 pub mod vlm;
 
 use suite_core::models::ModuleKey;
@@ -113,6 +114,10 @@ static MIGRATIONS: &[Migration] = &[
     Migration {
         id: "exam_0023",
         sql: include_str!("../migrations/0023_subjective_grading.sql"),
+    },
+    Migration {
+        id: "exam_0024",
+        sql: include_str!("../migrations/0024_short_answer_grading.sql"),
     },
 ];
 

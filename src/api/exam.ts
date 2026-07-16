@@ -513,6 +513,8 @@ export interface SubjectiveWorkbenchRow {
   answer_json: string;
   rubric_points_json: string;
   suggestion_id: number;
+  short_answer_analysis_id: number | null;
+  machine_grade_ai_run_id: number | null;
   suggestion_outcome: "correct" | "incorrect" | "partial" | "unscored";
   suggested_score: number | null;
   suggestion_result_json: string;
@@ -525,6 +527,25 @@ export interface SubjectiveWorkbenchRow {
   review_mode: "single" | "teacher_corrected" | null;
   current_suggestion_confirmed: boolean;
   decided_at: string | null;
+}
+
+export interface ShortAnswerGradeAnalysis {
+  id: number;
+  public_id: string;
+  transcription_revision_id: number;
+  suggestion_id: number;
+  attempt_id: number;
+  assessment_item_id: number;
+  answer_key_version_id: number;
+  rubric_version_id: number;
+  machine_grade_ai_run_id: number;
+  outcome: "correct" | "incorrect" | "partial";
+  suggested_score: number;
+  result_json: string;
+  confidence: number;
+  exclusion_reason: string;
+  state: "active" | "superseded" | "voided";
+  created_at: string;
 }
 
 export interface SubjectiveWorkbench {
@@ -903,6 +924,14 @@ export const examAnswerSheetCorrectSubjectiveTranscription = (
     correctedText: corrected_text,
   },
 );
+
+export const examAnswerSheetGradeShortAnswer = (
+  transcription_revision_id: number,
+  idempotency_key: string,
+) => call<ShortAnswerGradeAnalysis>("exam_answer_sheet_grade_short_answer", {
+  transcriptionRevisionId: transcription_revision_id,
+  idempotencyKey: idempotency_key,
+});
 
 export const examAnswerSheetSubjectiveWorkbench = (
   assessment_version_id: number | null = null,

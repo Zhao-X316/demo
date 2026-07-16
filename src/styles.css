@@ -328,7 +328,7 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
 .objective-facts b { color: var(--text); }
 .objective-facts b.ok-text { color: var(--ok); }
 .objective-facts b.bad-text { color: var(--bad); }
-.objective-actions { display: flex; flex-direction: column; gap: 7px; }
+.objective-actions { display: flex; flex-direction: column; gap: 7px; grid-column: 3; grid-row: 1 / span 2; }
 .objective-actions details { padding: 7px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg-sub); }
 .objective-actions summary { color: var(--muted); font-size: 12px; cursor: pointer; }
 .objective-actions details[open] summary { margin-bottom: 8px; }
@@ -336,6 +336,16 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
 .objective-actions .field .fl { font-size: 11px; }
 .objective-actions input { padding: 6px 7px; font-size: 12px; }
 .objective-actions details button { width: 100%; }
+.short-answer-analysis, .short-answer-rubric { grid-column: 2; }
+.short-answer-analysis { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 7px; align-self: stretch; }
+.short-answer-point { display: flex; flex-direction: column; gap: 5px; padding: 8px 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg-sub); font-size: 11px; }
+.short-answer-point > div { display: flex; justify-content: space-between; gap: 10px; }
+.short-answer-point > div span, .short-answer-point p, .short-answer-point em { color: var(--muted); }
+.short-answer-point p { margin: 0; }
+.short-answer-point q { padding: 4px 6px; border-left: 2px solid var(--accent); background: var(--panel); color: var(--text); }
+.short-answer-point.covered { border-color: #B7D9C3; }
+.short-answer-point.partial, .short-answer-point.uncertain { border-color: #F1D39D; }
+.short-answer-point.missing, .short-answer-point.contradicted { border-color: #E6B8B8; }
 .objective-publish-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; }
 .objective-attempt { display: flex; flex-direction: column; gap: 8px; }
 .objective-attempt .exam-card-head { margin-bottom: 2px; }
@@ -377,6 +387,7 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
   .objective-batch-note { grid-column: auto; }
   .objective-review-row { grid-template-columns: 1fr; }
   .objective-student { flex-direction: row; align-items: center; }
+  .objective-actions, .short-answer-analysis, .short-answer-rubric { grid-column: auto; grid-row: auto; }
 }
 
 @media (max-width: 620px) {

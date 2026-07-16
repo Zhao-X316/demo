@@ -24,6 +24,8 @@ mod ordinary_paper_provider;
 mod ordinary_paper_run;
 mod pdf_pages;
 mod secrets;
+mod short_answer_provider;
+mod short_answer_run;
 mod state;
 mod subjective_run;
 mod vlm;
@@ -125,6 +127,7 @@ fn main() {
             exam_commands::exam_answer_sheet_process_page,
             exam_commands::exam_answer_sheet_recognize_subjective_region,
             exam_commands::exam_answer_sheet_correct_subjective_transcription,
+            exam_commands::exam_answer_sheet_grade_short_answer,
             exam_commands::exam_answer_sheet_subjective_workbench,
             exam_commands::exam_answer_sheet_subjective_accept,
             exam_commands::exam_answer_sheet_subjective_correct,

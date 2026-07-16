@@ -13,6 +13,10 @@ use crate::dictation::DictationRecognitionState;
 use crate::dictation_recognition::{
     DictationOcrOutput, DictationOcrRequest, DictationRecognizerDescriptor,
 };
+use crate::short_answer_grading::{
+    ShortAnswerGradeOutput, ShortAnswerGradeState, ShortAnswerGraderDescriptor,
+    ShortAnswerPointResult, ShortAnswerPointStatus, SHORT_ANSWER_GRADE_SCHEMA_VERSION,
+};
 
 struct Fixture {
     conn: Connection,
@@ -599,6 +603,130 @@ fn short_answer_stays_unscored_until_teacher_or_rubric_ai_reviews_it() {
     .unwrap();
     assert_eq!(decision.teacher_score, 3.0);
     assert_eq!(decision.confirmation_level, "teacher_corrected");
+}
+
+#[test]
+fn answer_grade_run_becomes_audited_point_suggestion_only_after_teacher_accepts() {
+    let mut fixture = setup();
+    fixture.region_id = add_short_answer_region(&mut fixture);
+    let ocr_run_id = successful_run(
+        &mut fixture,
+        "subjective-ocr-short-grade",
+        "只学习技术，没有改变封建制度",
+    );
+    let transcription =
+        subjective::record_ocr_ai_run_transcription(&mut fixture.conn, ocr_run_id).unwrap();
+    let request =
+        subjective::load_short_answer_grade_request(&fixture.conn, transcription.id).unwrap();
+    assert_eq!(request.rubric_points.len(), 1);
+    let descriptor = ShortAnswerGraderDescriptor {
+        provider: "fixture".into(),
+        model_name: "fixture-grader".into(),
+        model_version: "v1".into(),
+        config_version: "short-answer-v1".into(),
+        rule_version: "rubric-evidence-v1".into(),
+    };
+    let input_hash = request.input_hash().unwrap();
+    let run = ai_runs::create_or_get(
+        &fixture.conn,
+        &ai_runs::NewAiRun {
+            idempotency_key: "subjective-short-answer-grade-1",
+            run_type: "answer_grade",
+            source_module: "exam",
+            business_ref_type: "subjective_transcription_revision",
+            business_ref_id: &transcription.id.to_string(),
+            input_artifact_id: Some(request.crop_artifact_id),
+            provider: &descriptor.provider,
+            model_name: &descriptor.model_name,
+            model_version: &descriptor.model_version,
+            config_version: &descriptor.config_version,
+            prompt_or_rule_version: &descriptor.rule_version,
+            input_hash: &input_hash,
+            retry_of_ai_run_id: None,
+        },
+    )
+    .unwrap();
+    ai_runs::start(&fixture.conn, run.id, &time::utc_now_rfc3339(), None).unwrap();
+    let output = ShortAnswerGradeOutput {
+        schema_version: SHORT_ANSWER_GRADE_SCHEMA_VERSION,
+        transcription_revision_id: transcription.id,
+        assessment_item_id: request.assessment_item_id,
+        answer_key_version_id: request.answer_key_version_id,
+        rubric_version_id: request.rubric_version_id,
+        input_hash,
+        descriptor,
+        state: ShortAnswerGradeState::Ready,
+        suggested_score: 4.0,
+        point_results: vec![ShortAnswerPointResult {
+            rubric_point_id: request.rubric_points[0].rubric_point_id,
+            stable_id: request.rubric_points[0].stable_id.clone(),
+            status: ShortAnswerPointStatus::Covered,
+            suggested_score: 4.0,
+            evidence_snippets: vec!["没有改变封建制度".into()],
+            reason: "学生明确写出制度局限".into(),
+            confidence: 0.97,
+        }],
+        confidence: 0.97,
+        issue_codes: vec![],
+    };
+    let output_json = output.to_json_against(&request).unwrap();
+    ai_runs::finalize_succeeded(
+        &fixture.conn,
+        run.id,
+        &hashing::sha256_hex(output_json.as_bytes()),
+        Some(output.confidence),
+        &output_json,
+        &time::utc_now_rfc3339(),
+    )
+    .unwrap();
+
+    let analysis = subjective::record_short_answer_grade_ai_run(&mut fixture.conn, run.id).unwrap();
+    assert_eq!(analysis.outcome, "correct");
+    assert_eq!(analysis.suggested_score, 4.0);
+    let workbench = subjective::list_subjective_workbench(&fixture.conn, Some(1), 10).unwrap();
+    let row = workbench
+        .rows
+        .iter()
+        .find(|row| row.question_type == "short_answer")
+        .unwrap();
+    assert_eq!(row.short_answer_analysis_id, Some(analysis.id));
+    assert_eq!(row.machine_grade_ai_run_id, Some(run.id));
+    assert_eq!(row.suggested_score, Some(4.0));
+    assert!(!row.batch_eligible);
+    assert_eq!(workbench.attempts[0].confirmed_count, 0);
+
+    let decision =
+        subjective::accept_subjective_suggestion(&fixture.conn, row.suggestion_id, "teacher")
+            .unwrap();
+    assert_eq!(decision.machine_grade_ai_run_id, Some(run.id));
+    let source: (i64, i64) = fixture
+        .conn
+        .query_row(
+            "SELECT analysis_id,machine_grade_ai_run_id
+             FROM exam_grade_decision_short_answer_sources_v2
+             WHERE grade_decision_id=?1",
+            [decision.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(source, (analysis.id, run.id));
+    let publication_and_evidence: (i64, i64) = (
+        fixture
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM exam_grade_publications_v2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        fixture
+            .conn
+            .query_row("SELECT COUNT(*) FROM learning_evidence", [], |row| {
+                row.get(0)
+            })
+            .unwrap(),
+    );
+    assert_eq!(publication_and_evidence, (0, 0));
 }
 
 #[test]
