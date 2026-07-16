@@ -281,6 +281,73 @@ fn schema_object(value: &Value, label: &str) -> CoreResult<()> {
     Ok(())
 }
 
+fn validate_ready_short_answer(item: &AnswerSourceItemSpec, candidate: &Value) -> CoreResult<()> {
+    let reference_answer = candidate
+        .get("reference_answer")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let rubric_points = candidate
+        .get("rubric_points")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CoreError::Invalid("ready 简答答案必须包含评分点数组".into()))?;
+    if reference_answer.is_empty() || rubric_points.is_empty() {
+        return Err(CoreError::Invalid(
+            "ready 简答答案必须包含参考答案和至少一个评分点".into(),
+        ));
+    }
+
+    let mut orders = BTreeSet::new();
+    let mut total = 0.0;
+    for point in rubric_points {
+        let order_index = point
+            .get("order_index")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| CoreError::Invalid("ready 简答评分点缺少整数顺序".into()))?;
+        let canonical_text = point
+            .get("canonical_text")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        let max_score = point
+            .get("max_score")
+            .and_then(Value::as_f64)
+            .ok_or_else(|| CoreError::Invalid("ready 简答评分点缺少分值".into()))?;
+        if order_index < 0
+            || !orders.insert(order_index)
+            || canonical_text.is_empty()
+            || !max_score.is_finite()
+            || max_score <= 0.0
+        {
+            return Err(CoreError::Invalid(
+                "ready 简答评分点顺序、表述或分值非法".into(),
+            ));
+        }
+        for field in ["allowed_paraphrases", "required_concepts"] {
+            if let Some(values) = point.get(field) {
+                let values = values.as_array().ok_or_else(|| {
+                    CoreError::Invalid(format!("ready 简答评分点 {field} 必须是字符串数组"))
+                })?;
+                if values
+                    .iter()
+                    .any(|value| value.as_str().map(str::trim).is_none_or(str::is_empty))
+                {
+                    return Err(CoreError::Invalid(format!(
+                        "ready 简答评分点 {field} 含空值或非字符串"
+                    )));
+                }
+            }
+        }
+        total += max_score;
+    }
+    if (total - item.max_score).abs() > 0.000_001 {
+        return Err(CoreError::Invalid(
+            "ready 简答评分点分值之和必须等于题目总分".into(),
+        ));
+    }
+    Ok(())
+}
+
 impl AnswerSourceRecognitionOutput {
     pub fn validate_against(&self, request: &AnswerSourceRecognitionRequest<'_>) -> CoreResult<()> {
         request.validate()?;
@@ -320,6 +387,16 @@ impl AnswerSourceRecognitionOutput {
             }
             schema_object(&entry.answer_json, "候选答案")?;
             schema_object(&entry.source_anchor, "来源锚点")?;
+            if self.state == AnswerSourceState::Ready {
+                let item = request
+                    .items
+                    .iter()
+                    .find(|item| item.assessment_item_id == entry.assessment_item_id)
+                    .ok_or_else(|| CoreError::Invalid("答案结构化题目身份不存在".into()))?;
+                if item.question_type == AnswerSourceQuestionType::ShortAnswer {
+                    validate_ready_short_answer(item, &entry.answer_json)?;
+                }
+            }
             match request.source_format {
                 "jpeg" | "pdf" => {
                     let page = entry
@@ -611,5 +688,66 @@ mod tests {
             base.input_hash().unwrap(),
             changed_version.input_hash().unwrap()
         );
+    }
+
+    #[test]
+    fn ready_short_answer_requires_complete_rubric_with_exact_total_score() {
+        let items = vec![AnswerSourceItemSpec {
+            assessment_item_id: 21,
+            order_index: 0,
+            question_no: "1".into(),
+            question_type: AnswerSourceQuestionType::ShortAnswer,
+            stem: "概括洋务运动的影响。".into(),
+            max_score: 4.0,
+        }];
+        let request = request(&items);
+        let mut output = AnswerSourceRecognitionOutput {
+            schema_version: 1,
+            ingest_batch_id: 7,
+            source_artifact_id: 9,
+            source_artifact_sha256: request.source_artifact_sha256.into(),
+            input_hash: request.input_hash().unwrap(),
+            descriptor: AnswerSourceRecognizerDescriptor {
+                provider: "fixture".into(),
+                model_name: "fixture".into(),
+                model_version: "v1".into(),
+                config_version: "v1".into(),
+                rule_version: "v1".into(),
+            },
+            state: AnswerSourceState::Ready,
+            entries: vec![AnswerSourceEntry {
+                assessment_item_id: 21,
+                answer_json: serde_json::json!({
+                    "schema_version": 1,
+                    "reference_answer": "促进了中国近代化。",
+                    "rubric_points": [{
+                        "order_index": 0,
+                        "canonical_text": "促进近代化",
+                        "max_score": 2.0
+                    }]
+                }),
+                source_anchor: serde_json::json!({"schema_version":1,"line":1}),
+                confidence: 0.99,
+            }],
+            confidence: 0.99,
+            issue_codes: vec![],
+        };
+        assert!(output.validate_against(&request).is_err());
+
+        output.entries[0].answer_json["rubric_points"] = serde_json::json!([
+            {
+                "order_index": 0,
+                "canonical_text": "促进近代军事和民用工业发展",
+                "max_score": 2.0,
+                "required_concepts": ["近代工业"]
+            },
+            {
+                "order_index": 1,
+                "canonical_text": "推动中国近代化进程",
+                "max_score": 2.0,
+                "allowed_paraphrases": ["开启近代化探索"]
+            }
+        ]);
+        output.validate_against(&request).unwrap();
     }
 }

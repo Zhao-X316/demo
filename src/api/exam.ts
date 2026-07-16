@@ -244,6 +244,16 @@ export interface AnswerSourceReviewItem {
   questionStem: string;
   boundAnswerKeyVersionId: number;
   boundAnswerJson: string;
+  boundRubricVersionId: number;
+  boundLinkSetId: number;
+  boundRubricPoints: Array<{
+    stableId: string;
+    orderIndex: number;
+    canonicalText: string;
+    maxScore: number;
+    confirmedKnowledgeTitles: string[];
+    confirmedAbilityTitles: string[];
+  }>;
   candidateId: number | null;
   candidateAnswerJson: string | null;
   sourceAnchorJson: string | null;
@@ -265,6 +275,9 @@ export interface AnswerSourceReviewSummary {
     adoptedAssessmentVersionPublicId: string;
     adoptedAssessmentRevision: number;
     changedItemCount: number;
+    changedRubricCount: number;
+    carriedKnowledgeLinkCount: number;
+    carriedAbilityLinkCount: number;
     currentBatchUnchanged: boolean;
   } | null;
   items: AnswerSourceReviewItem[];

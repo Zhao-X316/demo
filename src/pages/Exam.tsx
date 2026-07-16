@@ -181,6 +181,24 @@ function answerJsonLabel(raw: string | null) {
   }
 }
 
+function shortAnswerRubricPoints(raw: string | null) {
+  if (!raw) return [];
+  try {
+    const value = JSON.parse(raw) as Record<string, unknown>;
+    if (!Array.isArray(value.rubric_points)) return [];
+    return value.rubric_points.map((rawPoint, index) => {
+      const point = rawPoint as Record<string, unknown>;
+      return {
+        orderIndex: typeof point.order_index === "number" ? point.order_index : index,
+        canonicalText: typeof point.canonical_text === "string" ? point.canonical_text : "未识别评分点",
+        maxScore: typeof point.max_score === "number" ? point.max_score : 0,
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
 function displayTime(value: string) {
   return value.replace("T", " ").slice(0, 16);
 }
@@ -1281,11 +1299,37 @@ function FixedIntakeTab({
                         {answerSourceAnalysis.review.items
                           .filter((item) => item.matchState !== "matched")
                           .slice(0, 5)
-                          .map((item) => (
-                            <span key={item.assessmentItemId}>
-                              第 {item.questionNo} 题 · 当前：{answerJsonLabel(item.boundAnswerJson)} · 上传：{answerJsonLabel(item.candidateAnswerJson)}
-                            </span>
-                          ))}
+                          .map((item) => {
+                            const proposedPoints = item.questionType === "short_answer"
+                              ? shortAnswerRubricPoints(item.candidateAnswerJson)
+                              : [];
+                            return (
+                              <div key={item.assessmentItemId} className="intake-answer-review-item">
+                                <span>
+                                  第 {item.questionNo} 题 · 当前：{answerJsonLabel(item.boundAnswerJson)} · 上传：{answerJsonLabel(item.candidateAnswerJson)}
+                                </span>
+                                {item.questionType === "short_answer" && (
+                                  <div className="muted">
+                                    <b>上传评分点</b>
+                                    {proposedPoints.map((point) => (
+                                      <span key={`candidate-${point.orderIndex}`}>
+                                        {point.orderIndex + 1}. {point.canonicalText}（{point.maxScore} 分）
+                                      </span>
+                                    ))}
+                                    <b>当前评分点与已确认链接</b>
+                                    {item.boundRubricPoints.map((point) => (
+                                      <span key={point.stableId}>
+                                        {point.orderIndex + 1}. {point.canonicalText}（{point.maxScore} 分）
+                                        {point.confirmedKnowledgeTitles.length > 0 && ` · 知识：${point.confirmedKnowledgeTitles.join("、")}`}
+                                        {point.confirmedAbilityTitles.length > 0 && ` · 能力：${point.confirmedAbilityTitles.join("、")}`}
+                                      </span>
+                                    ))}
+                                    <span>系统只按顺序沿用已有链接；评分点数量或总分变化时会整笔拒绝，不会猜测映射。</span>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
                         {answerSourceAnalysis.review.conflictCount + answerSourceAnalysis.review.missingCount > 5 && (
                           <span>另有 {answerSourceAnalysis.review.conflictCount + answerSourceAnalysis.review.missingCount - 5} 题需要处理。</span>
                         )}
@@ -1294,6 +1338,9 @@ function FixedIntakeTab({
                     {answerSourceAnalysis.review.route === "adopted_new_version" && answerSourceAnalysis.review.adoption && (
                       <div className="muted">
                         已把 {answerSourceAnalysis.review.adoption.changedItemCount} 道冲突题保存为作业第 {answerSourceAnalysis.review.adoption.adoptedAssessmentRevision} 版；本批学生照片仍按原答案批改，不会被重写。
+                        {answerSourceAnalysis.review.adoption.changedRubricCount > 0 && (
+                          <> 其中 {answerSourceAnalysis.review.adoption.changedRubricCount} 道简答题同步建立新评分点，并沿用 {answerSourceAnalysis.review.adoption.carriedKnowledgeLinkCount} 条知识链接、{answerSourceAnalysis.review.adoption.carriedAbilityLinkCount} 条能力链接；原有机器建议/老师确认级别保持不变。</>
+                        )}
                       </div>
                     )}
                     {answerSourceAnalysis.review.route === "blocked" && (
@@ -1314,7 +1361,7 @@ function FixedIntakeTab({
                     && answerSourceAnalysis.review.conflictCount > 0
                     && answerSourceAnalysis.review.missingCount === 0 && (
                       <button onClick={() => void adoptAnswerSourceAsNewVersion()}>
-                        采用上传答案，另存新版本
+                        采用答案与评分点，另存新版本
                       </button>
                     )
                   )}

@@ -4,7 +4,7 @@
 //! “与当前作业答案一致”、明确沿用当前答案，或把完整高置信冲突另存为新 K1/作业版本。
 //! 无论选择哪条路径，当前 ingest batch 的 assessment version 都不会被原地改写。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ use crate::answer_source_recognition::{
 
 use super::fixed_paper::{record_answer_authority_candidate, NewAnswerAuthorityCandidate};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnswerSourceReviewItem {
     pub assessment_item_id: i64,
@@ -30,13 +30,27 @@ pub struct AnswerSourceReviewItem {
     pub question_stem: String,
     pub bound_answer_key_version_id: i64,
     pub bound_answer_json: String,
+    pub bound_rubric_version_id: i64,
+    pub bound_link_set_id: i64,
+    pub bound_rubric_points: Vec<AnswerSourceRubricPointReview>,
     pub candidate_id: Option<i64>,
     pub candidate_answer_json: Option<String>,
     pub source_anchor_json: Option<String>,
     pub match_state: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnswerSourceRubricPointReview {
+    pub stable_id: String,
+    pub order_index: i64,
+    pub canonical_text: String,
+    pub max_score: f64,
+    pub confirmed_knowledge_titles: Vec<String>,
+    pub confirmed_ability_titles: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnswerSourceReviewSummary {
     pub ingest_batch_id: i64,
@@ -59,6 +73,9 @@ pub struct AnswerSourceAdoptionSummary {
     pub adopted_assessment_version_public_id: String,
     pub adopted_assessment_revision: i64,
     pub changed_item_count: i64,
+    pub changed_rubric_count: i64,
+    pub carried_knowledge_link_count: i64,
+    pub carried_ability_link_count: i64,
     pub current_batch_unchanged: bool,
 }
 
@@ -112,6 +129,51 @@ fn output_for_run(
         return Err(CoreError::Invalid("答案结构化 run 输出身份链不一致".into()));
     }
     Ok(output)
+}
+
+fn split_titles(value: String) -> Vec<String> {
+    value
+        .split('\u{1f}')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn rubric_points_for_review(
+    conn: &Connection,
+    rubric_version_id: i64,
+    link_set_id: i64,
+) -> CoreResult<Vec<AnswerSourceRubricPointReview>> {
+    let mut stmt = conn.prepare(
+        "SELECT rp.stable_id,rp.order_index,rp.canonical_text,rp.max_score,
+                COALESCE((SELECT group_concat(kn.title,CHAR(31))
+                          FROM k1_knowledge_links kl
+                          JOIN k1_knowledge_nodes kn ON kn.id=kl.knowledge_node_id
+                          WHERE kl.link_set_id=?2 AND kl.source_type='rubric_point'
+                            AND kl.source_public_id=rp.public_id
+                            AND kl.confirmation_level='teacher_confirmed'),''),
+                COALESCE((SELECT group_concat(ad.title,CHAR(31))
+                          FROM k1_ability_links al
+                          JOIN k1_ability_dimensions ad ON ad.id=al.ability_dimension_id
+                          WHERE al.link_set_id=?2 AND al.source_type='rubric_point'
+                            AND al.source_public_id=rp.public_id
+                            AND al.confirmation_level='teacher_confirmed'),'')
+         FROM k1_rubric_points rp
+         WHERE rp.rubric_version_id=?1 ORDER BY rp.order_index,rp.id",
+    )?;
+    let rows = stmt.query_map((rubric_version_id, link_set_id), |row| {
+        Ok(AnswerSourceRubricPointReview {
+            stable_id: row.get(0)?,
+            order_index: row.get(1)?,
+            canonical_text: row.get(2)?,
+            max_score: row.get(3)?,
+            confirmed_knowledge_titles: split_titles(row.get(4)?),
+            confirmed_ability_titles: split_titles(row.get(5)?),
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn materialize_ai_drafts(
@@ -171,18 +233,32 @@ pub fn review_summary(
     let adoption: Option<AnswerSourceAdoptionSummary> = conn
         .query_row(
             "SELECT d.source_assessment_version_id,d.adopted_assessment_version_id,
-                    v.public_id,v.revision,d.changed_item_count
+                    v.public_id,v.revision,d.changed_item_count,d.details_json
              FROM exam_answer_source_adoptions_v2 d
              JOIN exam_assessment_versions_v2 v ON v.id=d.adopted_assessment_version_id
              WHERE d.source_ai_run_id=?1",
             [source_ai_run_id],
             |row| {
+                let details_json: String = row.get(5)?;
+                let details: Value = serde_json::from_str(&details_json).unwrap_or(Value::Null);
                 Ok(AnswerSourceAdoptionSummary {
                     source_assessment_version_id: row.get(0)?,
                     adopted_assessment_version_id: row.get(1)?,
                     adopted_assessment_version_public_id: row.get(2)?,
                     adopted_assessment_revision: row.get(3)?,
                     changed_item_count: row.get(4)?,
+                    changed_rubric_count: details
+                        .get("changed_rubric_count")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0),
+                    carried_knowledge_link_count: details
+                        .get("carried_knowledge_link_count")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0),
+                    carried_ability_link_count: details
+                        .get("carried_ability_link_count")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0),
                     current_batch_unchanged: true,
                 })
             },
@@ -192,6 +268,7 @@ pub fn review_summary(
         "SELECT i.id,i.order_index,
                 COALESCE(json_extract(i.presentation_snapshot_json,'$.question_no'),CAST(i.order_index+1 AS TEXT)),
                 q.question_type,q.stem,i.answer_key_version_id,a.answer_json,
+                i.rubric_version_id,i.link_set_id,
                 c.id,c.candidate_answer_json,c.source_anchor_json
          FROM exam_ingest_batches_v2 b
          JOIN exam_assessment_items_v2 i
@@ -214,9 +291,11 @@ pub fn review_summary(
             row.get::<_, String>(4)?,
             row.get::<_, i64>(5)?,
             row.get::<_, String>(6)?,
-            row.get::<_, Option<i64>>(7)?,
-            row.get::<_, Option<String>>(8)?,
-            row.get::<_, Option<String>>(9)?,
+            row.get::<_, i64>(7)?,
+            row.get::<_, i64>(8)?,
+            row.get::<_, Option<i64>>(9)?,
+            row.get::<_, Option<String>>(10)?,
+            row.get::<_, Option<String>>(11)?,
         ))
     })?;
     let mut items = Vec::new();
@@ -232,6 +311,8 @@ pub fn review_summary(
             question_stem,
             bound_id,
             bound_json,
+            bound_rubric_version_id,
+            bound_link_set_id,
             candidate_id,
             candidate_json,
             anchor_json,
@@ -261,6 +342,13 @@ pub fn review_summary(
             question_stem,
             bound_answer_key_version_id: bound_id,
             bound_answer_json: bound_json,
+            bound_rubric_version_id,
+            bound_link_set_id,
+            bound_rubric_points: rubric_points_for_review(
+                conn,
+                bound_rubric_version_id,
+                bound_link_set_id,
+            )?,
             candidate_id,
             candidate_answer_json: candidate_json,
             source_anchor_json: anchor_json,
@@ -435,6 +523,23 @@ struct AdoptedAnswerSlot {
     max_score: f64,
 }
 
+#[derive(Debug)]
+struct AdoptedRubricPoint {
+    stable_id: String,
+    old_public_id: String,
+    order_index: i64,
+    canonical_text: String,
+    allowed_paraphrases_json: Option<String>,
+    required_concepts_json: Option<String>,
+    max_score: f64,
+}
+
+#[derive(Debug, Default)]
+struct CarriedLinkCounts {
+    knowledge: i64,
+    ability: i64,
+}
+
 #[derive(Serialize)]
 struct AdoptedItemHashInput {
     item_id: i64,
@@ -465,6 +570,126 @@ fn non_empty_string_array<'a>(value: &'a Value, field: &str) -> CoreResult<Vec<&
     if result.is_empty() {
         return Err(CoreError::Invalid(format!("上传答案 {field} 不能为空")));
     }
+    Ok(result)
+}
+
+fn optional_string_array_json(value: &Value, field: &str) -> CoreResult<Option<String>> {
+    let Some(values) = value.get(field) else {
+        return Ok(None);
+    };
+    let values = values
+        .as_array()
+        .ok_or_else(|| CoreError::Invalid(format!("上传评分点 {field} 必须是数组")))?;
+    let mut unique = BTreeSet::new();
+    let mut result = Vec::new();
+    for value in values {
+        let text = value.as_str().map(str::trim).unwrap_or_default();
+        if text.is_empty() || !unique.insert(text) {
+            return Err(CoreError::Invalid(format!(
+                "上传评分点 {field} 含空值或重复值"
+            )));
+        }
+        result.push(text);
+    }
+    if result.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::to_string(&result).map_err(|error| {
+            CoreError::Parse(format!("上传评分点 {field} 序列化失败：{error}"))
+        })?))
+    }
+}
+
+fn validate_short_answer_candidate(
+    conn: &Connection,
+    bound_rubric_version_id: i64,
+    item_score: f64,
+    candidate: &Value,
+) -> CoreResult<Vec<AdoptedRubricPoint>> {
+    let reference_answer = candidate
+        .get("reference_answer")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if reference_answer.is_empty() {
+        return Err(CoreError::Invalid("简答题上传答案缺少参考答案".into()));
+    }
+    let candidate_points = candidate
+        .get("rubric_points")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CoreError::Invalid("简答题上传答案缺少评分点".into()))?;
+    let (rubric_score, rubric_state): (f64, String) = conn.query_row(
+        "SELECT max_score,state FROM k1_rubric_versions WHERE id=?1",
+        [bound_rubric_version_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if rubric_state != "confirmed" || (rubric_score - item_score).abs() > 0.000_001 {
+        return Err(CoreError::Invalid(
+            "当前简答题 rubric 尚未确认或分值与作业不一致".into(),
+        ));
+    }
+    let mut stmt = conn.prepare(
+        "SELECT stable_id,public_id,order_index FROM k1_rubric_points
+         WHERE rubric_version_id=?1 ORDER BY order_index,id",
+    )?;
+    let current_points = stmt
+        .query_map([bound_rubric_version_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if candidate_points.is_empty() || candidate_points.len() != current_points.len() {
+        return Err(CoreError::Invalid(
+            "上传简答评分点数量与当前知识链接结构不同，请老师先逐点补录映射".into(),
+        ));
+    }
+    let mut result = Vec::with_capacity(candidate_points.len());
+    let mut seen = BTreeSet::new();
+    let mut total = 0.0;
+    for (index, point) in candidate_points.iter().enumerate() {
+        let order_index = point
+            .get("order_index")
+            .and_then(Value::as_i64)
+            .unwrap_or(index as i64);
+        if order_index < 0 || !seen.insert(order_index) {
+            return Err(CoreError::Invalid("上传简答评分点顺序非法或重复".into()));
+        }
+        let canonical_text = point
+            .get("canonical_text")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        let max_score = point
+            .get("max_score")
+            .and_then(Value::as_f64)
+            .unwrap_or_default();
+        if canonical_text.is_empty() || !max_score.is_finite() || max_score <= 0.0 {
+            return Err(CoreError::Invalid("上传简答评分点表述或分值非法".into()));
+        }
+        let (stable_id, old_public_id, current_order) = current_points
+            .iter()
+            .find(|(_, _, current_order)| *current_order == order_index)
+            .ok_or_else(|| CoreError::Invalid("上传简答评分点无法按顺序对应当前知识链接".into()))?;
+        total += max_score;
+        result.push(AdoptedRubricPoint {
+            stable_id: stable_id.clone(),
+            old_public_id: old_public_id.clone(),
+            order_index: *current_order,
+            canonical_text: canonical_text.into(),
+            allowed_paraphrases_json: optional_string_array_json(point, "allowed_paraphrases")?,
+            required_concepts_json: optional_string_array_json(point, "required_concepts")?,
+            max_score,
+        });
+    }
+    if (total - rubric_score).abs() > 0.000_001 {
+        return Err(CoreError::Invalid(
+            "上传简答评分点分值之和必须等于本题总分".into(),
+        ));
+    }
+    result.sort_by_key(|point| point.order_index);
     Ok(result)
 }
 
@@ -625,6 +850,224 @@ fn insert_confirmed_answer_version(
     Ok(answer_key_version_id)
 }
 
+fn insert_confirmed_rubric_version(
+    conn: &Connection,
+    question_version_id: i64,
+    bound_rubric_version_id: i64,
+    points: &[AdoptedRubricPoint],
+    confirmed_by: &str,
+    now: &str,
+) -> CoreResult<(i64, BTreeMap<String, String>)> {
+    let revision: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(revision),0)+1 FROM k1_rubric_versions
+         WHERE question_version_id=?1",
+        [question_version_id],
+        |row| row.get(0),
+    )?;
+    let max_score: f64 = points.iter().map(|point| point.max_score).sum();
+    conn.execute(
+        "INSERT INTO k1_rubric_versions
+         (public_id,question_version_id,revision,max_score,state,supersedes_rubric_id,
+          created_at,confirmed_by,confirmed_at)
+         VALUES (?1,?2,?3,?4,'confirmed',?5,?6,?7,?6)",
+        (
+            ids::new_public_id(),
+            question_version_id,
+            revision,
+            max_score,
+            bound_rubric_version_id,
+            now,
+            confirmed_by,
+        ),
+    )?;
+    let rubric_version_id = conn.last_insert_rowid();
+    let mut public_id_map = BTreeMap::new();
+    for point in points {
+        let public_id = ids::new_public_id();
+        conn.execute(
+            "INSERT INTO k1_rubric_points
+             (public_id,stable_id,rubric_version_id,order_index,canonical_text,
+              allowed_paraphrases_json,required_concepts_json,max_score,created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![
+                &public_id,
+                &point.stable_id,
+                rubric_version_id,
+                point.order_index,
+                &point.canonical_text,
+                point.allowed_paraphrases_json.as_deref(),
+                point.required_concepts_json.as_deref(),
+                point.max_score,
+                now,
+            ],
+        )?;
+        public_id_map.insert(point.old_public_id.clone(), public_id);
+    }
+    Ok((rubric_version_id, public_id_map))
+}
+
+fn carry_forward_link_set(
+    conn: &Connection,
+    question_version_id: i64,
+    bound_link_set_id: i64,
+    rubric_point_public_ids: &BTreeMap<String, String>,
+    confirmed_by: &str,
+    now: &str,
+) -> CoreResult<(i64, CarriedLinkCounts)> {
+    let (knowledge_map_id, state): (i64, String) = conn.query_row(
+        "SELECT knowledge_map_id,state FROM k1_link_sets WHERE id=?1 AND question_version_id=?2",
+        (bound_link_set_id, question_version_id),
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if state != "confirmed" {
+        return Err(CoreError::Invalid(
+            "当前简答题知识链接集尚未确认，不能自动沿用".into(),
+        ));
+    }
+    let revision: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(revision),0)+1 FROM k1_link_sets WHERE question_version_id=?1",
+        [question_version_id],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO k1_link_sets
+         (public_id,question_version_id,knowledge_map_id,revision,state,supersedes_link_set_id,
+          created_at,confirmed_by,confirmed_at)
+         VALUES (?1,?2,?3,?4,'confirmed',?5,?6,?7,?6)",
+        (
+            ids::new_public_id(),
+            question_version_id,
+            knowledge_map_id,
+            revision,
+            bound_link_set_id,
+            now,
+            confirmed_by,
+        ),
+    )?;
+    let link_set_id = conn.last_insert_rowid();
+    let mut counts = CarriedLinkCounts::default();
+
+    let mut knowledge_stmt = conn.prepare(
+        "SELECT source_type,source_public_id,knowledge_node_id,relation_type,confirmation_level
+         FROM k1_knowledge_links WHERE link_set_id=?1 ORDER BY id",
+    )?;
+    let knowledge_rows = knowledge_stmt
+        .query_map([bound_link_set_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(knowledge_stmt);
+    for (source_type, old_source_public_id, target_id, relation_type, confirmation_level) in
+        knowledge_rows
+    {
+        let source_public_id = match source_type.as_str() {
+            "rubric_point" => rubric_point_public_ids
+                .get(&old_source_public_id)
+                .cloned()
+                .ok_or_else(|| {
+                    CoreError::Invalid("当前知识链接无法对应新的简答评分点，请老师逐点补录".into())
+                })?,
+            "answer_slot" => {
+                return Err(CoreError::Invalid(
+                    "简答题知识链接不能引用填空答案槽位".into(),
+                ))
+            }
+            _ => old_source_public_id,
+        };
+        let teacher_confirmed = confirmation_level == "teacher_confirmed";
+        conn.execute(
+            "INSERT INTO k1_knowledge_links
+             (public_id,link_set_id,source_type,source_public_id,knowledge_node_id,
+              relation_type,confirmation_level,verified_by,verified_at,created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                ids::new_public_id(),
+                link_set_id,
+                &source_type,
+                &source_public_id,
+                target_id,
+                &relation_type,
+                &confirmation_level,
+                teacher_confirmed.then_some(confirmed_by),
+                teacher_confirmed.then_some(now),
+                now,
+            ],
+        )?;
+        counts.knowledge += 1;
+    }
+
+    let mut ability_stmt = conn.prepare(
+        "SELECT source_type,source_public_id,ability_dimension_id,evidence_strength,
+                response_mode,confirmation_level
+         FROM k1_ability_links WHERE link_set_id=?1 ORDER BY id",
+    )?;
+    let ability_rows = ability_stmt
+        .query_map([bound_link_set_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(ability_stmt);
+    for (
+        source_type,
+        old_source_public_id,
+        target_id,
+        evidence_strength,
+        response_mode,
+        confirmation_level,
+    ) in ability_rows
+    {
+        let source_public_id = match source_type.as_str() {
+            "rubric_point" => rubric_point_public_ids
+                .get(&old_source_public_id)
+                .cloned()
+                .ok_or_else(|| {
+                    CoreError::Invalid("当前能力链接无法对应新的简答评分点，请老师逐点补录".into())
+                })?,
+            "answer_slot" => {
+                return Err(CoreError::Invalid(
+                    "简答题能力链接不能引用填空答案槽位".into(),
+                ))
+            }
+            _ => old_source_public_id,
+        };
+        let teacher_confirmed = confirmation_level == "teacher_confirmed";
+        conn.execute(
+            "INSERT INTO k1_ability_links
+             (public_id,link_set_id,source_type,source_public_id,ability_dimension_id,
+              evidence_strength,response_mode,confirmation_level,verified_by,verified_at,created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![
+                ids::new_public_id(),
+                link_set_id,
+                &source_type,
+                &source_public_id,
+                target_id,
+                evidence_strength,
+                &response_mode,
+                &confirmation_level,
+                teacher_confirmed.then_some(confirmed_by),
+                teacher_confirmed.then_some(now),
+                now,
+            ],
+        )?;
+        counts.ability += 1;
+    }
+    Ok((link_set_id, counts))
+}
+
 /// 将全部高置信冲突答案保存为新的 K1 答案版本和新的作业版本。
 ///
 /// 当前 ingest batch 始终继续引用原作业版本；该操作同时把当前批次明确决议为
@@ -724,6 +1167,9 @@ pub fn adopt_conflicts_as_new_version(
 
     let mut hash_items = Vec::with_capacity(rows.len());
     let mut changed_items = Vec::new();
+    let mut changed_rubric_count = 0;
+    let mut carried_knowledge_link_count = 0;
+    let mut carried_ability_link_count = 0;
     for (
         source_item_id,
         question_version_id,
@@ -742,38 +1188,90 @@ pub fn adopt_conflicts_as_new_version(
             .iter()
             .find(|item| item.assessment_item_id == source_item_id)
             .ok_or_else(|| CoreError::Invalid("答案核对题目集合与作业版本不一致".into()))?;
-        let answer_key_version_id = if review_item.match_state == "conflict" {
-            let candidate_json = review_item
-                .candidate_answer_json
-                .as_deref()
-                .ok_or_else(|| CoreError::Invalid("冲突项缺少上传答案候选".into()))?;
-            let candidate = parse_object(candidate_json, "上传答案")?;
-            let slots = validate_adoptable_candidate(
-                &tx,
-                &question_type,
-                question_version_id,
-                bound_answer_key_version_id,
-                &candidate,
-            )?;
-            let new_answer_key_version_id = insert_confirmed_answer_version(
-                &tx,
-                question_version_id,
-                bound_answer_key_version_id,
-                &candidate.to_string(),
-                &slots,
-                confirmed_by.trim(),
-                &now,
-            )?;
-            changed_items.push(serde_json::json!({
-                "source_assessment_item_id": source_item_id,
-                "question_version_id": question_version_id,
-                "old_answer_key_version_id": bound_answer_key_version_id,
-                "new_answer_key_version_id": new_answer_key_version_id,
-            }));
-            new_answer_key_version_id
-        } else {
-            bound_answer_key_version_id
-        };
+        let (answer_key_version_id, rubric_version_id, link_set_id) =
+            if review_item.match_state == "conflict" {
+                let candidate_json = review_item
+                    .candidate_answer_json
+                    .as_deref()
+                    .ok_or_else(|| CoreError::Invalid("冲突项缺少上传答案候选".into()))?;
+                let candidate = parse_object(candidate_json, "上传答案")?;
+                let (slots, rubric_points) = if question_type == "short_answer" {
+                    (
+                        Vec::new(),
+                        Some(validate_short_answer_candidate(
+                            &tx,
+                            rubric_version_id,
+                            score,
+                            &candidate,
+                        )?),
+                    )
+                } else {
+                    (
+                        validate_adoptable_candidate(
+                            &tx,
+                            &question_type,
+                            question_version_id,
+                            bound_answer_key_version_id,
+                            &candidate,
+                        )?,
+                        None,
+                    )
+                };
+                let new_answer_key_version_id = insert_confirmed_answer_version(
+                    &tx,
+                    question_version_id,
+                    bound_answer_key_version_id,
+                    &candidate.to_string(),
+                    &slots,
+                    confirmed_by.trim(),
+                    &now,
+                )?;
+                let (new_rubric_version_id, new_link_set_id, link_counts) =
+                    if let Some(points) = rubric_points {
+                        let (new_rubric_version_id, point_public_ids) =
+                            insert_confirmed_rubric_version(
+                                &tx,
+                                question_version_id,
+                                rubric_version_id,
+                                &points,
+                                confirmed_by.trim(),
+                                &now,
+                            )?;
+                        let (new_link_set_id, link_counts) = carry_forward_link_set(
+                            &tx,
+                            question_version_id,
+                            link_set_id,
+                            &point_public_ids,
+                            confirmed_by.trim(),
+                            &now,
+                        )?;
+                        changed_rubric_count += 1;
+                        carried_knowledge_link_count += link_counts.knowledge;
+                        carried_ability_link_count += link_counts.ability;
+                        (new_rubric_version_id, new_link_set_id, link_counts)
+                    } else {
+                        (rubric_version_id, link_set_id, CarriedLinkCounts::default())
+                    };
+                changed_items.push(serde_json::json!({
+                    "source_assessment_item_id": source_item_id,
+                    "question_version_id": question_version_id,
+                    "old_answer_key_version_id": bound_answer_key_version_id,
+                    "new_answer_key_version_id": new_answer_key_version_id,
+                    "old_rubric_version_id": rubric_version_id,
+                    "new_rubric_version_id": new_rubric_version_id,
+                    "old_link_set_id": link_set_id,
+                    "new_link_set_id": new_link_set_id,
+                    "carried_knowledge_link_count": link_counts.knowledge,
+                    "carried_ability_link_count": link_counts.ability,
+                }));
+                (
+                    new_answer_key_version_id,
+                    new_rubric_version_id,
+                    new_link_set_id,
+                )
+            } else {
+                (bound_answer_key_version_id, rubric_version_id, link_set_id)
+            };
         tx.execute(
             "INSERT INTO exam_assessment_items_v2
              (public_id,assessment_version_id,question_version_id,answer_key_version_id,
@@ -836,6 +1334,9 @@ pub fn adopt_conflicts_as_new_version(
         "source_assessment_version_id": source_assessment_version_id,
         "adopted_assessment_version_id": adopted_assessment_version_id,
         "current_batch_unchanged": true,
+        "changed_rubric_count": changed_rubric_count,
+        "carried_knowledge_link_count": carried_knowledge_link_count,
+        "carried_ability_link_count": carried_ability_link_count,
         "changed_items": changed_items,
     })
     .to_string();
@@ -1050,6 +1551,36 @@ mod tests {
                          'teacher','2026-07-15T10:00:00Z','2026-07-15T10:00:00Z');"#
         ))
         .unwrap();
+        if question_type == "short_answer" {
+            conn.execute_batch(
+                r#"INSERT INTO k1_rubric_points
+                     (public_id,stable_id,rubric_version_id,order_index,canonical_text,
+                      allowed_paraphrases_json,required_concepts_json,max_score,created_at)
+                   VALUES ('answer-source-rp','stable-rp',1,0,'旧评分点',
+                           '["旧允许表达"]','["旧概念"]',1,'2026-07-15T10:00:00Z');
+                   INSERT INTO k1_knowledge_nodes
+                     (public_id,stable_id,knowledge_map_id,code,title,order_index,state,created_at)
+                   VALUES ('answer-source-kn','stable-kn',1,'KN-1','鸦片战争影响',0,'active',
+                           '2026-07-15T10:00:00Z');
+                   INSERT INTO k1_ability_dimensions
+                     (public_id,stable_id,subject_id,revision,code,title,state,created_at)
+                   VALUES ('answer-source-ad','stable-ad',1,1,'CAUSE','因果分析','active',
+                           '2026-07-15T10:00:00Z');
+                   INSERT INTO k1_knowledge_links
+                     (public_id,link_set_id,source_type,source_public_id,knowledge_node_id,
+                      relation_type,confirmation_level,verified_by,verified_at,created_at)
+                   VALUES ('answer-source-kl',1,'rubric_point','answer-source-rp',1,
+                           'rubric_basis','teacher_confirmed','teacher',
+                           '2026-07-15T10:00:00Z','2026-07-15T10:00:00Z');
+                   INSERT INTO k1_ability_links
+                     (public_id,link_set_id,source_type,source_public_id,ability_dimension_id,
+                      evidence_strength,response_mode,confirmation_level,verified_by,verified_at,created_at)
+                   VALUES ('answer-source-al',1,'rubric_point','answer-source-rp',1,0.8,
+                           'structured_response','teacher_confirmed','teacher',
+                           '2026-07-15T10:00:00Z','2026-07-15T10:00:00Z');"#,
+            )
+            .unwrap();
+        }
         let artifact = artifacts::create_or_get(
             &conn,
             &artifacts::NewArtifact {
@@ -1339,13 +1870,118 @@ mod tests {
     }
 
     #[test]
-    fn short_answer_conflict_requires_teacher_rubric_instead_of_partial_version() {
+    fn short_answer_conflict_creates_confirmed_rubric_and_carries_verified_links() {
         let mut fixture = fixture_with_candidate(
             "short_answer",
             serde_json::json!({
                 "schema_version": 1,
                 "reference_answer": "需要新的参考答案",
-                "rubric_points": [{"canonical_text":"评分点一","max_score":1}],
+                "rubric_points": [{
+                    "order_index": 0,
+                    "canonical_text":"新评分点一",
+                    "allowed_paraphrases":["等价表述"],
+                    "required_concepts":["核心概念"],
+                    "max_score":1
+                }],
+            }),
+        );
+        let adopted = adopt_conflicts_as_new_version(
+            &mut fixture.conn,
+            fixture.batch_id,
+            fixture.run_id,
+            "teacher",
+        )
+        .unwrap();
+        let adoption = adopted.adoption.unwrap();
+        assert_eq!(adoption.changed_rubric_count, 1);
+        assert_eq!(adoption.carried_knowledge_link_count, 1);
+        assert_eq!(adoption.carried_ability_link_count, 1);
+        let new_version_id = adoption.adopted_assessment_version_id;
+        let adopted_versions: (i64, i64, i64) = fixture
+            .conn
+            .query_row(
+                "SELECT answer_key_version_id,rubric_version_id,link_set_id
+                 FROM exam_assessment_items_v2 WHERE assessment_version_id=?1",
+                [new_version_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_ne!(adopted_versions.0, 1);
+        assert_ne!(adopted_versions.1, 1);
+        assert_ne!(adopted_versions.2, 1);
+        let point: (String, String, String, String, f64) = fixture
+            .conn
+            .query_row(
+                "SELECT stable_id,canonical_text,allowed_paraphrases_json,
+                        required_concepts_json,max_score
+                 FROM k1_rubric_points WHERE rubric_version_id=?1",
+                [adopted_versions.1],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(point.0, "stable-rp");
+        assert_eq!(point.1, "新评分点一");
+        assert_eq!(point.2, "[\"等价表述\"]");
+        assert_eq!(point.3, "[\"核心概念\"]");
+        assert_eq!(point.4, 1.0);
+        let carried: (i64, i64, String, String) = fixture
+            .conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM k1_knowledge_links WHERE link_set_id=?1),
+                   (SELECT COUNT(*) FROM k1_ability_links WHERE link_set_id=?1),
+                   (SELECT source_public_id FROM k1_knowledge_links WHERE link_set_id=?1),
+                   (SELECT confirmation_level FROM k1_knowledge_links WHERE link_set_id=?1)",
+                [adopted_versions.2],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (carried.0, carried.1, carried.3.as_str()),
+            (1, 1, "teacher_confirmed")
+        );
+        assert_ne!(carried.2, "answer-source-rp");
+        let effects: (i64, i64, i64) = fixture
+            .conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM exam_grade_decisions_v2),
+                        (SELECT COUNT(*) FROM exam_grade_publications_v2),
+                        (SELECT COUNT(*) FROM learning_evidence)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(effects, (0, 0, 0));
+        let current_batch_version: i64 = fixture
+            .conn
+            .query_row(
+                "SELECT assessment_version_id FROM exam_ingest_batches_v2 WHERE id=?1",
+                [fixture.batch_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(current_batch_version, 1);
+    }
+
+    #[test]
+    fn short_answer_point_shape_change_rolls_back_every_new_version() {
+        let mut fixture = fixture_with_candidate(
+            "short_answer",
+            serde_json::json!({
+                "schema_version": 1,
+                "reference_answer": "需要新的参考答案",
+                "rubric_points": [
+                    {"order_index":0,"canonical_text":"评分点一","max_score":0.5},
+                    {"order_index":1,"canonical_text":"评分点二","max_score":0.5}
+                ],
             }),
         );
         let error = adopt_conflicts_as_new_version(
@@ -1355,18 +1991,28 @@ mod tests {
             "teacher",
         )
         .unwrap_err();
-        assert!(error.to_string().contains("评分点"));
-        let counts: (i64, i64, i64) = fixture
+        assert!(error.to_string().contains("数量"));
+        let counts: (i64, i64, i64, i64, i64) = fixture
             .conn
             .query_row(
                 "SELECT (SELECT COUNT(*) FROM exam_assessment_versions_v2),
                         (SELECT COUNT(*) FROM k1_answer_key_versions),
+                        (SELECT COUNT(*) FROM k1_rubric_versions),
+                        (SELECT COUNT(*) FROM k1_link_sets),
                         (SELECT COUNT(*) FROM exam_answer_source_adoptions_v2)",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .unwrap();
-        assert_eq!(counts, (1, 1, 0));
+        assert_eq!(counts, (1, 1, 1, 1, 0));
     }
 
     #[test]
