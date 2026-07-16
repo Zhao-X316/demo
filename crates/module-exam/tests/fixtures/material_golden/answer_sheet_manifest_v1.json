@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "dataset_id": "answer-sheet-synthetic-contract-v1",
+  "material_kind": "answer_sheet",
+  "production_accuracy_claim_allowed": false,
+  "governance": {
+    "storage_scope": "repository_synthetic",
+    "personal_identifiers_removed": true,
+    "privacy_reviewed": true,
+    "privacy_reviewed_by": "contract-fixture",
+    "retention_policy_version": "synthetic-no-retention-v1"
+  },
+  "cases": [
+    {
+      "case_id": "answer-sheet-normal",
+      "source_kind": "synthetic_contract",
+      "artifact_sha256": null,
+      "expected_route": "ready_for_batch_confirm",
+      "expected_units": [
+        {
+          "unit_key": "question-1-bubble",
+          "expected_state": "recognized",
+          "expected_value_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ],
+      "issue_tags": ["normal"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "answer-sheet-blank",
+      "source_kind": "synthetic_contract",
+      "artifact_sha256": null,
+      "expected_route": "review_required",
+      "expected_units": [
+        {
+          "unit_key": "question-1-bubble",
+          "expected_state": "blank",
+          "expected_value_sha256": null
+        }
+      ],
+      "issue_tags": ["blank"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "answer-sheet-multiple-marks",
+      "source_kind": "synthetic_contract",
+      "artifact_sha256": null,
+      "expected_route": "review_required",
+      "expected_units": [
+        {
+          "unit_key": "question-1-bubble",
+          "expected_state": "altered",
+          "expected_value_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      ],
+      "issue_tags": ["multiple_marks"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "answer-sheet-erasure",
+      "source_kind": "synthetic_contract",
+      "artifact_sha256": null,
+      "expected_route": "review_required",
+      "expected_units": [
+        {
+          "unit_key": "question-2-bubble",
+          "expected_state": "altered",
+          "expected_value_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "issue_tags": ["erasure"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "answer-sheet-shadow",
+      "source_kind": "synthetic_contract",
+      "artifact_sha256": null,
+      "expected_route": "review_required",
+      "expected_units": [
+        {
+          "unit_key": "question-3-bubble",
+          "expected_state": "low_confidence",
+          "expected_value_sha256": null
+        }
+      ],
+      "issue_tags": ["shadow"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "answer-sheet-template-mismatch",
+      "source_kind": "synthetic_contract",
+      "artifact_sha256": null,
+      "expected_route": "blocked",
+      "expected_units": [],
+      "issue_tags": ["template_mismatch"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    }
+  ]
+}

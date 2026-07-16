@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "dataset_id": "dictation-synthetic-contract-v1",
+  "material_kind": "dictation",
+  "production_accuracy_claim_allowed": false,
+  "governance": {
+    "storage_scope": "repository_synthetic",
+    "personal_identifiers_removed": true,
+    "privacy_reviewed": true,
+    "privacy_reviewed_by": "contract-fixture",
+    "retention_policy_version": "synthetic-no-retention-v1"
+  },
+  "cases": [
+    {
+      "case_id": "dictation-normal",
+      "source_kind": "synthetic_contract",
+      "artifact_sha256": null,
+      "expected_route": "ready_for_batch_confirm",
+      "expected_units": [
+        {
+          "unit_key": "line-1-point-1",
+          "expected_state": "recognized",
+          "expected_value_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      ],
+      "issue_tags": ["normal"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "dictation-blank",
+      "source_kind": "synthetic_contract",
+      "artifact_sha256": null,
+      "expected_route": "review_required",
+      "expected_units": [
+        {
+          "unit_key": "line-1-point-1",
+          "expected_state": "blank",
+          "expected_value_sha256": null
+        }
+      ],
+      "issue_tags": ["blank"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "dictation-wrong-text",
+      "source_kind": "synthetic_contract",
+      "artifact_sha256": null,
+      "expected_route": "review_required",
+      "expected_units": [
+        {
+          "unit_key": "line-2-point-1",
+          "expected_state": "recognized",
+          "expected_value_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        }
+      ],
+      "issue_tags": ["wrong_text"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "dictation-ambiguous-glyph",
+      "source_kind": "synthetic_contract",
+      "artifact_sha256": null,
+      "expected_route": "review_required",
+      "expected_units": [
+        {
+          "unit_key": "line-3-point-1",
+          "expected_state": "low_confidence",
+          "expected_value_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+        }
+      ],
+      "issue_tags": ["ambiguous_glyph"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "dictation-erasure",
+      "source_kind": "synthetic_contract",
+      "artifact_sha256": null,
+      "expected_route": "review_required",
+      "expected_units": [
+        {
+          "unit_key": "line-4-point-1",
+          "expected_state": "altered",
+          "expected_value_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+        }
+      ],
+      "issue_tags": ["erasure"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "dictation-ocr-failed",
+      "source_kind": "synthetic_contract",
+      "artifact_sha256": null,
+      "expected_route": "blocked",
+      "expected_units": [
+        {
+          "unit_key": "line-5-point-1",
+          "expected_state": "failed",
+          "expected_value_sha256": null
+        }
+      ],
+      "issue_tags": ["ocr_failed"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    }
+  ]
+}

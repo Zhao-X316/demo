@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "dataset_id": "ordinary-paper-synthetic-contract-v1",
+  "predictions": [
+    {
+      "case_id": "ordinary-normal",
+      "predicted_route": "ready_for_batch_confirm",
+      "predicted_units": [
+        {
+          "unit_key": "page-1-question-1",
+          "predicted_state": "recognized",
+          "predicted_value_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ]
+    },
+    {
+      "case_id": "ordinary-blur",
+      "predicted_route": "review_required",
+      "predicted_units": [
+        {
+          "unit_key": "page-1-quality",
+          "predicted_state": "low_confidence",
+          "predicted_value_sha256": null
+        }
+      ]
+    },
+    {
+      "case_id": "ordinary-rotation",
+      "predicted_route": "review_required",
+      "predicted_units": [
+        {
+          "unit_key": "page-1-orientation",
+          "predicted_state": "low_confidence",
+          "predicted_value_sha256": null
+        }
+      ]
+    },
+    {
+      "case_id": "ordinary-missing-page",
+      "predicted_route": "blocked",
+      "predicted_units": []
+    },
+    {
+      "case_id": "ordinary-duplicate-page",
+      "predicted_route": "blocked",
+      "predicted_units": []
+    },
+    {
+      "case_id": "ordinary-template-mismatch",
+      "predicted_route": "blocked",
+      "predicted_units": []
+    }
+  ]
+}

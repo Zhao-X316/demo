@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "dataset_id": "ordinary-paper-synthetic-contract-v1",
+  "material_kind": "ordinary_paper",
+  "production_accuracy_claim_allowed": false,
+  "governance": {
+    "storage_scope": "repository_synthetic",
+    "personal_identifiers_removed": true,
+    "privacy_reviewed": true,
+    "privacy_reviewed_by": "contract-fixture",
+    "retention_policy_version": "synthetic-no-retention-v1"
+  },
+  "cases": [
+    {
+      "case_id": "ordinary-normal",
+      "source_kind": "synthetic_contract",
+      "artifact_sha256": null,
+      "expected_route": "ready_for_batch_confirm",
+      "expected_units": [
+        {
+          "unit_key": "page-1-question-1",
+          "expected_state": "recognized",
+          "expected_value_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "issue_tags": ["normal"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "ordinary-blur",
+      "source_kind": "synthetic_contract",
+      "artifact_sha256": null,
+      "expected_route": "review_required",
+      "expected_units": [
+        {
+          "unit_key": "page-1-quality",
+          "expected_state": "low_confidence",
+          "expected_value_sha256": null
+        }
+      ],
+      "issue_tags": ["blur"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "ordinary-rotation",
+      "source_kind": "synthetic_contract",
+      "artifact_sha256": null,
+      "expected_route": "review_required",
+      "expected_units": [
+        {
+          "unit_key": "page-1-orientation",
+          "expected_state": "low_confidence",
+          "expected_value_sha256": null
+        }
+      ],
+      "issue_tags": ["rotation"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "ordinary-missing-page",
+      "source_kind": "synthetic_contract",
+      "artifact_sha256": null,
+      "expected_route": "blocked",
+      "expected_units": [],
+      "issue_tags": ["missing_page"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "ordinary-duplicate-page",
+      "source_kind": "synthetic_contract",
+      "artifact_sha256": null,
+      "expected_route": "blocked",
+      "expected_units": [],
+      "issue_tags": ["duplicate_page"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    },
+    {
+      "case_id": "ordinary-template-mismatch",
+      "source_kind": "synthetic_contract",
+      "artifact_sha256": null,
+      "expected_route": "blocked",
+      "expected_units": [],
+      "issue_tags": ["template_mismatch"],
+      "annotation_revision": 1,
+      "annotated_by": "contract-fixture"
+    }
+  ]
+}

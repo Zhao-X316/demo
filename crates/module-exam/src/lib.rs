@@ -9,6 +9,7 @@ pub mod answer_source_recognition;
 pub mod db;
 pub mod dictation;
 pub mod dictation_recognition;
+pub mod material_golden;
 pub mod objective_recognition;
 pub mod ordinary_paper_recognition;
 pub mod service;
