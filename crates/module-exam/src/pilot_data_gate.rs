@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 use suite_core::domain::hashing;
 use suite_core::error::{CoreError, CoreResult};
 
+use crate::pilot_data_rights::{
+    PilotDataRightsAction, PilotDataRightsEvidenceBundle, PilotDataRightsScopeKind,
+};
+
 pub const PILOT_DATA_GATE_SCHEMA_VERSION: i64 = 1;
 pub const PILOT_MAX_LOCAL_RETENTION_DAYS: i64 = 31;
 pub const PILOT_MAX_CLOUD_TTL_SECONDS: i64 = 86_400;
@@ -66,7 +70,7 @@ pub struct PilotDataRightsGate {
     pub batch_delete_procedure_version: String,
     pub deletion_receipt_excludes_content: bool,
     pub dry_run_verified_at: Option<String>,
-    pub dry_run_succeeded: bool,
+    pub dry_run_evidence_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,6 +211,9 @@ impl PilotDataGateManifest {
         if let Some(verified_at) = self.rights.dry_run_verified_at.as_deref() {
             parse_rfc3339(verified_at, "导出/删除演练时间")?;
         }
+        if let Some(hash) = self.rights.dry_run_evidence_sha256.as_deref() {
+            normalized_sha256(hash, "导出/删除演练证据 hash")?;
+        }
 
         let mut provider_refs = BTreeSet::new();
         for processor in &self.cloud_processors {
@@ -247,7 +254,11 @@ impl PilotDataGateManifest {
         Ok(hashing::sha256_hex(&bytes))
     }
 
-    pub fn evaluate(&self, evaluated_on: &str) -> CoreResult<PilotDataGateReport> {
+    fn evaluate_internal(
+        &self,
+        evaluated_on: &str,
+        rights_evidence: Option<&PilotDataRightsEvidenceBundle>,
+    ) -> CoreResult<PilotDataGateReport> {
         self.validate()?;
         let evaluated_date = parse_date(evaluated_on, "闸门评估日期")?;
         let starts_on = parse_date(&self.starts_on, "试点开始日期")?;
@@ -294,16 +305,54 @@ impl PilotDataGateManifest {
         if !self.notice.required_authorization_completed {
             reasons.insert("AUTHORIZATION_INCOMPLETE".to_owned());
         }
-        let dry_run_verified = match self.rights.dry_run_verified_at.as_deref() {
-            Some(value) => {
-                parse_rfc3339(value, "导出/删除演练时间")?.date_naive() <= evaluated_date
+        let dry_run_verified = match (
+            self.rights.dry_run_verified_at.as_deref(),
+            self.rights.dry_run_evidence_sha256.as_deref(),
+            rights_evidence,
+        ) {
+            (Some(verified_at), Some(expected_hash), Some(evidence)) => {
+                let verified_at = parse_rfc3339(verified_at, "导出/删除演练时间")?;
+                let evidence_time = parse_rfc3339(&evidence.generated_at, "证据生成时间")?;
+                let expected_versions = [
+                    (
+                        PilotDataRightsScopeKind::Student,
+                        PilotDataRightsAction::Export,
+                        self.rights.student_export_procedure_version.as_str(),
+                    ),
+                    (
+                        PilotDataRightsScopeKind::Batch,
+                        PilotDataRightsAction::Export,
+                        self.rights.batch_export_procedure_version.as_str(),
+                    ),
+                    (
+                        PilotDataRightsScopeKind::Student,
+                        PilotDataRightsAction::Delete,
+                        self.rights.student_delete_procedure_version.as_str(),
+                    ),
+                    (
+                        PilotDataRightsScopeKind::Batch,
+                        PilotDataRightsAction::Delete,
+                        self.rights.batch_delete_procedure_version.as_str(),
+                    ),
+                ];
+                evidence.validate().is_ok()
+                    && evidence.gate_id == self.gate_id
+                    && evidence
+                        .evidence_sha256()?
+                        .eq_ignore_ascii_case(expected_hash)
+                    && evidence_time == verified_at
+                    && evidence_time.date_naive() <= evaluated_date
+                    && expected_versions.iter().all(|(scope, action, version)| {
+                        evidence.receipts.iter().any(|receipt| {
+                            receipt.payload.scope_kind == *scope
+                                && receipt.payload.action == *action
+                                && receipt.payload.procedure_version == *version
+                        })
+                    })
             }
-            None => false,
+            _ => false,
         };
-        if !self.rights.dry_run_succeeded
-            || !dry_run_verified
-            || !self.rights.deletion_receipt_excludes_content
-        {
+        if !dry_run_verified || !self.rights.deletion_receipt_excludes_content {
             reasons.insert("DATA_RIGHTS_NOT_VERIFIED".to_owned());
         }
         if !self.diagnostics.default_excludes_student_name
@@ -340,13 +389,108 @@ impl PilotDataGateManifest {
             denial_reasons,
         })
     }
+
+    /// 无外部演练证据时始终 fail-closed；仅用于合同预检。
+    pub fn evaluate(&self, evaluated_on: &str) -> CoreResult<PilotDataGateReport> {
+        self.evaluate_internal(evaluated_on, None)
+    }
+
+    /// 真实材料放行入口：四类实际 dry-run 回执集合必须与闸门冻结 hash 一致。
+    pub fn evaluate_with_rights_evidence(
+        &self,
+        evaluated_on: &str,
+        rights_evidence: &PilotDataRightsEvidenceBundle,
+    ) -> CoreResult<PilotDataGateReport> {
+        self.evaluate_internal(evaluated_on, Some(rights_evidence))
+    }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::pilot_data_rights::{
+        PilotDataRightsMode, PilotDataRightsOutcome, PilotDataRightsReceipt,
+        PilotDataRightsReceiptPayload, PILOT_BATCH_DELETE_PROCEDURE_VERSION,
+        PILOT_BATCH_EXPORT_PROCEDURE_VERSION, PILOT_DATA_RIGHTS_RECEIPT_SCHEMA_VERSION,
+        PILOT_STUDENT_DELETE_PROCEDURE_VERSION, PILOT_STUDENT_EXPORT_PROCEDURE_VERSION,
+    };
+
+    fn rights_receipt(
+        discriminator: char,
+        scope_kind: PilotDataRightsScopeKind,
+        action: PilotDataRightsAction,
+        procedure_version: &str,
+    ) -> PilotDataRightsReceipt {
+        PilotDataRightsReceipt::new(PilotDataRightsReceiptPayload {
+            schema_version: PILOT_DATA_RIGHTS_RECEIPT_SCHEMA_VERSION,
+            receipt_id: format!("receipt-{discriminator}"),
+            request_sha256: discriminator.to_string().repeat(64),
+            idempotency_key_sha256: discriminator.to_ascii_uppercase().to_string().repeat(64),
+            gate_id: "pilot-gate-opaque-001".into(),
+            dataset_id: "pilot-dataset-opaque-001".into(),
+            action,
+            mode: PilotDataRightsMode::DryRun,
+            scope_kind,
+            scope_ref_sha256: "e".repeat(64),
+            procedure_version: procedure_version.into(),
+            dataset_content_sha256_before: "d".repeat(64),
+            dataset_content_sha256_after: "d".repeat(64),
+            outcome: PilotDataRightsOutcome::Succeeded,
+            selected_asset_count: 1,
+            verified_asset_count: 1,
+            already_deleted_count: 0,
+            total_bytes: 42,
+            exported_asset_count: 0,
+            deleted_asset_count: 0,
+            export_manifest_sha256: None,
+            blocker_codes: Vec::new(),
+            content_excluded: true,
+            paths_excluded: true,
+            student_identity_excluded: true,
+            completed_at: "2026-06-30T07:30:00Z".into(),
+        })
+        .unwrap()
+    }
+
+    pub(crate) fn approved_rights_evidence() -> PilotDataRightsEvidenceBundle {
+        let evidence = PilotDataRightsEvidenceBundle {
+            schema_version: 1,
+            gate_id: "pilot-gate-opaque-001".into(),
+            dataset_id: "pilot-dataset-opaque-001".into(),
+            generated_at: "2026-06-30T08:00:00Z".into(),
+            receipts: vec![
+                rights_receipt(
+                    '1',
+                    PilotDataRightsScopeKind::Student,
+                    PilotDataRightsAction::Export,
+                    PILOT_STUDENT_EXPORT_PROCEDURE_VERSION,
+                ),
+                rights_receipt(
+                    '2',
+                    PilotDataRightsScopeKind::Batch,
+                    PilotDataRightsAction::Export,
+                    PILOT_BATCH_EXPORT_PROCEDURE_VERSION,
+                ),
+                rights_receipt(
+                    '3',
+                    PilotDataRightsScopeKind::Student,
+                    PilotDataRightsAction::Delete,
+                    PILOT_STUDENT_DELETE_PROCEDURE_VERSION,
+                ),
+                rights_receipt(
+                    '4',
+                    PilotDataRightsScopeKind::Batch,
+                    PilotDataRightsAction::Delete,
+                    PILOT_BATCH_DELETE_PROCEDURE_VERSION,
+                ),
+            ],
+        };
+        evidence.validate().unwrap();
+        evidence
+    }
 
     pub(crate) fn approved_real_gate() -> PilotDataGateManifest {
+        let evidence = approved_rights_evidence();
         PilotDataGateManifest {
             schema_version: 1,
             gate_id: "pilot-gate-opaque-001".into(),
@@ -374,13 +518,13 @@ pub(crate) mod tests {
                 cloud_processing_disclosed: true,
             },
             rights: PilotDataRightsGate {
-                student_export_procedure_version: "student-export-v1".into(),
-                batch_export_procedure_version: "batch-export-v1".into(),
-                student_delete_procedure_version: "student-delete-v1".into(),
-                batch_delete_procedure_version: "batch-delete-v1".into(),
+                student_export_procedure_version: PILOT_STUDENT_EXPORT_PROCEDURE_VERSION.into(),
+                batch_export_procedure_version: PILOT_BATCH_EXPORT_PROCEDURE_VERSION.into(),
+                student_delete_procedure_version: PILOT_STUDENT_DELETE_PROCEDURE_VERSION.into(),
+                batch_delete_procedure_version: PILOT_BATCH_DELETE_PROCEDURE_VERSION.into(),
                 deletion_receipt_excludes_content: true,
                 dry_run_verified_at: Some("2026-06-30T08:00:00Z".into()),
-                dry_run_succeeded: true,
+                dry_run_evidence_sha256: Some(evidence.evidence_sha256().unwrap()),
             },
             diagnostics: PilotDiagnosticGate {
                 default_excludes_student_name: true,
@@ -409,12 +553,17 @@ pub(crate) mod tests {
     #[test]
     fn complete_real_gate_allows_only_its_active_window() {
         let gate = approved_real_gate();
-        let report = gate.evaluate("2026-07-15").unwrap();
+        let evidence = approved_rights_evidence();
+        let report = gate
+            .evaluate_with_rights_evidence("2026-07-15", &evidence)
+            .unwrap();
         assert!(report.real_data_allowed);
         assert!(report.denial_reasons.is_empty());
         assert_eq!(report.policy_sha256, gate.policy_sha256().unwrap());
 
-        let expired = gate.evaluate("2026-08-01").unwrap();
+        let expired = gate
+            .evaluate_with_rights_evidence("2026-08-01", &evidence)
+            .unwrap();
         assert!(!expired.real_data_allowed);
         assert_eq!(expired.denial_reasons, vec!["GATE_EXPIRED"]);
     }
@@ -422,11 +571,14 @@ pub(crate) mod tests {
     #[test]
     fn contract_fixture_and_draft_can_never_allow_real_student_data() {
         let mut gate = approved_real_gate();
+        let evidence = approved_rights_evidence();
         gate.scope_kind = PilotGateScopeKind::ContractFixture;
         gate.state = PilotGateState::Draft;
         gate.approved_by_ref_sha256 = None;
         gate.approved_at = None;
-        let report = gate.evaluate("2026-07-15").unwrap();
+        let report = gate
+            .evaluate_with_rights_evidence("2026-07-15", &evidence)
+            .unwrap();
         assert!(!report.real_data_allowed);
         assert_eq!(
             report.denial_reasons,
@@ -437,10 +589,13 @@ pub(crate) mod tests {
     #[test]
     fn unsafe_cloud_and_unverified_rights_fail_closed_with_specific_reasons() {
         let mut gate = approved_real_gate();
-        gate.rights.dry_run_succeeded = false;
+        let evidence = approved_rights_evidence();
+        gate.rights.dry_run_evidence_sha256 = Some("f".repeat(64));
         gate.cloud_processors[0].ttl_seconds = PILOT_MAX_CLOUD_TTL_SECONDS + 1;
         gate.cloud_processors[0].delete_on_failure = false;
-        let report = gate.evaluate("2026-07-15").unwrap();
+        let report = gate
+            .evaluate_with_rights_evidence("2026-07-15", &evidence)
+            .unwrap();
         assert!(!report.real_data_allowed);
         assert_eq!(
             report.denial_reasons,
@@ -454,9 +609,12 @@ pub(crate) mod tests {
     #[test]
     fn future_approval_or_rights_dry_run_cannot_unlock_an_earlier_date() {
         let mut gate = approved_real_gate();
+        let evidence = approved_rights_evidence();
         gate.approved_at = Some("2026-07-20T09:00:00Z".into());
         gate.rights.dry_run_verified_at = Some("2026-07-21T08:00:00Z".into());
-        let report = gate.evaluate("2026-07-15").unwrap();
+        let report = gate
+            .evaluate_with_rights_evidence("2026-07-15", &evidence)
+            .unwrap();
         assert!(!report.real_data_allowed);
         assert_eq!(
             report.denial_reasons,
@@ -493,5 +651,13 @@ pub(crate) mod tests {
         assert!(report
             .denial_reasons
             .contains(&"DATA_RIGHTS_NOT_VERIFIED".to_owned()));
+    }
+
+    #[test]
+    fn approved_gate_without_actual_receipt_bundle_still_fails_closed() {
+        let gate = approved_real_gate();
+        let report = gate.evaluate("2026-07-15").unwrap();
+        assert!(!report.real_data_allowed);
+        assert_eq!(report.denial_reasons, vec!["DATA_RIGHTS_NOT_VERIFIED"]);
     }
 }

@@ -5,7 +5,7 @@
 - 仓库只保存合成合同清单和 hash，不保存学生姓名、文件路径、原图或作答正文。
 - `repository_synthetic` 只能验证路由、状态、危险误放过和覆盖场景，不能宣称真实照片生产准确率。
 - 真实扫描/照片必须保存在仓库外的本机受限目录；完成去标识、隐私审查与保存期限登记后，才能把 `production_accuracy_claim_allowed` 设为 `true`。
-- 真实清单还必须冻结 `pilot_gate_id` 和对应闸门 JSON 的策略 hash；评估时同时提供 `--gate` 与 `--as-of`。闸门过期、撤销、内容漂移或导出/删除演练未通过时，评估器拒绝运行。
+- 真实清单还必须冻结 `pilot_gate_id` 和对应闸门 JSON 的策略 hash；评估时同时提供 `--gate`、`--rights-evidence` 与 `--as-of`。闸门过期、撤销、内容漂移或四类导出/删除 dry-run 回执缺失时，评估器拒绝运行。
 - 三类材料共用报告结构，但分别统计：普通试卷的页面/题区，答题卡的格位/涂改，默写的行栏/评分点。
 
 离线生成报告：
@@ -23,5 +23,55 @@ cargo run -p module-exam --example evaluate_material_golden -- \
 ```bash
 cargo run -p module-exam --example evaluate_pilot_data_gate -- \
   --manifest /受限目录/pilot_data_gate_v1.json \
+  --rights-evidence /受限目录/pilot_data_rights_evidence_v1.json \
   --as-of 2026-07-15
 ```
+
+## 受限试点数据权利演练
+
+先把 `pilot_dataset_contract_template_v1.json` 复制到仓库外受限目录，改成内部不透明 ID、真实文件 hash/大小与相对路径。真实文件、学生映射和导出包都不得进入仓库。仓库内 `pilot_dataset_synthetic_contract_v1.json` 及 `assets/pilot-contract-asset` 只用于无学生数据的命令合同检查。
+
+每种作用域和动作各跑一次 dry-run，并分别保存回执：
+
+```bash
+cargo run -p module-exam --example manage_pilot_data_rights -- \
+  --dataset-root /受限目录/pilot-dataset \
+  --manifest /受限目录/pilot-dataset/pilot_dataset.json \
+  --receipt /受限目录/receipts/student-export.json \
+  --scope student \
+  --action export \
+  --mode dry-run \
+  --gate-id <opaque-gate-id> \
+  --scope-ref-sha256 <student-ref-sha256> \
+  --idempotency-key <unique-key> \
+  --requested-at 2026-07-15T08:00:00Z
+```
+
+将 `--scope` 改为 `batch`、`--action` 改为 `export/delete`，取得恰好四类成功回执后生成证据包：
+
+```bash
+cargo run -p module-exam --example build_pilot_data_rights_evidence -- \
+  --gate-id <opaque-gate-id> \
+  --dataset-id <opaque-dataset-id> \
+  --generated-at 2026-07-15T09:00:00Z \
+  --output /受限目录/pilot_data_rights_evidence_v1.json \
+  --receipt /受限目录/receipts/student-export.json \
+  --receipt /受限目录/receipts/batch-export.json \
+  --receipt /受限目录/receipts/student-delete.json \
+  --receipt /受限目录/receipts/batch-delete.json
+```
+
+把命令输出的 `evidence_sha256` 和同一生成时间冻结到已批准闸门的 `rights.dry_run_evidence_sha256` / `rights.dry_run_verified_at`。执行导出还需 `--mode execute --output-root /独立导出目录`；执行删除还需 `--mode execute --confirm-delete`。删除先保存 `deletion_pending`，中断后只允许同一请求恢复；回执不含正文、路径或学生身份。
+
+真实黄金集评估示例：
+
+```bash
+cargo run -p module-exam --example evaluate_material_golden -- \
+  --manifest /受限目录/ordinary_real_manifest.json \
+  --predictions /受限目录/ordinary_real_predictions.json \
+  --gate /受限目录/pilot_data_gate_v1.json \
+  --rights-evidence /受限目录/pilot_data_rights_evidence_v1.json \
+  --as-of 2026-07-15
+```
+
+这里的导出/删除范围只覆盖仓库外 `PilotDatasetManifest` 声明的影子试点资产，不代表正式应用数据库、备份、录音和所有学生数据已经具备统一生产级数据权利流程。

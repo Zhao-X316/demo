@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use module_exam::pilot_data_gate::PilotDataGateManifest;
+use module_exam::pilot_data_rights::PilotDataRightsEvidenceBundle;
 
 fn argument(name: &str) -> Result<String, String> {
     let mut args = env::args().skip(1);
@@ -14,6 +15,16 @@ fn argument(name: &str) -> Result<String, String> {
     Err(format!("缺少 {name}"))
 }
 
+fn optional_argument(name: &str) -> Option<String> {
+    let mut args = env::args().skip(1);
+    while let Some(value) = args.next() {
+        if value == name {
+            return args.next();
+        }
+    }
+    None
+}
+
 fn run() -> Result<(), String> {
     let manifest_path = PathBuf::from(argument("--manifest")?);
     let evaluated_on = argument("--as-of")?;
@@ -22,9 +33,21 @@ fn run() -> Result<(), String> {
             .map_err(|error| format!("无法读取闸门 {}：{error}", manifest_path.display()))?,
     )
     .map_err(|error| format!("闸门 JSON 非法：{error}"))?;
-    let report = manifest
-        .evaluate(&evaluated_on)
-        .map_err(|error| error.to_string())?;
+    let report = if let Some(evidence_path) = optional_argument("--rights-evidence") {
+        let evidence_path = PathBuf::from(evidence_path);
+        let evidence: PilotDataRightsEvidenceBundle =
+            serde_json::from_slice(&fs::read(&evidence_path).map_err(|error| {
+                format!("无法读取数据权利证据 {}：{error}", evidence_path.display())
+            })?)
+            .map_err(|error| format!("数据权利证据 JSON 非法：{error}"))?;
+        manifest
+            .evaluate_with_rights_evidence(&evaluated_on, &evidence)
+            .map_err(|error| error.to_string())?
+    } else {
+        manifest
+            .evaluate(&evaluated_on)
+            .map_err(|error| error.to_string())?
+    };
     println!(
         "{}",
         serde_json::to_string_pretty(&report)

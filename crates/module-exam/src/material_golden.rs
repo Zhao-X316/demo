@@ -11,6 +11,7 @@ use suite_core::error::{CoreError, CoreResult};
 use crate::pilot_data_gate::{
     PilotDataGateManifest, PilotDataGateReport, PilotDataType, PilotGateScopeKind,
 };
+use crate::pilot_data_rights::PilotDataRightsEvidenceBundle;
 
 pub const MATERIAL_GOLDEN_SCHEMA_VERSION: i64 = 1;
 
@@ -375,6 +376,7 @@ impl MaterialGoldenManifest {
 pub fn validate_real_material_gate(
     manifest: &MaterialGoldenManifest,
     gate: &PilotDataGateManifest,
+    rights_evidence: &PilotDataRightsEvidenceBundle,
     evaluated_on: &str,
 ) -> CoreResult<PilotDataGateReport> {
     manifest.validate()?;
@@ -414,7 +416,7 @@ pub fn validate_real_material_gate(
     if expected_gate_id != gate.gate_id {
         return Err(CoreError::Invalid("黄金集引用了不同的试点数据闸门".into()));
     }
-    let report = gate.evaluate(evaluated_on)?;
+    let report = gate.evaluate_with_rights_evidence(evaluated_on, rights_evidence)?;
     let expected_hash = manifest
         .governance
         .pilot_gate_policy_sha256
@@ -483,9 +485,10 @@ pub fn evaluate_real_material_calibration(
     manifest: &MaterialGoldenManifest,
     prediction_set: &MaterialGoldenPredictionSet,
     gate: &PilotDataGateManifest,
+    rights_evidence: &PilotDataRightsEvidenceBundle,
     evaluated_on: &str,
 ) -> CoreResult<MaterialCalibrationReport> {
-    validate_real_material_gate(manifest, gate, evaluated_on)?;
+    validate_real_material_gate(manifest, gate, rights_evidence, evaluated_on)?;
     prediction_set.validate_for(manifest)?;
     evaluate_material_calibration_validated(manifest, prediction_set)
 }
@@ -713,10 +716,11 @@ mod tests {
 
     #[test]
     fn real_material_requires_current_matching_approved_gate_before_evaluation() {
-        use crate::pilot_data_gate::tests::approved_real_gate;
+        use crate::pilot_data_gate::tests::{approved_real_gate, approved_rights_evidence};
 
         let mut manifest = manifests().remove(0);
         let gate = approved_real_gate();
+        let rights_evidence = approved_rights_evidence();
         manifest.governance.storage_scope = MaterialGoldenStorageScope::LocalRestricted;
         manifest.governance.pilot_gate_id = Some(gate.gate_id.clone());
         manifest.governance.pilot_gate_policy_sha256 = Some(gate.policy_sha256().unwrap());
@@ -729,9 +733,14 @@ mod tests {
         let predictions = perfect_predictions(&manifest);
 
         assert!(evaluate_material_calibration(&manifest, &predictions).is_err());
-        let report =
-            evaluate_real_material_calibration(&manifest, &predictions, &gate, "2026-07-15")
-                .unwrap();
+        let report = evaluate_real_material_calibration(
+            &manifest,
+            &predictions,
+            &gate,
+            &rights_evidence,
+            "2026-07-15",
+        )
+        .unwrap();
         assert!(report.production_accuracy_claim_allowed);
 
         let mut missing_data_scope = gate.clone();
@@ -745,6 +754,7 @@ mod tests {
             &manifest,
             &predictions,
             &missing_data_scope,
+            &rights_evidence,
             "2026-07-15"
         )
         .is_err());
@@ -755,6 +765,7 @@ mod tests {
             &manifest,
             &predictions,
             &changed_gate,
+            &rights_evidence,
             "2026-07-15"
         )
         .is_err());
@@ -762,6 +773,7 @@ mod tests {
             &manifest,
             &predictions,
             &changed_gate,
+            &rights_evidence,
             "2026-08-01"
         )
         .is_err());

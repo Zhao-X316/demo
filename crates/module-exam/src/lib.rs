@@ -13,6 +13,7 @@ pub mod material_golden;
 pub mod objective_recognition;
 pub mod ordinary_paper_recognition;
 pub mod pilot_data_gate;
+pub mod pilot_data_rights;
 pub mod service;
 pub mod vlm;
 

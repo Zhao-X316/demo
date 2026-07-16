@@ -25,13 +25,13 @@
     "cloud_processing_disclosed": false
   },
   "rights": {
-    "student_export_procedure_version": "replace-after-implementation",
-    "batch_export_procedure_version": "replace-after-implementation",
-    "student_delete_procedure_version": "replace-after-implementation",
-    "batch_delete_procedure_version": "replace-after-implementation",
+    "student_export_procedure_version": "pilot-student-export-v1",
+    "batch_export_procedure_version": "pilot-batch-export-v1",
+    "student_delete_procedure_version": "pilot-student-delete-v1",
+    "batch_delete_procedure_version": "pilot-batch-delete-v1",
     "deletion_receipt_excludes_content": true,
     "dry_run_verified_at": null,
-    "dry_run_succeeded": false
+    "dry_run_evidence_sha256": null
   },
   "diagnostics": {
     "default_excludes_student_name": true,

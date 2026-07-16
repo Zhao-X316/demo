@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "dataset_id": "pilot-dataset-synthetic-contract-v1",
+  "gate_id": "pilot-gate-synthetic-contract-v1",
+  "assets": [
+    {
+      "asset_id": "pilot-contract-asset",
+      "student_ref_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "batch_ref_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "data_type": "student_page_image",
+      "artifact_sha256": "b758f5d9f2c844b91d4c5ae7bad3bc7cd6eb8ad128186bae632a6e8bd7ab24f9",
+      "byte_size": 32,
+      "relative_path": "assets/pilot-contract-asset",
+      "state": "active"
+    }
+  ],
+  "completed_operations": []
+}

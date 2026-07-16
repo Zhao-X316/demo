@@ -7,6 +7,7 @@ use module_exam::material_golden::{
     MaterialGoldenPredictionSet,
 };
 use module_exam::pilot_data_gate::PilotDataGateManifest;
+use module_exam::pilot_data_rights::PilotDataRightsEvidenceBundle;
 
 fn argument(name: &str) -> Result<PathBuf, String> {
     let mut args = env::args().skip(1);
@@ -54,13 +55,31 @@ fn run() -> Result<(), String> {
         );
         let evaluated_on = optional_argument("--as-of")
             .ok_or_else(|| "真实黄金集必须提供 --as-of YYYY-MM-DD".to_owned())?;
+        let rights_evidence_path = PathBuf::from(
+            optional_argument("--rights-evidence")
+                .ok_or_else(|| "真实黄金集必须提供 --rights-evidence 演练证据".to_owned())?,
+        );
         let gate: PilotDataGateManifest = serde_json::from_slice(
             &fs::read(&gate_path)
                 .map_err(|error| format!("无法读取 gate {}：{error}", gate_path.display()))?,
         )
         .map_err(|error| format!("gate JSON 非法：{error}"))?;
-        evaluate_real_material_calibration(&manifest, &predictions, &gate, &evaluated_on)
-            .map_err(|error| error.to_string())?
+        let rights_evidence: PilotDataRightsEvidenceBundle =
+            serde_json::from_slice(&fs::read(&rights_evidence_path).map_err(|error| {
+                format!(
+                    "无法读取 rights evidence {}：{error}",
+                    rights_evidence_path.display()
+                )
+            })?)
+            .map_err(|error| format!("rights evidence JSON 非法：{error}"))?;
+        evaluate_real_material_calibration(
+            &manifest,
+            &predictions,
+            &gate,
+            &rights_evidence,
+            &evaluated_on,
+        )
+        .map_err(|error| error.to_string())?
     } else {
         evaluate_material_calibration(&manifest, &predictions).map_err(|error| error.to_string())?
     };
