@@ -427,6 +427,13 @@ export interface AnswerSheetPageProcessingResult {
       region_index: number;
       decision: "teacher_confirmed";
     }>;
+    routes: Array<{
+      answer_region_revision_id: number;
+      assessment_item_id: number;
+      region_index: number;
+      recognition_route: "objective_omr" | "handwriting_ocr";
+      question_type: "single" | "multiple" | "true_false" | "fill_blank" | "short_answer";
+    }>;
   };
   observations: Array<{
     observation: {
@@ -441,6 +448,14 @@ export interface AnswerSheetPageProcessingResult {
       batch_eligible: boolean;
       exclusion_reason: string | null;
     };
+  }>;
+  subjectiveRegions: Array<{
+    answerRegionRevisionId: number;
+    assessmentItemId: number;
+    regionIndex: number;
+    cropArtifactId: number;
+    state: "awaiting_handwriting_recognition";
+    nextAction: string;
   }>;
 }
 
@@ -462,6 +477,22 @@ export interface AnswerSheetTemplateStatus {
   assessmentVersionId: number;
   pageNo: number;
   activeTemplate: AnswerSheetTemplateRevision | null;
+  templateSet: {
+    assessment_version_id: number;
+    template_version: string;
+    ready: boolean;
+    template_set_hash: string | null;
+    pages: Array<{
+      page_no: number;
+      expected_item_count: number;
+      objective_item_count: number;
+      subjective_item_count: number;
+      active_template_revision_id: number | null;
+      ready: boolean;
+      issue_codes: string[];
+    }>;
+    issue_codes: string[];
+  };
 }
 
 export interface AnswerSheetTemplateRunResult {
@@ -477,6 +508,11 @@ export interface AnswerSheetTemplateRunResult {
       assessment_item_id: number;
       region_index: number;
       cells: Array<{ label: string }>;
+    }>;
+    subjective_regions: Array<{
+      assessment_item_id: number;
+      region_index: number;
+      question_type: "fill_blank" | "short_answer";
     }>;
     confidence: number;
     issue_codes: string[];

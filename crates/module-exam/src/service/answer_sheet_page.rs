@@ -16,8 +16,8 @@ use suite_core::models::{ArchiveStatus, ArtifactKind, AuditActorType, PrivacyCla
 
 use crate::answer_sheet_recognition::{AnswerSheetTemplateDefinition, DetectedAnswerSheetAnchor};
 
-use super::answer_sheet::AnswerSheetTemplateRevision;
 use super::answer_sheet;
+use super::answer_sheet::AnswerSheetTemplateRevision;
 use super::papers::{
     self, AnswerRegionRevision, NewAnswerRegionRevision, NewPageAlignmentRevision,
     PageAlignmentRevision,
@@ -58,6 +58,19 @@ pub struct AnswerSheetPageMaterializationResult {
     pub materialization: AnswerSheetPageMaterialization,
     pub alignment: PageAlignmentRevision,
     pub regions: Vec<AnswerRegionRevision>,
+    pub routes: Vec<AnswerSheetRegionRoute>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerSheetRegionRoute {
+    pub id: i64,
+    pub materialization_id: i64,
+    pub answer_region_revision_id: i64,
+    pub assessment_item_id: i64,
+    pub region_index: i64,
+    pub recognition_route: String,
+    pub question_type: String,
+    pub created_at: String,
 }
 
 type MaterializationRow = (i64, String, i64, i64, i64, String, String, String);
@@ -336,10 +349,33 @@ fn load_result(
             .ok_or_else(|| CoreError::NotFound(format!("答题卡题区 revision#{region_id}")))?;
         regions.push(region);
     }
+    let mut stmt = conn.prepare(
+        "SELECT id,materialization_id,answer_region_revision_id,assessment_item_id,
+                region_index,recognition_route,question_type,created_at
+         FROM exam_answer_sheet_region_routes_v2
+         WHERE materialization_id=?1 ORDER BY id",
+    )?;
+    let rows = stmt.query_map([materialization.id], |row| {
+        Ok(AnswerSheetRegionRoute {
+            id: row.get(0)?,
+            materialization_id: row.get(1)?,
+            answer_region_revision_id: row.get(2)?,
+            assessment_item_id: row.get(3)?,
+            region_index: row.get(4)?,
+            recognition_route: row.get(5)?,
+            question_type: row.get(6)?,
+            created_at: row.get(7)?,
+        })
+    })?;
+    let routes = rows.collect::<Result<Vec<_>, _>>()?;
+    if routes.len() != regions.len() {
+        return Err(CoreError::Invalid("答题卡题区识别路由账本不完整".into()));
+    }
     Ok(AnswerSheetPageMaterializationResult {
         materialization,
         alignment,
         regions,
+        routes,
     })
 }
 
@@ -436,11 +472,7 @@ pub fn materialize_in_transaction(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let template_keys = definition
-        .items
-        .iter()
-        .map(|item| (item.assessment_item_id, item.region_index))
-        .collect::<BTreeSet<_>>();
+    let template_keys = definition.region_keys();
     if artifact_map.len() != input.region_artifacts.len()
         || artifact_map.keys().copied().collect::<BTreeSet<_>>() != template_keys
     {
@@ -471,7 +503,7 @@ pub fn materialize_in_transaction(
         },
     )?;
 
-    let mut regions = Vec::with_capacity(definition.items.len());
+    let mut regions = Vec::with_capacity(definition.region_count());
     for item in &definition.items {
         let crop_artifact_id = artifact_map
             .get(&(item.assessment_item_id, item.region_index))
@@ -483,6 +515,7 @@ pub fn materialize_in_transaction(
             "y": item.region.y,
             "width": item.region.width,
             "height": item.region.height,
+            "region_role": "objective_mark",
             "mark_cells": item.cells,
             "template_revision_id": input.template_revision_id,
         })
@@ -498,6 +531,37 @@ pub fn materialize_in_transaction(
                 mapping_confidence: Some(input.alignment_confidence),
                 decision: "teacher_confirmed",
                 reason_code: Some("FIXED_ANSWER_SHEET_TEMPLATE_APPLIED"),
+                confirmed_by: Some(input.confirmed_by),
+            },
+        )?);
+    }
+    for item in &definition.subjective_regions {
+        let crop_artifact_id = artifact_map
+            .get(&(item.assessment_item_id, item.region_index))
+            .copied()
+            .ok_or_else(|| CoreError::Invalid("答题卡主观题区缺少对应裁图".into()))?;
+        let bbox_json = serde_json::json!({
+            "schema_version": 1,
+            "x": item.region.x,
+            "y": item.region.y,
+            "width": item.region.width,
+            "height": item.region.height,
+            "region_role": "handwritten_answer",
+            "question_type": item.question_type.as_db(),
+            "template_revision_id": input.template_revision_id,
+        })
+        .to_string();
+        regions.push(papers::record_answer_region_in(
+            conn,
+            &NewAnswerRegionRevision {
+                page_id: input.page_id,
+                assessment_item_id: item.assessment_item_id,
+                region_index: item.region_index,
+                bbox_json: &bbox_json,
+                crop_artifact_id: Some(crop_artifact_id),
+                mapping_confidence: Some(input.alignment_confidence),
+                decision: "teacher_confirmed",
+                reason_code: Some("FIXED_ANSWER_SHEET_SUBJECTIVE_REGION"),
                 confirmed_by: Some(input.confirmed_by),
             },
         )?);
@@ -526,6 +590,41 @@ pub fn materialize_in_transaction(
             &created_at,
         ),
     )?;
+    let materialization_id = conn.last_insert_rowid();
+    let mut route_specs = BTreeMap::new();
+    for item in &definition.items {
+        route_specs.insert(
+            (item.assessment_item_id, item.region_index),
+            ("objective_omr", item.question_type.as_str()),
+        );
+    }
+    for item in &definition.subjective_regions {
+        route_specs.insert(
+            (item.assessment_item_id, item.region_index),
+            ("handwriting_ocr", item.question_type.as_db()),
+        );
+    }
+    for region in &regions {
+        let (recognition_route, question_type) = route_specs
+            .get(&(region.assessment_item_id, region.region_index))
+            .copied()
+            .ok_or_else(|| CoreError::Invalid("答题卡题区缺少识别路由".into()))?;
+        conn.execute(
+            "INSERT INTO exam_answer_sheet_region_routes_v2
+             (materialization_id,answer_region_revision_id,assessment_item_id,region_index,
+              recognition_route,question_type,created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            (
+                materialization_id,
+                region.id,
+                region.assessment_item_id,
+                region.region_index,
+                recognition_route,
+                question_type,
+                &created_at,
+            ),
+        )?;
+    }
     audit::append(
         conn,
         &audit::NewAuditEvent {
@@ -547,9 +646,5 @@ pub fn materialize_in_transaction(
     let materialization =
         get_page_materialization(conn, input.page_id, input.template_revision_id)?
             .ok_or_else(|| CoreError::NotFound("刚创建的答题卡页面物化账本".into()))?;
-    Ok(AnswerSheetPageMaterializationResult {
-        materialization,
-        alignment,
-        regions,
-    })
+    load_result(conn, materialization)
 }

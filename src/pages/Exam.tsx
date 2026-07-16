@@ -682,6 +682,14 @@ function FixedIntakeTab({
     page.qualityResult === "pass" && page.matchDecision === "teacher_confirmed"
   );
   const answerSheetReferencePageId = answerSheetEligiblePages[0]?.pageId ?? 0;
+  const answerSheetTemplateTargetPageNo = answerSheetTemplateStatus?.templateSet.pages
+    .find((page) => !page.ready)?.page_no
+    ?? answerSheetEligiblePages[0]?.pageNo
+    ?? 0;
+  const answerSheetTemplateTargetPageId = answerSheetEligiblePages
+    .find((page) => page.pageNo === answerSheetTemplateTargetPageNo)?.pageId
+    ?? answerSheetReferencePageId;
+  const answerSheetTemplateSetReady = answerSheetTemplateStatus?.templateSet.ready === true;
   const answerSheetTemplateScopeKey = result?.qualityReviewCompleted
     && result.materialType === "answer_sheet"
     && answerSheetReferencePageId
@@ -697,7 +705,7 @@ function FixedIntakeTab({
         if (cancelled) return;
         setAnswerSheetTemplateStatus(status);
         setAnswerSheetTemplateStatusLoaded(true);
-        if (status.activeTemplate) {
+        if (status.templateSet.ready) {
           void processAnswerSheetPages(groupingEvidence);
         }
       })
@@ -892,7 +900,7 @@ function FixedIntakeTab({
   }
 
   async function pickAndAnalyzeAnswerSheetTemplate() {
-    if (!answerSheetReferencePageId) {
+    if (!answerSheetTemplateTargetPageId) {
       onError("当前没有可用于建立模板的已确认答题卡页面");
       return;
     }
@@ -903,10 +911,11 @@ function FixedIntakeTab({
       });
       if (!selected || Array.isArray(selected)) return;
       setAnswerSheetTemplateBusy(true);
+      setAnswerSheetTemplateRun(null);
       const run = await examAnswerSheetAnalyzeTemplate(
-        answerSheetReferencePageId,
+        answerSheetTemplateTargetPageId,
         selected,
-        `answer-sheet-template:${assessmentVersionId}:${crypto.randomUUID()}`,
+        `answer-sheet-template:${assessmentVersionId}:page:${answerSheetTemplateTargetPageNo}:${crypto.randomUUID()}`,
       );
       setAnswerSheetTemplateRun(run);
     } catch (err) {
@@ -917,19 +926,19 @@ function FixedIntakeTab({
   }
 
   async function confirmAnswerSheetTemplate() {
-    if (!answerSheetReferencePageId || !answerSheetTemplateRun?.output) return;
+    if (!answerSheetTemplateTargetPageId || !answerSheetTemplateRun?.output) return;
     setAnswerSheetTemplateBusy(true);
     try {
-      const activeTemplate = await examAnswerSheetConfirmTemplate(
-        answerSheetReferencePageId,
+      await examAnswerSheetConfirmTemplate(
+        answerSheetTemplateTargetPageId,
         answerSheetTemplateRun.ai_run_id,
       );
-      setAnswerSheetTemplateStatus({
-        assessmentVersionId: activeTemplate.assessment_version_id,
-        pageNo: activeTemplate.page_no,
-        activeTemplate,
-      });
-      await processAnswerSheetPages(groupingEvidence);
+      const refreshed = await examAnswerSheetTemplateStatus(answerSheetReferencePageId);
+      setAnswerSheetTemplateStatus(refreshed);
+      setAnswerSheetTemplateRun(null);
+      if (refreshed.templateSet.ready) {
+        await processAnswerSheetPages(groupingEvidence);
+      }
     } catch (err) {
       onError(`确认答题卡模板失败：${String(err)}`);
     } finally {
@@ -1103,6 +1112,10 @@ function FixedIntakeTab({
     value.observation.result_state === "recognized" && value.suggestion.batch_eligible
   ).length;
   const answerSheetReviewObservationCount = answerSheetObservations.length - answerSheetReadyObservationCount;
+  const answerSheetSubjectiveRegionCount = answerSheetProcessedValues.reduce(
+    (total, value) => total + value.subjectiveRegions.length,
+    0,
+  );
   const answerSheetFailureCount = Object.keys(answerSheetPageFailures).length;
   const answerSheetPendingCount = Math.max(
     0,
@@ -1562,21 +1575,23 @@ function FixedIntakeTab({
                 <div className="intake-quality-head">
                   <div>
                     <b>答题卡自动识别</b>
-                    <span>第一次只确认一张空白答题卡；以后同版卡片自动四角校正并在本机识别涂点。</span>
+                    <span>按页确认整套空白答题卡；以后同版卡片自动校正，客观格本机识别，主观区单独送手写识别。</span>
                   </div>
                   <strong>
                     {!answerSheetTemplateStatusLoaded
                       ? "正在检查模板…"
-                      : answerSheetTemplateStatus?.activeTemplate
-                        ? `模板第 ${answerSheetTemplateStatus.activeTemplate.revision} 版`
-                        : "还差空白卡"}
+                      : answerSheetTemplateSetReady
+                        ? `整套 ${answerSheetTemplateStatus?.templateSet.pages.length ?? 0} 页已确认`
+                        : `还差第 ${answerSheetTemplateTargetPageNo || 1} 页空白卡`}
                   </strong>
                 </div>
-                {!answerSheetTemplateStatus?.activeTemplate ? (
+                {!answerSheetTemplateSetReady ? (
                   <div className="intake-analysis-actions vertical">
-                    <span className="muted">请上传这套答题卡的空白版本。系统只建立题号和涂点位置，不把它当学生作答。</span>
+                    <span className="muted">
+                      请上传第 {answerSheetTemplateTargetPageNo || 1} 页空白卡。系统只建立题号、涂点格和主观作答区，不把它当学生作答。
+                    </span>
                     <button disabled={answerSheetTemplateBusy || !answerSheetTemplateStatusLoaded} onClick={() => void pickAndAnalyzeAnswerSheetTemplate()}>
-                      {answerSheetTemplateBusy ? "正在识别空白卡…" : "选择一张空白答题卡"}
+                      {answerSheetTemplateBusy ? "正在识别空白卡…" : `选择第 ${answerSheetTemplateTargetPageNo || 1} 页空白卡`}
                     </button>
                     {answerSheetTemplateRun?.status === "failed" && (
                       <div className="intake-analysis-issues">
@@ -1587,7 +1602,8 @@ function FixedIntakeTab({
                       <>
                         <div className="intake-analysis-summary">
                           <span>定位锚点 {answerSheetTemplateRun.output.anchors.length}/4</span>
-                          <span>匹配题目 {answerSheetTemplateRun.output.items.length}</span>
+                          <span>客观格 {answerSheetTemplateRun.output.items.length}</span>
+                          <span>主观区 {answerSheetTemplateRun.output.subjective_regions.length}</span>
                           <span>可信度 {Math.round(answerSheetTemplateRun.output.confidence * 100)}%</span>
                           <span className={answerSheetTemplateRun.output.state === "ready" ? "ready" : "review"}>
                             {answerSheetTemplateRun.output.state === "ready" ? "可以确认" : "需要换图或复核"}
@@ -1600,7 +1616,9 @@ function FixedIntakeTab({
                         )}
                         {answerSheetTemplateRun.output.state === "ready" && (
                           <button disabled={answerSheetTemplateBusy} onClick={() => void confirmAnswerSheetTemplate()}>
-                            {answerSheetTemplateBusy ? "正在确认并处理全班…" : `确认这张空白卡，识别 ${answerSheetEligiblePages.length} 张学生卡`}
+                            {answerSheetTemplateBusy
+                              ? "正在确认…"
+                              : `确认第 ${answerSheetTemplateTargetPageNo || 1} 页${(answerSheetTemplateStatus?.templateSet.pages.filter((page) => !page.ready).length ?? 0) <= 1 ? `，开始处理 ${answerSheetEligiblePages.length} 张学生卡` : "，继续下一页"}`}
                           </button>
                         )}
                       </>
@@ -1612,6 +1630,7 @@ function FixedIntakeTab({
                       <span>已处理 {answerSheetProcessedValues.length}/{answerSheetEligiblePages.length} 页</span>
                       <span className="ready">清晰题区 {answerSheetReadyObservationCount}</span>
                       <span className="review">需老师看 {answerSheetReviewObservationCount}</span>
+                      <span>主观区待识别 {answerSheetSubjectiveRegionCount}</span>
                       <span className="blocked">失败页 {answerSheetFailureCount}</span>
                       <span>待处理 {answerSheetPendingCount}</span>
                     </div>

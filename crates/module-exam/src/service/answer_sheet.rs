@@ -8,12 +8,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use suite_core::db::repo::audit;
-use suite_core::domain::{ids, time};
+use suite_core::domain::{hashing, ids, time};
 use suite_core::error::{CoreError, CoreResult};
 use suite_core::models::{ArchiveStatus, ArtifactKind, AuditActorType, PrivacyClass};
 
 use crate::answer_sheet_recognition::AnswerSheetTemplateDefinition;
-use crate::objective_recognition::ObjectiveQuestionType;
 
 pub struct ConfirmAnswerSheetTemplateInput<'a> {
     pub definition: &'a AnswerSheetTemplateDefinition,
@@ -36,6 +35,27 @@ pub struct AnswerSheetTemplateRevision {
     pub confirmed_by: String,
     pub state: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerSheetTemplatePageStatus {
+    pub page_no: i64,
+    pub expected_item_count: usize,
+    pub objective_item_count: usize,
+    pub subjective_item_count: usize,
+    pub active_template_revision_id: Option<i64>,
+    pub ready: bool,
+    pub issue_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerSheetTemplateSetStatus {
+    pub assessment_version_id: i64,
+    pub template_version: String,
+    pub ready: bool,
+    pub template_set_hash: Option<String>,
+    pub pages: Vec<AnswerSheetTemplatePageStatus>,
+    pub issue_codes: Vec<String>,
 }
 
 fn template_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnswerSheetTemplateRevision> {
@@ -72,6 +92,201 @@ pub fn get_active_answer_sheet_template(
             template_row,
         )
         .optional()?)
+}
+
+fn definition_item_map(
+    definition: &AnswerSheetTemplateDefinition,
+) -> CoreResult<BTreeMap<i64, String>> {
+    let mut actual = BTreeMap::new();
+    for item in &definition.items {
+        if actual
+            .insert(
+                item.assessment_item_id,
+                item.question_type.as_str().to_string(),
+            )
+            .is_some()
+        {
+            return Err(CoreError::Invalid(
+                "答题卡每道客观题必须且只能映射一个题区".into(),
+            ));
+        }
+    }
+    for region in &definition.subjective_regions {
+        if actual
+            .insert(
+                region.assessment_item_id,
+                region.question_type.as_db().to_string(),
+            )
+            .is_some()
+        {
+            return Err(CoreError::Invalid(
+                "答题卡每道题必须且只能映射一个客观或主观题区".into(),
+            ));
+        }
+    }
+    Ok(actual)
+}
+
+/// 整套答题卡只有在每个实际页码都有 active 模板、且客观/主观题逐项覆盖时才 ready。
+///
+/// 该状态只冻结模板集合，不授权评分、老师确认或发布。
+pub fn answer_sheet_template_set_status(
+    conn: &Connection,
+    assessment_version_id: i64,
+) -> CoreResult<AnswerSheetTemplateSetStatus> {
+    if assessment_version_id <= 0 {
+        return Err(CoreError::Invalid("答题卡作业版本 id 必须为正数".into()));
+    }
+    let scope: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT state,template_version FROM exam_assessment_versions_v2 WHERE id=?1",
+            [assessment_version_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((state, template_version)) = scope else {
+        return Err(CoreError::NotFound("答题卡关联的作业版本".into()));
+    };
+    let template_version = template_version
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| CoreError::Invalid("答题卡作业尚未固定模板版本".into()))?;
+    if state != "confirmed" {
+        return Err(CoreError::Invalid(
+            "只有已确认作业版本可以检查整套答题卡模板".into(),
+        ));
+    }
+
+    let mut expected_by_page: BTreeMap<i64, BTreeMap<i64, String>> = BTreeMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT i.id,q.question_type,
+                COALESCE(CAST(json_extract(i.presentation_snapshot_json,'$.page_no') AS INTEGER),1)
+         FROM exam_assessment_items_v2 i
+         JOIN k1_question_versions q ON q.id=i.question_version_id
+         WHERE i.assessment_version_id=?1 AND i.state='active'
+         ORDER BY i.order_index,i.id",
+    )?;
+    let rows = stmt.query_map([assessment_version_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (item_id, question_type, page_no) = row?;
+        if page_no <= 0
+            || !matches!(
+                question_type.as_str(),
+                "single" | "multiple" | "true_false" | "fill_blank" | "short_answer"
+            )
+        {
+            return Err(CoreError::Invalid("答题卡题目页码或题型不受支持".into()));
+        }
+        expected_by_page
+            .entry(page_no)
+            .or_default()
+            .insert(item_id, question_type);
+    }
+    if expected_by_page.is_empty() {
+        return Err(CoreError::Invalid("答题卡作业没有可建模题目".into()));
+    }
+
+    let mut active_by_page = BTreeMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT id,public_id,assessment_version_id,revision,template_version,page_no,
+                blank_artifact_id,template_hash,template_json,source_ai_run_id,
+                confirmed_by,state,created_at
+         FROM exam_answer_sheet_template_revisions_v2
+         WHERE assessment_version_id=?1 AND state='active'
+         ORDER BY page_no",
+    )?;
+    let rows = stmt.query_map([assessment_version_id], template_row)?;
+    for row in rows {
+        let revision = row?;
+        active_by_page.insert(revision.page_no, revision);
+    }
+
+    let max_page = *expected_by_page
+        .keys()
+        .max()
+        .ok_or_else(|| CoreError::Invalid("答题卡缺少页码".into()))?;
+    let mut issue_codes = Vec::new();
+    let mut pages = Vec::new();
+    let mut hash_pages = Vec::new();
+    for page_no in 1..=max_page {
+        let expected = expected_by_page.get(&page_no);
+        let mut page_issues = Vec::new();
+        if expected.is_none() {
+            page_issues.push("PAGE_SEQUENCE_GAP".to_string());
+        }
+        let active = active_by_page.get(&page_no);
+        let mut objective_item_count = 0;
+        let mut subjective_item_count = 0;
+        if let (Some(expected), Some(active)) = (expected, active) {
+            let definition: AnswerSheetTemplateDefinition =
+                serde_json::from_str(&active.template_json).map_err(|error| {
+                    CoreError::Parse(format!("答题卡第 {page_no} 页模板损坏：{error}"))
+                })?;
+            definition.validate()?;
+            objective_item_count = definition.items.len();
+            subjective_item_count = definition.subjective_regions.len();
+            if definition.template_hash()? != active.template_hash
+                || definition.assessment_version_id != assessment_version_id
+                || definition.page_no != page_no
+                || definition.template_version.trim() != template_version.trim()
+            {
+                page_issues.push("TEMPLATE_SCOPE_MISMATCH".to_string());
+            }
+            if &definition_item_map(&definition)? != expected {
+                page_issues.push("ITEM_COVERAGE_MISMATCH".to_string());
+            }
+            hash_pages.push(serde_json::json!({
+                "page_no": page_no,
+                "template_revision_id": active.id,
+                "template_hash": active.template_hash,
+            }));
+        } else if expected.is_some() {
+            page_issues.push("MISSING_TEMPLATE".to_string());
+        }
+        for code in &page_issues {
+            issue_codes.push(format!("PAGE_{page_no}_{code}"));
+        }
+        pages.push(AnswerSheetTemplatePageStatus {
+            page_no,
+            expected_item_count: expected.map(BTreeMap::len).unwrap_or(0),
+            objective_item_count,
+            subjective_item_count,
+            active_template_revision_id: active.map(|revision| revision.id),
+            ready: page_issues.is_empty(),
+            issue_codes: page_issues,
+        });
+    }
+    for page_no in active_by_page.keys() {
+        if !expected_by_page.contains_key(page_no) {
+            issue_codes.push(format!("PAGE_{page_no}_UNEXPECTED_TEMPLATE"));
+        }
+    }
+    let ready = issue_codes.is_empty();
+    let template_set_hash = if ready {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "assessment_version_id": assessment_version_id,
+            "template_version": template_version.trim(),
+            "pages": hash_pages,
+        }))
+        .map_err(|error| CoreError::Parse(format!("答题卡模板集序列化失败：{error}")))?;
+        Some(hashing::sha256_hex(&bytes))
+    } else {
+        None
+    };
+    Ok(AnswerSheetTemplateSetStatus {
+        assessment_version_id,
+        template_version,
+        ready,
+        template_set_hash,
+        pages,
+        issue_codes,
+    })
 }
 
 pub fn confirm_answer_sheet_template(
@@ -143,7 +358,9 @@ pub fn confirm_answer_sheet_template(
         "schema_version": 1,
         "page_no": input.definition.page_no,
         "blank_artifact_id": input.definition.blank_artifact_id,
-        "item_count": input.definition.items.len(),
+        "item_count": input.definition.region_count(),
+        "objective_region_count": input.definition.items.len(),
+        "subjective_region_count": input.definition.subjective_regions.len(),
         "source_ai_run_id": input.source_ai_run_id,
     })
     .to_string();
@@ -265,7 +482,6 @@ fn validate_scope(
          JOIN k1_question_versions q ON q.id=i.question_version_id
          WHERE i.assessment_version_id=?1 AND i.state='active'
            AND COALESCE(CAST(json_extract(i.presentation_snapshot_json,'$.page_no') AS INTEGER),1)=?2
-           AND q.question_type IN ('single','multiple','true_false')
          ORDER BY i.order_index,i.id",
     )?;
     let rows = stmt.query_map(
@@ -278,19 +494,18 @@ fn validate_scope(
     let mut expected = BTreeMap::new();
     for row in rows {
         let (item_id, question_type) = row?;
-        let question_type = ObjectiveQuestionType::from_db(&question_type)
-            .ok_or_else(|| CoreError::Invalid("答题卡包含不支持的客观题类型".into()))?;
+        if !matches!(
+            question_type.as_str(),
+            "single" | "multiple" | "true_false" | "fill_blank" | "short_answer"
+        ) {
+            return Err(CoreError::Invalid("答题卡包含不支持的题型".into()));
+        }
         expected.insert(item_id, question_type);
     }
-    let actual = input
-        .definition
-        .items
-        .iter()
-        .map(|item| (item.assessment_item_id, item.question_type))
-        .collect::<BTreeMap<_, _>>();
+    let actual = definition_item_map(input.definition)?;
     if expected.is_empty() || expected != actual {
         return Err(CoreError::Invalid(
-            "答题卡题号/格位必须完整覆盖当前页全部客观题且题型一致".into(),
+            "答题卡客观格和主观作答区必须完整覆盖当前页全部题目且题型一致".into(),
         ));
     }
     let unique_regions = input
@@ -314,9 +529,12 @@ mod tests {
 
     use super::*;
     use crate::answer_sheet_recognition::{
-        AnswerSheetAnchor, AnswerSheetItemTemplate, LocalOmrPolicy, SheetRect,
+        AnswerSheetAnchor, AnswerSheetItemTemplate, AnswerSheetSubjectiveKind,
+        AnswerSheetSubjectiveRegionTemplate, LocalOmrPolicy, SheetRect,
+        ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION,
     };
     use crate::objective_recognition::ObjectiveMarkCell;
+    use crate::objective_recognition::ObjectiveQuestionType;
 
     fn setup() -> (Connection, i64, String) {
         let conn = open_in_memory().unwrap();
@@ -469,6 +687,7 @@ mod tests {
                     },
                 ],
             }],
+            subjective_regions: Vec::new(),
             policy: LocalOmrPolicy {
                 blank_max_ratio: 0.02,
                 marked_min_ratio: 0.20,
@@ -476,6 +695,64 @@ mod tests {
                 cell_inset_ratio: 0.1,
             },
         }
+    }
+
+    fn add_second_page_short_answer(conn: &Connection) {
+        let hash = "a".repeat(64);
+        conn.execute_batch(&format!(
+            r#"INSERT INTO k1_questions
+                 (public_id,owner_scope,owner_id,rights_status,sharing_allowed,created_at)
+                 VALUES ('question-b','personal','teacher','unknown',0,
+                         '2026-07-15T09:00:00.000Z');
+               INSERT INTO k1_question_versions
+                 (public_id,question_id,revision,question_type,stem,max_score,content_hash,
+                  quality_level,state,created_at)
+                 VALUES ('question-version-b',2,1,'short_answer','第2题',4,'{hash}',
+                         'L3','published','2026-07-15T09:00:00.000Z');
+               INSERT INTO k1_answer_key_versions
+                 (public_id,question_version_id,revision,answer_json,state,created_at,
+                  confirmed_by,confirmed_at)
+                 VALUES ('answer-b',2,1,'{{"schema_version":1,"reference":"要点"}}',
+                         'confirmed','2026-07-15T09:00:00.000Z','teacher',
+                         '2026-07-15T09:00:00.000Z');
+               INSERT INTO k1_rubric_versions
+                 (public_id,question_version_id,revision,max_score,state,created_at,
+                  confirmed_by,confirmed_at)
+                 VALUES ('rubric-b',2,1,4,'confirmed','2026-07-15T09:00:00.000Z',
+                         'teacher','2026-07-15T09:00:00.000Z');
+               INSERT INTO k1_link_sets
+                 (public_id,question_version_id,knowledge_map_id,revision,state,created_at,
+                  confirmed_by,confirmed_at)
+                 VALUES ('link-b',2,1,1,'confirmed','2026-07-15T09:00:00.000Z',
+                         'teacher','2026-07-15T09:00:00.000Z');
+               INSERT INTO exam_assessment_items_v2
+                 (public_id,assessment_version_id,question_version_id,answer_key_version_id,
+                  rubric_version_id,link_set_id,order_index,score,presentation_snapshot_json,
+                  state,created_at)
+                 VALUES ('item-b',1,2,2,2,2,1,4,
+                         '{{"schema_version":1,"question_no":"2","page_no":2}}',
+                         'active','2026-07-15T09:00:00.000Z');"#,
+        ))
+        .unwrap();
+    }
+
+    fn subjective_page_two(artifact_id: i64, hash: String) -> AnswerSheetTemplateDefinition {
+        let mut definition = definition(artifact_id, hash);
+        definition.schema_version = ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION;
+        definition.page_no = 2;
+        definition.items.clear();
+        definition.subjective_regions = vec![AnswerSheetSubjectiveRegionTemplate {
+            assessment_item_id: 2,
+            region_index: 0,
+            question_type: AnswerSheetSubjectiveKind::ShortAnswer,
+            region: SheetRect {
+                x: 0.1,
+                y: 0.2,
+                width: 0.8,
+                height: 0.5,
+            },
+        }];
+        definition
     }
 
     #[test]
@@ -536,5 +813,77 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("非学生敏感"));
+    }
+
+    #[test]
+    fn multi_page_template_set_blocks_until_objective_and_subjective_pages_are_complete() {
+        let (mut conn, artifact_id, hash) = setup();
+        add_second_page_short_answer(&conn);
+
+        let initial = answer_sheet_template_set_status(&conn, 1).unwrap();
+        assert!(!initial.ready);
+        assert_eq!(initial.pages.len(), 2);
+        assert!(initial
+            .issue_codes
+            .contains(&"PAGE_1_MISSING_TEMPLATE".into()));
+        assert!(initial
+            .issue_codes
+            .contains(&"PAGE_2_MISSING_TEMPLATE".into()));
+
+        let page_one = definition(artifact_id, hash.clone());
+        confirm_answer_sheet_template(
+            &mut conn,
+            &ConfirmAnswerSheetTemplateInput {
+                definition: &page_one,
+                source_ai_run_id: None,
+                confirmed_by: "teacher",
+            },
+        )
+        .unwrap();
+        let partial = answer_sheet_template_set_status(&conn, 1).unwrap();
+        assert!(!partial.ready);
+        assert!(partial
+            .issue_codes
+            .contains(&"PAGE_2_MISSING_TEMPLATE".into()));
+
+        let page_two = subjective_page_two(artifact_id, hash);
+        confirm_answer_sheet_template(
+            &mut conn,
+            &ConfirmAnswerSheetTemplateInput {
+                definition: &page_two,
+                source_ai_run_id: None,
+                confirmed_by: "teacher",
+            },
+        )
+        .unwrap();
+        let complete = answer_sheet_template_set_status(&conn, 1).unwrap();
+        assert!(complete.ready);
+        assert!(complete.issue_codes.is_empty());
+        assert_eq!(
+            complete.template_set_hash.as_deref().map(str::len),
+            Some(64)
+        );
+        assert_eq!(complete.pages[0].objective_item_count, 1);
+        assert_eq!(complete.pages[0].subjective_item_count, 0);
+        assert_eq!(complete.pages[1].objective_item_count, 0);
+        assert_eq!(complete.pages[1].subjective_item_count, 1);
+    }
+
+    #[test]
+    fn subjective_region_cannot_be_silently_bound_to_the_wrong_page_or_type() {
+        let (mut conn, artifact_id, hash) = setup();
+        add_second_page_short_answer(&conn);
+        let mut wrong = subjective_page_two(artifact_id, hash);
+        wrong.subjective_regions[0].question_type = AnswerSheetSubjectiveKind::FillBlank;
+        let error = confirm_answer_sheet_template(
+            &mut conn,
+            &ConfirmAnswerSheetTemplateInput {
+                definition: &wrong,
+                source_ai_run_id: None,
+                confirmed_by: "teacher",
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("完整覆盖"));
     }
 }

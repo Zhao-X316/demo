@@ -19,7 +19,8 @@ use crate::objective_recognition::{
     ObjectiveRecognizer, ObjectiveRecognizerDescriptor, OBJECTIVE_RECOGNITION_SCHEMA_VERSION,
 };
 
-pub const ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION: i64 = 1;
+pub const LEGACY_ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION: i64 = 1;
+pub const ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION: i64 = 2;
 pub const ANSWER_SHEET_ANCHOR_CONFIDENCE_THRESHOLD: f64 = 0.35;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -71,6 +72,41 @@ pub struct AnswerSheetItemTemplate {
     pub cells: Vec<ObjectiveMarkCell>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnswerSheetSubjectiveKind {
+    FillBlank,
+    ShortAnswer,
+}
+
+impl AnswerSheetSubjectiveKind {
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "fill_blank" => Some(Self::FillBlank),
+            "short_answer" => Some(Self::ShortAnswer),
+            _ => None,
+        }
+    }
+
+    pub fn as_db(self) -> &'static str {
+        match self {
+            Self::FillBlank => "fill_blank",
+            Self::ShortAnswer => "short_answer",
+        }
+    }
+}
+
+/// 答题卡上需要送手写 OCR / rubric 的作答区。
+///
+/// 本模板只固定“哪道题的哪块区域”，不会把主观题交给 OMR，也不会直接给分。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnswerSheetSubjectiveRegionTemplate {
+    pub assessment_item_id: i64,
+    pub region_index: i64,
+    pub question_type: AnswerSheetSubjectiveKind,
+    pub region: SheetRect,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LocalOmrPolicy {
     /// 低于该像素差分比例视为空白。
@@ -111,21 +147,32 @@ pub struct AnswerSheetTemplateDefinition {
     pub blank_artifact_sha256: String,
     pub anchors: Vec<AnswerSheetAnchor>,
     pub items: Vec<AnswerSheetItemTemplate>,
+    #[serde(default)]
+    pub subjective_regions: Vec<AnswerSheetSubjectiveRegionTemplate>,
     pub policy: LocalOmrPolicy,
 }
 
 impl AnswerSheetTemplateDefinition {
     pub fn validate(&self) -> CoreResult<()> {
-        if self.schema_version != ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION
-            || self.assessment_version_id <= 0
+        if !matches!(
+            self.schema_version,
+            LEGACY_ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION | ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION
+        ) || self.assessment_version_id <= 0
             || self.page_no <= 0
             || self.blank_artifact_id <= 0
             || self.template_version.trim().is_empty()
             || self.canvas_width < 100
             || self.canvas_height < 100
-            || self.items.is_empty()
+            || (self.items.is_empty() && self.subjective_regions.is_empty())
         {
             return Err(CoreError::Invalid("答题卡模板头信息不完整".into()));
+        }
+        if self.schema_version == LEGACY_ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION
+            && !self.subjective_regions.is_empty()
+        {
+            return Err(CoreError::Invalid(
+                "旧版答题卡模板不能包含主观作答区".into(),
+            ));
         }
         validate_sha256(&self.blank_artifact_sha256)?;
         self.policy.validate()?;
@@ -177,7 +224,34 @@ impl AnswerSheetTemplateDefinition {
                 ));
             }
         }
+        for region in &self.subjective_regions {
+            if region.assessment_item_id <= 0
+                || region.region_index < 0
+                || !item_keys.insert((region.assessment_item_id, region.region_index))
+            {
+                return Err(CoreError::Invalid(
+                    "答题卡主观题号/题区映射非法或与客观区重复".into(),
+                ));
+            }
+            region.region.validate("主观作答区")?;
+        }
         Ok(())
+    }
+
+    pub fn region_count(&self) -> usize {
+        self.items.len() + self.subjective_regions.len()
+    }
+
+    pub fn region_keys(&self) -> BTreeSet<(i64, i64)> {
+        self.items
+            .iter()
+            .map(|item| (item.assessment_item_id, item.region_index))
+            .chain(
+                self.subjective_regions
+                    .iter()
+                    .map(|region| (region.assessment_item_id, region.region_index)),
+            )
+            .collect()
     }
 
     pub fn template_hash(&self) -> CoreResult<String> {
@@ -868,6 +942,7 @@ mod tests {
                 },
                 cells: cells(),
             }],
+            subjective_regions: Vec::new(),
             policy: policy(),
         }
     }
@@ -919,6 +994,25 @@ mod tests {
         let mut definition = valid_template();
         definition.anchors.clear();
         assert!(definition.validate().is_err());
+    }
+
+    #[test]
+    fn legacy_template_cannot_hide_a_subjective_region() {
+        let mut definition = valid_template();
+        definition.subjective_regions = vec![AnswerSheetSubjectiveRegionTemplate {
+            assessment_item_id: 2,
+            region_index: 0,
+            question_type: AnswerSheetSubjectiveKind::ShortAnswer,
+            region: SheetRect {
+                x: 0.1,
+                y: 0.3,
+                width: 0.8,
+                height: 0.4,
+            },
+        }];
+        assert!(definition.validate().is_err());
+        definition.schema_version = ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION;
+        definition.validate().unwrap();
     }
 
     #[test]

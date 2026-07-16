@@ -6,14 +6,15 @@
 use std::path::{Path, PathBuf};
 
 use module_exam::answer_sheet_template_recognition::{
+    AnswerSheetTemplateItemSpec, AnswerSheetTemplateQuestionType,
     AnswerSheetTemplateRecognitionErrorCode, AnswerSheetTemplateRecognitionFailure,
     AnswerSheetTemplateRecognitionOutput, AnswerSheetTemplateRecognitionRequest,
     AnswerSheetTemplateRecognitionState, AnswerSheetTemplateRecognizerDescriptor,
     ANSWER_SHEET_TEMPLATE_RUN_SCHEMA_VERSION,
 };
-use module_exam::ordinary_paper_recognition::{OrdinaryPaperItemSpec, OrdinaryPaperQuestionType};
 use module_exam::service::answer_sheet::{
-    self, AnswerSheetTemplateRevision, ConfirmAnswerSheetTemplateInput,
+    self, AnswerSheetTemplateRevision, AnswerSheetTemplateSetStatus,
+    ConfirmAnswerSheetTemplateInput,
 };
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
@@ -41,7 +42,7 @@ pub struct AnswerSheetTemplateRunInput {
     template_version: String,
     blank_artifact: Artifact,
     image_bytes: Vec<u8>,
-    items: Vec<OrdinaryPaperItemSpec>,
+    items: Vec<AnswerSheetTemplateItemSpec>,
     input_hash: String,
 }
 
@@ -74,6 +75,7 @@ pub struct AnswerSheetTemplateStatus {
     pub assessment_version_id: i64,
     pub page_no: i64,
     pub active_template: Option<AnswerSheetTemplateRevision>,
+    pub template_set: AnswerSheetTemplateSetStatus,
 }
 
 pub enum BeginAnswerSheetTemplateRun {
@@ -192,7 +194,7 @@ fn load_items(
     conn: &Connection,
     assessment_version_id: i64,
     page_no: i64,
-) -> CoreResult<Vec<OrdinaryPaperItemSpec>> {
+) -> CoreResult<Vec<AnswerSheetTemplateItemSpec>> {
     let mut stmt = conn.prepare(
         "SELECT i.id,i.order_index,q.question_type
          FROM exam_assessment_items_v2 i
@@ -211,18 +213,16 @@ fn load_items(
     let mut items = Vec::new();
     for row in rows {
         let (assessment_item_id, order_index, question_type) = row?;
-        let question_type = OrdinaryPaperQuestionType::from_db(&question_type)
-            .ok_or_else(|| CoreError::Invalid("固定答题卡当前只支持选择题和判断题".into()))?;
-        items.push(OrdinaryPaperItemSpec {
+        let question_type = AnswerSheetTemplateQuestionType::from_db(&question_type)
+            .ok_or_else(|| CoreError::Invalid("固定答题卡包含不支持的题型".into()))?;
+        items.push(AnswerSheetTemplateItemSpec {
             assessment_item_id,
             order_index,
             question_type,
         });
     }
     if items.is_empty() {
-        return Err(CoreError::Invalid(
-            "当前答题卡页面没有可绑定的选择题或判断题".into(),
-        ));
+        return Err(CoreError::Invalid("当前答题卡页面没有可绑定的题目".into()));
     }
     Ok(items)
 }
@@ -277,6 +277,7 @@ pub fn status(conn: &Connection, reference_page_id: i64) -> CoreResult<AnswerShe
             assessment_version_id,
             page_no,
         )?,
+        template_set: answer_sheet::answer_sheet_template_set_status(conn, assessment_version_id)?,
     })
 }
 
@@ -482,10 +483,10 @@ mod tests {
             template_version: "sheet-v1".into(),
             blank_artifact: artifact,
             image_bytes: bytes,
-            items: vec![OrdinaryPaperItemSpec {
+            items: vec![AnswerSheetTemplateItemSpec {
                 assessment_item_id: 11,
                 order_index: 0,
-                question_type: OrdinaryPaperQuestionType::Single,
+                question_type: AnswerSheetTemplateQuestionType::Single,
             }],
             input_hash: String::new(),
         };

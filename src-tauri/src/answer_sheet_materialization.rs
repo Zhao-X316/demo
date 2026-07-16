@@ -33,6 +33,18 @@ const MATERIALIZATION_VERSION: &str = "answer-sheet-materialization-v1";
 pub struct AnswerSheetPageProcessingResult {
     pub structure: AnswerSheetPageMaterializationResult,
     pub observations: Vec<ObjectiveObservationResult>,
+    pub subjective_regions: Vec<AnswerSheetSubjectiveRegionProcessingResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnswerSheetSubjectiveRegionProcessingResult {
+    pub answer_region_revision_id: i64,
+    pub assessment_item_id: i64,
+    pub region_index: i64,
+    pub crop_artifact_id: i64,
+    pub state: &'static str,
+    pub next_action: &'static str,
 }
 
 struct PreparedRegion {
@@ -42,7 +54,7 @@ struct PreparedRegion {
     bytes_len: i64,
     derivative_type: String,
     archived: ArchivedFile,
-    blank_crop: Vec<u8>,
+    blank_crop: Option<Vec<u8>>,
 }
 
 struct PreparedPage {
@@ -117,7 +129,7 @@ fn prepare_files(
         &data_dir.join("archive/exam/answer-sheet/aligned"),
     )?;
 
-    let mut regions: Vec<PreparedRegion> = Vec::with_capacity(scope.definition.items.len());
+    let mut regions: Vec<PreparedRegion> = Vec::with_capacity(scope.definition.region_count());
     for item in &scope.definition.items {
         let student_crop =
             match crop_normalized_jpeg(&alignment.aligned_jpeg, &normalized(&item.region)) {
@@ -167,7 +179,49 @@ fn prepare_files(
             bytes_len: student_crop.len() as i64,
             derivative_type,
             archived,
-            blank_crop,
+            blank_crop: Some(blank_crop),
+        });
+    }
+    for item in &scope.definition.subjective_regions {
+        let student_crop =
+            match crop_normalized_jpeg(&alignment.aligned_jpeg, &normalized(&item.region)) {
+                Ok(value) => value,
+                Err(error) => {
+                    aligned.rollback_new_file();
+                    for region in &regions {
+                        region.archived.rollback_new_file();
+                    }
+                    return Err(error);
+                }
+            };
+        let hash = hashing::sha256_hex(&student_crop);
+        let derivative_type = format!(
+            "answer_sheet_subjective_region:page:{}:item:{}:region:{}",
+            page_id, item.assessment_item_id, item.region_index
+        );
+        let archived = match archive_bytes(
+            &student_crop,
+            &hash,
+            "jpg",
+            &data_dir.join("archive/exam/answer-sheet/subjective-crops"),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                aligned.rollback_new_file();
+                for region in &regions {
+                    region.archived.rollback_new_file();
+                }
+                return Err(error);
+            }
+        };
+        regions.push(PreparedRegion {
+            assessment_item_id: item.assessment_item_id,
+            region_index: item.region_index,
+            hash,
+            bytes_len: student_crop.len() as i64,
+            derivative_type,
+            archived,
+            blank_crop: None,
         });
     }
     Ok(PreparedPage {
@@ -261,10 +315,13 @@ fn recognize_regions(
         .collect::<BTreeMap<_, _>>();
     let mut observations = Vec::with_capacity(structure.regions.len());
     for region in &structure.regions {
-        let blank_crop = blank_by_key
+        let Some(blank_crop) = blank_by_key
             .get(&(region.assessment_item_id, region.region_index))
             .cloned()
-            .ok_or_else(|| CoreError::Invalid("答题卡本地 OMR 缺少空白题区".into()))?;
+            .flatten()
+        else {
+            continue;
+        };
         let recognizer = LocalAnswerSheetOmr::new(blank_crop, prepared.definition.policy.clone())?;
         let descriptor = recognizer.descriptor();
         let metadata = objective_run::load_metadata(conn, region.id)?;
@@ -295,8 +352,18 @@ pub fn process_page(
     page_id: i64,
     confirmed_by: &str,
 ) -> CoreResult<AnswerSheetPageProcessingResult> {
-    let template_revision_id =
-        answer_sheet_page::get_active_template_for_page(conn, page_id)?.id;
+    let template_revision = answer_sheet_page::get_active_template_for_page(conn, page_id)?;
+    let template_set = module_exam::service::answer_sheet::answer_sheet_template_set_status(
+        conn,
+        template_revision.assessment_version_id,
+    )?;
+    if !template_set.ready {
+        return Err(CoreError::Invalid(format!(
+            "整套答题卡模板还不完整：{}",
+            template_set.issue_codes.join("、")
+        )));
+    }
+    let template_revision_id = template_revision.id;
     let prepared = prepare_files(conn, data_dir, page_id, template_revision_id)?;
     let structure = materialize(conn, &prepared, page_id, template_revision_id, confirmed_by);
     let structure = match structure {
@@ -308,8 +375,32 @@ pub fn process_page(
     };
     let observations =
         recognize_regions(conn, page_id, template_revision_id, &prepared, &structure)?;
+    let subjective_region_ids = structure
+        .routes
+        .iter()
+        .filter(|route| route.recognition_route == "handwriting_ocr")
+        .map(|route| route.answer_region_revision_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let subjective_regions = structure
+        .regions
+        .iter()
+        .filter(|region| subjective_region_ids.contains(&region.id))
+        .map(|region| {
+            Ok(AnswerSheetSubjectiveRegionProcessingResult {
+                answer_region_revision_id: region.id,
+                assessment_item_id: region.assessment_item_id,
+                region_index: region.region_index,
+                crop_artifact_id: region
+                    .crop_artifact_id
+                    .ok_or_else(|| CoreError::Invalid("答题卡主观题区缺少已归档裁图".into()))?,
+                state: "awaiting_handwriting_recognition",
+                next_action: "进入手写 OCR 与评分点复核，不使用 OMR",
+            })
+        })
+        .collect::<CoreResult<Vec<_>>>()?;
     Ok(AnswerSheetPageProcessingResult {
         structure,
         observations,
+        subjective_regions,
     })
 }

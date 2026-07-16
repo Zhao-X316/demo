@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use module_exam::answer_sheet_recognition::{
-    AnswerSheetAnchor, AnswerSheetItemTemplate, LocalOmrPolicy,
+    AnswerSheetAnchor, AnswerSheetItemTemplate, AnswerSheetSubjectiveRegionTemplate, LocalOmrPolicy,
 };
 use module_exam::answer_sheet_template_recognition::{
     AnswerSheetTemplateRecognitionErrorCode, AnswerSheetTemplateRecognitionFailure,
@@ -22,8 +22,8 @@ use crate::secrets::VolcanoCreds;
 use crate::vlm::{ARK_URL, DEFAULT_MODEL};
 
 const MODEL_VERSION: &str = "ark-chat-completions-v3";
-const CONFIG_VERSION: &str = "answer-sheet-template-v1";
-const RULE_VERSION: &str = "answer-sheet-template-json-v1";
+const CONFIG_VERSION: &str = "answer-sheet-template-v2";
+const RULE_VERSION: &str = "answer-sheet-template-json-v2";
 
 pub struct ArkAnswerSheetTemplateRecognizer {
     api_key: String,
@@ -196,6 +196,7 @@ impl AnswerSheetTemplateRecognizer for ArkAnswerSheetTemplateRecognizer {
             canvas_height: parsed.canvas_height,
             anchors: parsed.anchors,
             items: parsed.items,
+            subjective_regions: parsed.subjective_regions,
             policy: parsed.policy,
             confidence: parsed.confidence,
             issue_codes: parsed.issue_codes,
@@ -218,6 +219,8 @@ struct ArkAnswerSheetTemplatePayload {
     canvas_height: u32,
     anchors: Vec<AnswerSheetAnchor>,
     items: Vec<AnswerSheetItemTemplate>,
+    #[serde(default)]
+    subjective_regions: Vec<AnswerSheetSubjectiveRegionTemplate>,
     policy: LocalOmrPolicy,
     confidence: f64,
     #[serde(default)]
@@ -227,7 +230,7 @@ struct ArkAnswerSheetTemplatePayload {
 fn build_prompt(request: &AnswerSheetTemplateRecognitionRequest<'_>) -> String {
     let items = serde_json::to_string(request.items).unwrap_or_else(|_| "[]".into());
     format!(
-        "你是固定答题卡空白模板分析器，只定位四角校准锚点、题号答案区和涂点格位，不读取学生答案、不判分。\n\
+        "你是固定答题卡空白模板分析器，只定位四角校准锚点、客观题涂点格和填空/简答作答区，不读取学生答案、不判分。\n\
          当前页码：{}；模板版本：{}；当前页题目清单：{}。\n\
          只输出一个 JSON 对象，不要 markdown。字段必须为：\n\
          state: ready|needs_review|blocked；canvas_width、canvas_height 必须是空白原图像素尺寸；\n\
@@ -235,6 +238,7 @@ fn build_prompt(request: &AnswerSheetTemplateRecognitionRequest<'_>) -> String {
          expected 是对应黑色定位块在空白原图上的 0~1 区域，search 是学生照片中寻找同一定位块的安全搜索区；\n\
          items: [{{assessment_item_id,region_index,question_type,region:{{x,y,width,height}},cells:[{{label,x,y,width,height}}]}}]；\n\
          question_type 为 single|multiple|true_false；region 按整页 0~1，cells 按各自 region 0~1；判断题标签必须且只能 TRUE/FALSE；\n\
+         subjective_regions: [{{assessment_item_id,region_index,question_type,region:{{x,y,width,height}}}}]，question_type 只能为 fill_blank|short_answer；主观区不得出现在 items，也不得生成 cells；\n\
          policy 固定输出 {{blank_max_ratio:0.04,marked_min_ratio:0.14,pixel_delta_threshold:24,cell_inset_ratio:0.18}}；\n\
          confidence: 0到1；issue_codes: 字符串数组。不得新增、遗漏或重复题目；找不到四个可靠黑色定位块、题号或格位时必须 needs_review/blocked；\n\
          只有四角、全部题号和全部格位都清晰且各置信度不低于 0.95 时才能 ready。",
@@ -274,8 +278,8 @@ mod tests {
     use std::thread;
 
     use image::{DynamicImage, ImageOutputFormat};
-    use module_exam::ordinary_paper_recognition::{
-        OrdinaryPaperItemSpec, OrdinaryPaperQuestionType,
+    use module_exam::answer_sheet_template_recognition::{
+        AnswerSheetTemplateItemSpec, AnswerSheetTemplateQuestionType,
     };
     use suite_core::domain::hashing;
 
@@ -307,10 +311,10 @@ mod tests {
             )
             .unwrap();
         let hash = hashing::sha256_hex(&image);
-        let items = vec![OrdinaryPaperItemSpec {
+        let items = vec![AnswerSheetTemplateItemSpec {
             assessment_item_id: 11,
             order_index: 0,
-            question_type: OrdinaryPaperQuestionType::Single,
+            question_type: AnswerSheetTemplateQuestionType::Single,
         }];
         let payload = json!({
             "state":"ready","canvas_width":1200,"canvas_height":1800,
@@ -321,6 +325,7 @@ mod tests {
                 {"key":"bottom_right","expected":{"x":0.95,"y":0.95,"width":0.03,"height":0.03},"search":{"x":0.9,"y":0.9,"width":0.1,"height":0.1}}
             ],
             "items":[{"assessment_item_id":11,"region_index":0,"question_type":"single","region":{"x":0.1,"y":0.2,"width":0.8,"height":0.08},"cells":[{"label":"A","x":0.1,"y":0.1,"width":0.1,"height":0.8},{"label":"B","x":0.3,"y":0.1,"width":0.1,"height":0.8}]}],
+            "subjective_regions":[],
             "policy":{"blank_max_ratio":0.04,"marked_min_ratio":0.14,"pixel_delta_threshold":24,"cell_inset_ratio":0.18},
             "confidence":0.99,"issue_codes":[]
         });

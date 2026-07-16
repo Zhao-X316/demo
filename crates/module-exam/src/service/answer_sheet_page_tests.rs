@@ -314,6 +314,7 @@ fn setup() -> Fixture {
                 },
             ],
         }],
+        subjective_regions: Vec::new(),
         policy: LocalOmrPolicy {
             blank_max_ratio: 0.02,
             marked_min_ratio: 0.20,
@@ -379,13 +380,16 @@ fn materialization_is_atomic_idempotent_and_has_no_grading_effects() {
     };
     assert_eq!(first.materialization.id, second.materialization.id);
     assert_eq!(first.regions.len(), 1);
-    let counts: (i64, i64, i64, i64, i64) = fixture
+    assert_eq!(first.routes.len(), 1);
+    assert_eq!(first.routes[0].recognition_route, "objective_omr");
+    let counts: (i64, i64, i64, i64, i64, i64) = fixture
         .conn
         .query_row(
             "SELECT
                (SELECT COUNT(*) FROM exam_answer_sheet_page_materializations_v2),
                (SELECT COUNT(*) FROM exam_page_alignment_revisions_v2),
                (SELECT COUNT(*) FROM exam_answer_region_revisions_v2),
+               (SELECT COUNT(*) FROM exam_answer_sheet_region_routes_v2),
                (SELECT COUNT(*) FROM exam_grade_decisions_v2),
                (SELECT COUNT(*) FROM exam_grade_publications_v2)",
             [],
@@ -396,11 +400,12 @@ fn materialization_is_atomic_idempotent_and_has_no_grading_effects() {
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             },
         )
         .unwrap();
-    assert_eq!(counts, (1, 1, 1, 0, 0));
+    assert_eq!(counts, (1, 1, 1, 1, 0, 0));
 }
 
 #[test]
@@ -429,16 +434,50 @@ fn invalid_crop_rolls_back_alignment_and_ledger() {
     .unwrap_err();
     assert!(error.to_string().contains("答案裁剪"));
     drop(tx);
-    let counts: (i64, i64, i64) = fixture
+    let counts: (i64, i64, i64, i64) = fixture
         .conn
         .query_row(
             "SELECT
                (SELECT COUNT(*) FROM exam_answer_sheet_page_materializations_v2),
                (SELECT COUNT(*) FROM exam_page_alignment_revisions_v2),
-               (SELECT COUNT(*) FROM exam_answer_region_revisions_v2)",
+               (SELECT COUNT(*) FROM exam_answer_region_revisions_v2),
+               (SELECT COUNT(*) FROM exam_answer_sheet_region_routes_v2)",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .unwrap();
-    assert_eq!(counts, (0, 0, 0));
+    assert_eq!(counts, (0, 0, 0, 0));
+}
+
+#[test]
+fn region_route_migration_backfills_legacy_objective_materialization() {
+    let fixture = setup();
+    {
+        let tx = fixture.conn.unchecked_transaction().unwrap();
+        materialize_in_transaction(&tx, &input(&fixture)).unwrap();
+        tx.commit().unwrap();
+    }
+
+    // 模拟 exam_0020 已有纯客观物化记录、尚未建立显式题区路由的升级现场。
+    fixture
+        .conn
+        .execute_batch("DROP TABLE exam_answer_sheet_region_routes_v2")
+        .unwrap();
+    fixture
+        .conn
+        .execute_batch(include_str!(
+            "../../migrations/0021_answer_sheet_region_routes.sql"
+        ))
+        .unwrap();
+
+    let route: (String, String) = fixture
+        .conn
+        .query_row(
+            "SELECT recognition_route,question_type
+             FROM exam_answer_sheet_region_routes_v2",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(route, ("objective_omr".into(), "single".into()));
 }
