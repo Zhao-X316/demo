@@ -5,6 +5,7 @@
 - 仓库只保存合成合同清单和 hash，不保存学生姓名、文件路径、原图或作答正文。
 - `repository_synthetic` 只能验证路由、状态、危险误放过和覆盖场景，不能宣称真实照片生产准确率。
 - 真实扫描/照片必须保存在仓库外的本机受限目录；完成去标识、隐私审查与保存期限登记后，才能把 `production_accuracy_claim_allowed` 设为 `true`。
+- 真实清单还必须冻结 `pilot_gate_id` 和对应闸门 JSON 的策略 hash；评估时同时提供 `--gate` 与 `--as-of`。闸门过期、撤销、内容漂移或导出/删除演练未通过时，评估器拒绝运行。
 - 三类材料共用报告结构，但分别统计：普通试卷的页面/题区，答题卡的格位/涂改，默写的行栏/评分点。
 
 离线生成报告：
@@ -16,3 +17,11 @@ cargo run -p module-exam --example evaluate_material_golden -- \
 ```
 
 报告只做只读比较，不调用识别 provider，不写成绩、发布或学习证据。
+
+闸门本身可先独立检查：
+
+```bash
+cargo run -p module-exam --example evaluate_pilot_data_gate -- \
+  --manifest /受限目录/pilot_data_gate_v1.json \
+  --as-of 2026-07-15
+```

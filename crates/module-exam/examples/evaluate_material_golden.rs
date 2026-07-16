@@ -3,8 +3,10 @@ use std::fs;
 use std::path::PathBuf;
 
 use module_exam::material_golden::{
-    evaluate_material_calibration, MaterialGoldenManifest, MaterialGoldenPredictionSet,
+    evaluate_material_calibration, evaluate_real_material_calibration, MaterialGoldenManifest,
+    MaterialGoldenPredictionSet,
 };
+use module_exam::pilot_data_gate::PilotDataGateManifest;
 
 fn argument(name: &str) -> Result<PathBuf, String> {
     let mut args = env::args().skip(1);
@@ -17,6 +19,16 @@ fn argument(name: &str) -> Result<PathBuf, String> {
         }
     }
     Err(format!("缺少 {name}"))
+}
+
+fn optional_argument(name: &str) -> Option<String> {
+    let mut args = env::args().skip(1);
+    while let Some(value) = args.next() {
+        if value == name {
+            return args.next();
+        }
+    }
+    None
 }
 
 fn run() -> Result<(), String> {
@@ -35,8 +47,23 @@ fn run() -> Result<(), String> {
             )
         })?)
         .map_err(|error| format!("predictions JSON 非法：{error}"))?;
-    let report = evaluate_material_calibration(&manifest, &predictions)
-        .map_err(|error| error.to_string())?;
+    let report = if manifest.contains_real_data() {
+        let gate_path = PathBuf::from(
+            optional_argument("--gate")
+                .ok_or_else(|| "真实黄金集必须提供 --gate 闸门清单".to_owned())?,
+        );
+        let evaluated_on = optional_argument("--as-of")
+            .ok_or_else(|| "真实黄金集必须提供 --as-of YYYY-MM-DD".to_owned())?;
+        let gate: PilotDataGateManifest = serde_json::from_slice(
+            &fs::read(&gate_path)
+                .map_err(|error| format!("无法读取 gate {}：{error}", gate_path.display()))?,
+        )
+        .map_err(|error| format!("gate JSON 非法：{error}"))?;
+        evaluate_real_material_calibration(&manifest, &predictions, &gate, &evaluated_on)
+            .map_err(|error| error.to_string())?
+    } else {
+        evaluate_material_calibration(&manifest, &predictions).map_err(|error| error.to_string())?
+    };
     println!(
         "{}",
         serde_json::to_string_pretty(&report)

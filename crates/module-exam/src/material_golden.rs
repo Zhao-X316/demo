@@ -8,6 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use suite_core::error::{CoreError, CoreResult};
 
+use crate::pilot_data_gate::{
+    PilotDataGateManifest, PilotDataGateReport, PilotDataType, PilotGateScopeKind,
+};
+
 pub const MATERIAL_GOLDEN_SCHEMA_VERSION: i64 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -58,6 +62,10 @@ pub struct MaterialGoldenGovernance {
     pub privacy_reviewed: bool,
     pub privacy_reviewed_by: String,
     pub retention_policy_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pilot_gate_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pilot_gate_policy_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,6 +209,15 @@ fn validate_prediction_unit(unit: &MaterialGoldenPredictionUnit) -> CoreResult<(
 }
 
 impl MaterialGoldenManifest {
+    pub fn contains_real_data(&self) -> bool {
+        self.cases.iter().any(|case| {
+            matches!(
+                case.source_kind,
+                MaterialGoldenSourceKind::RealScan | MaterialGoldenSourceKind::RealPhoto
+            )
+        })
+    }
+
     pub fn validate(&self) -> CoreResult<()> {
         if self.schema_version != MATERIAL_GOLDEN_SCHEMA_VERSION
             || self.dataset_id.trim().is_empty()
@@ -273,6 +290,32 @@ impl MaterialGoldenManifest {
             }
             _ => {}
         }
+        if has_real {
+            let gate_id_missing = match self.governance.pilot_gate_id.as_deref() {
+                Some(value) => value.trim().is_empty(),
+                None => true,
+            };
+            if gate_id_missing {
+                return Err(CoreError::Invalid(
+                    "真实材料黄金集必须引用已批准的试点数据闸门".into(),
+                ));
+            }
+            normalized_sha256(
+                self.governance
+                    .pilot_gate_policy_sha256
+                    .as_deref()
+                    .ok_or_else(|| {
+                        CoreError::Invalid("真实材料黄金集必须冻结闸门策略 hash".into())
+                    })?,
+                "试点数据闸门策略 hash",
+            )?;
+        } else if self.governance.pilot_gate_id.is_some()
+            || self.governance.pilot_gate_policy_sha256.is_some()
+        {
+            return Err(CoreError::Invalid(
+                "仓库合成合同集不得伪装成已获真实数据闸门放行".into(),
+            ));
+        }
         if self.production_accuracy_claim_allowed
             && (has_synthetic
                 || !has_real
@@ -328,6 +371,69 @@ impl MaterialGoldenManifest {
     }
 }
 
+/// 验证真实黄金集引用的闸门身份、策略 hash 与当前放行窗口。
+pub fn validate_real_material_gate(
+    manifest: &MaterialGoldenManifest,
+    gate: &PilotDataGateManifest,
+    evaluated_on: &str,
+) -> CoreResult<PilotDataGateReport> {
+    manifest.validate()?;
+    if !manifest.contains_real_data() {
+        return Err(CoreError::Invalid(
+            "合成合同集不需要也不得借用真实试点数据闸门".into(),
+        ));
+    }
+    if gate.scope_kind != PilotGateScopeKind::RealPilot {
+        return Err(CoreError::Invalid(
+            "合同夹具闸门不能放行真实学生材料".into(),
+        ));
+    }
+    let allows_source_image = gate
+        .allowed_data_types
+        .contains(&PilotDataType::StudentPageImage)
+        || gate
+            .allowed_data_types
+            .contains(&PilotDataType::AnswerRegionImage);
+    if !allows_source_image
+        || !gate
+            .allowed_data_types
+            .contains(&PilotDataType::MachineSuggestion)
+        || !gate
+            .allowed_data_types
+            .contains(&PilotDataType::TeacherDecision)
+    {
+        return Err(CoreError::Invalid(
+            "真实黄金集闸门必须明确允许来源图像、机器建议和老师标注".into(),
+        ));
+    }
+    let expected_gate_id = manifest
+        .governance
+        .pilot_gate_id
+        .as_deref()
+        .ok_or_else(|| CoreError::Invalid("真实黄金集缺少 gate_id".into()))?;
+    if expected_gate_id != gate.gate_id {
+        return Err(CoreError::Invalid("黄金集引用了不同的试点数据闸门".into()));
+    }
+    let report = gate.evaluate(evaluated_on)?;
+    let expected_hash = manifest
+        .governance
+        .pilot_gate_policy_sha256
+        .as_deref()
+        .ok_or_else(|| CoreError::Invalid("真实黄金集缺少闸门策略 hash".into()))?;
+    if !expected_hash.eq_ignore_ascii_case(&report.policy_sha256) {
+        return Err(CoreError::Invalid(
+            "试点数据闸门内容已变化，必须重新审批并冻结新 hash".into(),
+        ));
+    }
+    if !report.real_data_allowed {
+        return Err(CoreError::Invalid(format!(
+            "真实学生数据闸门未放行：{}",
+            report.denial_reasons.join(",")
+        )));
+    }
+    Ok(report)
+}
+
 impl MaterialGoldenPredictionSet {
     pub fn validate_for(&self, manifest: &MaterialGoldenManifest) -> CoreResult<()> {
         if self.schema_version != MATERIAL_GOLDEN_SCHEMA_VERSION
@@ -362,8 +468,32 @@ pub fn evaluate_material_calibration(
     prediction_set: &MaterialGoldenPredictionSet,
 ) -> CoreResult<MaterialCalibrationReport> {
     manifest.validate()?;
+    if manifest.contains_real_data() {
+        return Err(CoreError::Invalid(
+            "真实黄金集必须使用带已批准数据闸门的评估入口".into(),
+        ));
+    }
     prediction_set.validate_for(manifest)?;
 
+    evaluate_material_calibration_validated(manifest, prediction_set)
+}
+
+/// 真实材料只能在闸门有效、身份和策略 hash 均匹配时进入只读评估。
+pub fn evaluate_real_material_calibration(
+    manifest: &MaterialGoldenManifest,
+    prediction_set: &MaterialGoldenPredictionSet,
+    gate: &PilotDataGateManifest,
+    evaluated_on: &str,
+) -> CoreResult<MaterialCalibrationReport> {
+    validate_real_material_gate(manifest, gate, evaluated_on)?;
+    prediction_set.validate_for(manifest)?;
+    evaluate_material_calibration_validated(manifest, prediction_set)
+}
+
+fn evaluate_material_calibration_validated(
+    manifest: &MaterialGoldenManifest,
+    prediction_set: &MaterialGoldenPredictionSet,
+) -> CoreResult<MaterialCalibrationReport> {
     let predictions = prediction_set
         .predictions
         .iter()
@@ -570,6 +700,8 @@ mod tests {
         real.production_accuracy_claim_allowed = true;
         real.governance.storage_scope = MaterialGoldenStorageScope::LocalRestricted;
         real.governance.privacy_reviewed = false;
+        real.governance.pilot_gate_id = Some("pilot-gate-opaque-001".into());
+        real.governance.pilot_gate_policy_sha256 = Some("b".repeat(64));
         for case in &mut real.cases {
             case.source_kind = MaterialGoldenSourceKind::RealPhoto;
             case.artifact_sha256 = Some("a".repeat(64));
@@ -577,5 +709,78 @@ mod tests {
         assert!(real.validate().is_err());
         real.governance.privacy_reviewed = true;
         real.validate().unwrap();
+    }
+
+    #[test]
+    fn real_material_requires_current_matching_approved_gate_before_evaluation() {
+        use crate::pilot_data_gate::tests::approved_real_gate;
+
+        let mut manifest = manifests().remove(0);
+        let gate = approved_real_gate();
+        manifest.governance.storage_scope = MaterialGoldenStorageScope::LocalRestricted;
+        manifest.governance.pilot_gate_id = Some(gate.gate_id.clone());
+        manifest.governance.pilot_gate_policy_sha256 = Some(gate.policy_sha256().unwrap());
+        manifest.governance.privacy_reviewed = true;
+        manifest.production_accuracy_claim_allowed = true;
+        for case in &mut manifest.cases {
+            case.source_kind = MaterialGoldenSourceKind::RealPhoto;
+            case.artifact_sha256 = Some("a".repeat(64));
+        }
+        let predictions = perfect_predictions(&manifest);
+
+        assert!(evaluate_material_calibration(&manifest, &predictions).is_err());
+        let report =
+            evaluate_real_material_calibration(&manifest, &predictions, &gate, "2026-07-15")
+                .unwrap();
+        assert!(report.production_accuracy_claim_allowed);
+
+        let mut missing_data_scope = gate.clone();
+        missing_data_scope.allowed_data_types.retain(|data_type| {
+            !matches!(
+                data_type,
+                PilotDataType::StudentPageImage | PilotDataType::AnswerRegionImage
+            )
+        });
+        assert!(evaluate_real_material_calibration(
+            &manifest,
+            &predictions,
+            &missing_data_scope,
+            "2026-07-15"
+        )
+        .is_err());
+
+        let mut changed_gate = gate;
+        changed_gate.purpose.push_str("，变更用途");
+        assert!(evaluate_real_material_calibration(
+            &manifest,
+            &predictions,
+            &changed_gate,
+            "2026-07-15"
+        )
+        .is_err());
+        assert!(evaluate_real_material_calibration(
+            &manifest,
+            &predictions,
+            &changed_gate,
+            "2026-08-01"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn real_and_synthetic_manifests_cannot_omit_or_borrow_gate_metadata() {
+        let mut real = manifests().remove(0);
+        real.governance.storage_scope = MaterialGoldenStorageScope::LocalRestricted;
+        real.governance.privacy_reviewed = true;
+        for case in &mut real.cases {
+            case.source_kind = MaterialGoldenSourceKind::RealPhoto;
+            case.artifact_sha256 = Some("a".repeat(64));
+        }
+        assert!(real.validate().is_err());
+
+        let mut synthetic = manifests().remove(0);
+        synthetic.governance.pilot_gate_id = Some("pilot-gate-opaque-001".into());
+        synthetic.governance.pilot_gate_policy_sha256 = Some("b".repeat(64));
+        assert!(synthetic.validate().is_err());
     }
 }

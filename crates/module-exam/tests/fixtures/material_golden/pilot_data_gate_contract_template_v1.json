@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "gate_id": "replace-with-opaque-gate-id",
+  "scope_kind": "contract_fixture",
+  "state": "draft",
+  "purpose": "填写具体、受限、可停止的试点用途",
+  "responsible_party_ref_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "class_scope_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "starts_on": "2026-07-01",
+  "ends_on": "2026-07-31",
+  "allowed_data_types": [
+    "student_page_image",
+    "answer_region_image",
+    "ocr_transcript",
+    "machine_suggestion",
+    "teacher_decision"
+  ],
+  "local_retention_days": 30,
+  "retention_policy_version": "replace-with-retention-policy-version",
+  "notice": {
+    "notice_version": "replace-with-notice-version",
+    "notice_completed": false,
+    "required_authorization_completed": false,
+    "local_processing_disclosed": false,
+    "cloud_processing_disclosed": false
+  },
+  "rights": {
+    "student_export_procedure_version": "replace-after-implementation",
+    "batch_export_procedure_version": "replace-after-implementation",
+    "student_delete_procedure_version": "replace-after-implementation",
+    "batch_delete_procedure_version": "replace-after-implementation",
+    "deletion_receipt_excludes_content": true,
+    "dry_run_verified_at": null,
+    "dry_run_succeeded": false
+  },
+  "diagnostics": {
+    "default_excludes_student_name": true,
+    "default_excludes_raw_image": true,
+    "default_excludes_ocr_text": true,
+    "default_excludes_answer_text": true,
+    "explicit_opt_in_required_for_raw_evidence": true
+  },
+  "cloud_processors": [],
+  "approved_by_ref_sha256": null,
+  "approved_at": null
+}
