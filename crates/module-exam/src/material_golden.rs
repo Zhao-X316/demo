@@ -134,6 +134,9 @@ pub struct MaterialCalibrationReport {
     pub unit_state_match_count: usize,
     pub unit_value_match_count: usize,
     pub unit_false_accept_count: usize,
+    /// 预期和预测都声称已识别，但识别值 hash 不同；这是比“转人工”更危险的错误值。
+    #[serde(default)]
+    pub unit_wrong_value_count: usize,
     pub unit_false_reject_count: usize,
     pub missing_unit_count: usize,
     pub unexpected_unit_count: usize,
@@ -520,6 +523,7 @@ fn evaluate_material_calibration_validated(
     let mut unit_state_match_count = 0;
     let mut unit_value_match_count = 0;
     let mut unit_false_accept_count = 0;
+    let mut unit_wrong_value_count = 0;
     let mut unit_false_reject_count = 0;
     let mut missing_unit_count = 0;
     let mut unexpected_unit_count = 0;
@@ -575,6 +579,12 @@ fn evaluate_material_calibration_validated(
             if !expected_clear && predicted_clear {
                 unit_false_accept_count += 1;
             }
+            if expected_clear
+                && predicted_clear
+                && predicted.predicted_value_sha256 != expected.expected_value_sha256
+            {
+                unit_wrong_value_count += 1;
+            }
             if expected_clear && !predicted_clear {
                 unit_false_reject_count += 1;
             }
@@ -595,6 +605,7 @@ fn evaluate_material_calibration_validated(
         unit_state_match_count,
         unit_value_match_count,
         unit_false_accept_count,
+        unit_wrong_value_count,
         unit_false_reject_count,
         missing_unit_count,
         unexpected_unit_count,
@@ -665,6 +676,7 @@ mod tests {
             assert_eq!(report.unit_value_match_count, report.expected_unit_count);
             assert_eq!(report.unsafe_ready_count, 0);
             assert_eq!(report.unit_false_accept_count, 0);
+            assert_eq!(report.unit_wrong_value_count, 0);
             assert_eq!(report.missing_prediction_count, 0);
             assert!(!report.production_accuracy_claim_allowed);
         }
@@ -691,6 +703,21 @@ mod tests {
         let report = evaluate_material_calibration(&manifest, &predictions).unwrap();
         assert_eq!(report.unsafe_ready_count, 1);
         assert_eq!(report.unit_false_accept_count, 1);
+    }
+
+    #[test]
+    fn recognized_wrong_value_is_reported_as_a_separate_safety_error() {
+        let manifest = manifests().remove(0);
+        let mut predictions = perfect_predictions(&manifest);
+        predictions.predictions[0].predicted_units[0].predicted_value_sha256 = Some("f".repeat(64));
+
+        let report = evaluate_material_calibration(&manifest, &predictions).unwrap();
+        assert_eq!(report.unit_false_accept_count, 0);
+        assert_eq!(report.unit_wrong_value_count, 1);
+        assert_eq!(
+            report.unit_value_match_count,
+            report.expected_unit_count - 1
+        );
     }
 
     #[test]

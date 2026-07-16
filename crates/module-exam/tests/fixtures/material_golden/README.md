@@ -75,3 +75,29 @@ cargo run -p module-exam --example evaluate_material_golden -- \
 ```
 
 这里的导出/删除范围只覆盖仓库外 `PilotDatasetManifest` 声明的影子试点资产，不代表正式应用数据库、备份、录音和所有学生数据已经具备统一生产级数据权利流程。
+
+## 三材料单会话影子评估
+
+拿到三类 provider 预测后，不再逐类手工汇总。一个会话必须同时提供普通试卷、答题卡和默写，合成合同与真实材料不能混用。输出只含输入 hash、聚合计数和安全发现，且 `release_authorized` 永远为 `false`：
+
+```bash
+mkdir -p /tmp/jiaofu-shadow-pilot
+cargo run -p module-exam --example run_shadow_pilot -- \
+  --session-id shadow-contract-001 \
+  --as-of 2026-07-16 \
+  --started-at 2026-07-16T08:00:00Z \
+  --predictions-generated-at 2026-07-16T08:05:00Z \
+  --completed-at 2026-07-16T08:10:00Z \
+  --provider-ref contract-provider \
+  --model-ref contract-model \
+  --provider-config-version contract-config-v1 \
+  --ordinary-manifest crates/module-exam/tests/fixtures/material_golden/ordinary_paper_manifest_v1.json \
+  --ordinary-predictions crates/module-exam/tests/fixtures/material_golden/ordinary_paper_predictions_v1.json \
+  --answer-sheet-manifest crates/module-exam/tests/fixtures/material_golden/answer_sheet_manifest_v1.json \
+  --answer-sheet-predictions crates/module-exam/tests/fixtures/material_golden/answer_sheet_predictions_v1.json \
+  --dictation-manifest crates/module-exam/tests/fixtures/material_golden/dictation_manifest_v1.json \
+  --dictation-predictions crates/module-exam/tests/fixtures/material_golden/dictation_predictions_v1.json \
+  --output /tmp/jiaofu-shadow-pilot/result.json
+```
+
+真实材料在同一命令追加 `--gate` 与 `--rights-evidence`。三类清单必须全部引用同一当前有效闸门；缺一类、重复材料类型、混用合成/真实、闸门或数据权利证据漂移都会拒绝。会话把危险批量放行、错误识别值、误接受、缺失/额外输出和覆盖缺口列为安全发现；保守转人工只进入报告指标，不被伪装成安全通过率。

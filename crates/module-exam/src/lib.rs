@@ -15,6 +15,7 @@ pub mod ordinary_paper_recognition;
 pub mod pilot_data_gate;
 pub mod pilot_data_rights;
 pub mod service;
+pub mod shadow_pilot;
 pub mod vlm;
 
 use suite_core::models::ModuleKey;

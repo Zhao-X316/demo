@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "dataset_id": "dictation-synthetic-contract-v1",
+  "predictions": [
+    {"case_id":"dictation-normal","predicted_route":"ready_for_batch_confirm","predicted_units":[{"unit_key":"line-1-point-1","predicted_state":"recognized","predicted_value_sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}]},
+    {"case_id":"dictation-blank","predicted_route":"review_required","predicted_units":[{"unit_key":"line-1-point-1","predicted_state":"blank","predicted_value_sha256":null}]},
+    {"case_id":"dictation-wrong-text","predicted_route":"review_required","predicted_units":[{"unit_key":"line-2-point-1","predicted_state":"recognized","predicted_value_sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}]},
+    {"case_id":"dictation-ambiguous-glyph","predicted_route":"review_required","predicted_units":[{"unit_key":"line-3-point-1","predicted_state":"low_confidence","predicted_value_sha256":"1111111111111111111111111111111111111111111111111111111111111111"}]},
+    {"case_id":"dictation-erasure","predicted_route":"review_required","predicted_units":[{"unit_key":"line-4-point-1","predicted_state":"altered","predicted_value_sha256":"2222222222222222222222222222222222222222222222222222222222222222"}]},
+    {"case_id":"dictation-ocr-failed","predicted_route":"blocked","predicted_units":[{"unit_key":"line-5-point-1","predicted_state":"failed","predicted_value_sha256":null}]}
+  ]
+}

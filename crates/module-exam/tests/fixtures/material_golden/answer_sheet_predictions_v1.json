@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "dataset_id": "answer-sheet-synthetic-contract-v1",
+  "predictions": [
+    {"case_id":"answer-sheet-normal","predicted_route":"ready_for_batch_confirm","predicted_units":[{"unit_key":"question-1-bubble","predicted_state":"recognized","predicted_value_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]},
+    {"case_id":"answer-sheet-blank","predicted_route":"review_required","predicted_units":[{"unit_key":"question-1-bubble","predicted_state":"blank","predicted_value_sha256":null}]},
+    {"case_id":"answer-sheet-multiple-marks","predicted_route":"review_required","predicted_units":[{"unit_key":"question-1-bubble","predicted_state":"altered","predicted_value_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]},
+    {"case_id":"answer-sheet-erasure","predicted_route":"review_required","predicted_units":[{"unit_key":"question-2-bubble","predicted_state":"altered","predicted_value_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}]},
+    {"case_id":"answer-sheet-shadow","predicted_route":"review_required","predicted_units":[{"unit_key":"question-3-bubble","predicted_state":"low_confidence","predicted_value_sha256":null}]},
+    {"case_id":"answer-sheet-template-mismatch","predicted_route":"blocked","predicted_units":[]}
+  ]
+}
