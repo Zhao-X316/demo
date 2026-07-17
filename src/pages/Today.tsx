@@ -21,6 +21,13 @@ type PointDraft = {
   state: RecitationPointState;
   note: string;
 };
+type ReviewRisk = {
+  rank: number;
+  label: string;
+  detail: string;
+  tone: "blocking" | "review" | "normal";
+  confidence: number;
+};
 
 const POINT_STATE_LABEL: Record<RecitationPointState, string> = {
   covered: "已覆盖",
@@ -59,6 +66,78 @@ function validEvidenceSpans(point: StructuredPointCard) {
     );
 }
 
+function reviewRisk(task: TaskCard): ReviewRisk | null {
+  const sub = task.submission;
+  if (!sub?.pending_review) return null;
+  const evidenceIncomplete =
+    !sub.recognized_text?.trim() ||
+    !sub.answer_text?.trim() ||
+    sub.answer_version === null ||
+    sub.scored_answer_version === null ||
+    sub.answer_version !== sub.scored_answer_version;
+  if (evidenceIncomplete) {
+    return {
+      rank: 0,
+      label: "证据异常",
+      detail: "ASR、答案或版本证据不完整",
+      tone: "blocking",
+      confidence: 0,
+    };
+  }
+  const score = sub.structured_score;
+  const states = score?.points.map((point) => point.machine_state) ?? [];
+  if (states.includes("contradiction")) {
+    return {
+      rank: 1,
+      label: "事实矛盾",
+      detail: "评分点命中矛盾表述",
+      tone: "blocking",
+      confidence: score?.confidence ?? 0,
+    };
+  }
+  if (score?.overall_suggestion === "unable_to_score" || states.includes("uncertain")) {
+    return {
+      rank: 2,
+      label: "无法确定",
+      detail: "机器证据不确定，需要优先听辨",
+      tone: "review",
+      confidence: score?.confidence ?? 0,
+    };
+  }
+  if (sub.pass === false || states.includes("omitted") || states.includes("partial")) {
+    return {
+      rank: 3,
+      label: "错漏待核对",
+      detail: "机器建议不通过或发现评分点错漏",
+      tone: "review",
+      confidence: score?.confidence ?? 0,
+    };
+  }
+  return {
+    rank: 4,
+    label: "通过待核对",
+    detail: "机器建议通过，仍需老师确认",
+    tone: "normal",
+    confidence: score?.confidence ?? 1,
+  };
+}
+
+function pendingReviewQueue(view: TodayView) {
+  const unique = new Map<number, TaskCard>();
+  [...view.normal, ...view.makeup, ...view.review, ...view.overdue_review].forEach((task) => {
+    if (task.submission?.pending_review) unique.set(task.task_id, task);
+  });
+  return [...unique.values()].sort((left, right) => {
+    const leftRisk = reviewRisk(left)!;
+    const rightRisk = reviewRisk(right)!;
+    return (
+      leftRisk.rank - rightRisk.rank ||
+      leftRisk.confidence - rightRisk.confidence ||
+      left.student_no.localeCompare(right.student_no, "zh-CN", { numeric: true })
+    );
+  });
+}
+
 function taskResultText(r: TaskGenerateResult) {
   const parts = [`新建 ${r.created}`];
   if (r.revived) parts.push(`恢复 ${r.revived}`);
@@ -77,13 +156,17 @@ export default function Today() {
   const [classes, setClasses] = useState<Class[]>([]);
   const [toast, setToast] = useState("");
   const [reviewBusy, setReviewBusy] = useState(false);
+  const [expandedTaskId, setExpandedTaskId] = useState<number | null>(null);
 
-  const load = async () => {
+  const load = async (): Promise<TodayView | null> => {
     try {
       await dayRollover().catch(() => undefined); // 日切：没交→补背 / 到期→复习
-      setView(await dashboardToday());
+      const nextView = await dashboardToday();
+      setView(nextView);
+      return nextView;
     } catch (e) {
       setErr(String(e));
+      return null;
     }
   };
   useEffect(() => {
@@ -110,7 +193,10 @@ export default function Today() {
     try {
       await humanDecide(t.submission.submission_id, result, note, pointReview);
       setToast(result === "pass" ? "已确认通过" : result === "fail" ? "已确认不通过" : "已重开任务");
-      await load();
+      const nextView = await load();
+      if (!t.submission.human_result) {
+        setExpandedTaskId(nextView ? pendingReviewQueue(nextView)[0]?.task_id ?? null : null);
+      }
     } catch (e) {
       setErr(String(e));
     }
@@ -142,11 +228,21 @@ export default function Today() {
           <span className="n">{f.length} 人</span>
         </div>
         {f.map((t) => (
-          <TaskRow key={t.task_id} t={t} busy={reviewBusy} onDecide={confirmOne} />
+          <TaskRow
+            key={t.task_id}
+            t={t}
+            busy={reviewBusy}
+            expanded={expandedTaskId === t.task_id}
+            onToggle={() => setExpandedTaskId(expandedTaskId === t.task_id ? null : t.task_id)}
+            onDecide={confirmOne}
+          />
         ))}
       </div>
     );
   };
+  const pendingQueue = pendingReviewQueue(view);
+  const withoutPending = (list: TaskCard[]) =>
+    list.filter((task) => !task.submission?.pending_review);
 
   return (
     <div className="page">
@@ -186,11 +282,12 @@ export default function Today() {
           </button>
         </div>
       )}
-      <Section title="新背" list={view.normal} />
-      <Section title="补背" list={view.makeup} />
-      <Section title="复习" list={view.review} />
+      <Section title="待终审 · 按风险排序" list={pendingQueue} />
+      <Section title="新背" list={withoutPending(view.normal)} />
+      <Section title="补背" list={withoutPending(view.makeup)} />
+      <Section title="复习" list={withoutPending(view.review)} />
       {(filter === "all" || filter === "wait") && (
-        <Section title="逾期待老师处理" list={view.overdue_review} />
+        <Section title="逾期待老师处理" list={withoutPending(view.overdue_review)} />
       )}
 
       {assign && (
@@ -217,10 +314,14 @@ export default function Today() {
 function TaskRow({
   t,
   busy,
+  expanded,
+  onToggle,
   onDecide,
 }: {
   t: TaskCard;
   busy: boolean;
+  expanded: boolean;
+  onToggle: () => void;
   onDecide: (
     t: TaskCard,
     result: "pass" | "fail" | "reopen",
@@ -229,7 +330,6 @@ function TaskRow({
   ) => void;
 }) {
   const sub = t.submission;
-  const [expanded, setExpanded] = useState(false);
   const [note, setNote] = useState(sub?.human_note ?? "");
   const [audioState, setAudioState] = useState<"idle" | "ready" | "error">("idle");
   const [reviewMode, setReviewMode] = useState<ReviewMode>("view");
@@ -237,7 +337,10 @@ function TaskRow({
   const [pointDrafts, setPointDrafts] = useState<Record<number, PointDraft>>({});
   const [pointError, setPointError] = useState("");
   const [activeSpanKey, setActiveSpanKey] = useState("");
+  const [spanCursor, setSpanCursor] = useState(-1);
   const audioPlayerRef = useRef<AudioPlayerHandle>(null);
+  const noteRef = useRef<HTMLTextAreaElement>(null);
+  const blockRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     setNote(sub?.human_note ?? "");
     setAudioState("idle");
@@ -250,6 +353,7 @@ function TaskRow({
     );
     setPointError("");
     setActiveSpanKey("");
+    setSpanCursor(-1);
   }, [
     sub?.submission_id,
     sub?.file_path,
@@ -347,11 +451,85 @@ function TaskRow({
       }
       await audioPlayerRef.current.playRange(span.start_ms, span.end_ms);
       setActiveSpanKey(key);
+      const allSpans =
+        sub?.structured_score?.points.flatMap((candidate) =>
+          validEvidenceSpans(candidate).map((candidateSpan) => ({
+            point: candidate,
+            span: candidateSpan,
+          })),
+        ) ?? [];
+      setSpanCursor(
+        allSpans.findIndex(
+          (candidate) =>
+            candidate.point.point_result_id === point.point_result_id &&
+            candidate.span.index === span.index,
+        ),
+      );
     } catch (error) {
       setActiveSpanKey("");
       setPointError(String(error));
     }
   };
+
+  useEffect(() => {
+    if (expanded) blockRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [expanded]);
+
+  useEffect(() => {
+    if (!expanded || !sub) return undefined;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.repeat) return;
+      const target = event.target as HTMLElement | null;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      if (key === "n") {
+        event.preventDefault();
+        noteRef.current?.focus();
+        return;
+      }
+      if (key === " ") {
+        event.preventDefault();
+        audioPlayerRef.current?.togglePlayback().catch((error) => setPointError(String(error)));
+        return;
+      }
+      if (key === "j" || key === "k") {
+        const spans =
+          sub.structured_score?.points.flatMap((point) =>
+            validEvidenceSpans(point).map((span) => ({ point, span })),
+          ) ?? [];
+        if (!spans.length) return;
+        event.preventDefault();
+        const delta = key === "j" ? 1 : -1;
+        const nextIndex =
+          spanCursor < 0
+            ? key === "j"
+              ? 0
+              : spans.length - 1
+            : (spanCursor + delta + spans.length) % spans.length;
+        const next = spans[nextIndex];
+        playEvidenceSpan(next.point, next.span);
+        return;
+      }
+      if (
+        !sub.human_result &&
+        !busy &&
+        canDecide &&
+        (key === "p" || key === "f")
+      ) {
+        event.preventDefault();
+        decide(key === "p" ? "pass" : "fail");
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  });
 
   const dot =
     t.status === "passed" ? "" : t.status === "failed" ? "f" : sub ? "w" : "n";
@@ -366,8 +544,9 @@ function TaskRow({
   const canDecide = audioState === "ready" && hasAsr && hasAnswer && versionMatches;
   const machineResult = sub?.pass ? "通过" : "不通过";
   const canReview = Boolean(sub && (sub.pending_review || sub.human_result));
+  const risk = reviewRisk(t);
   return (
-    <div className="task-block">
+    <div className="task-block" ref={blockRef}>
       <div className="row">
         <span className={"dotg " + dot} />
         <Avatar name={t.student_name} />
@@ -395,6 +574,11 @@ function TaskRow({
           </>
         )}
         {sub?.pending_review && <span className="tag wait">待确认</span>}
+        {risk && (
+          <span className={`tag review-risk ${risk.tone}`} title={risk.detail}>
+            {risk.label}
+          </span>
+        )}
         {sub && !sub.pending_review && !sub.human_result && sub.recognize_status === "failed" && (
           <span className="tag fail">识别失败 · 请到批改台处理</span>
         )}
@@ -416,7 +600,7 @@ function TaskRow({
           </span>
         )}
         {canReview && (
-          <button className="sm" onClick={() => setExpanded(!expanded)}>
+          <button className="sm" onClick={onToggle}>
             {expanded ? "收起证据" : sub?.human_result ? "查看终审记录" : "查看证据并终审"}
           </button>
         )}
@@ -475,6 +659,7 @@ function TaskRow({
           <label className="evidence-note">
             <span>人工备注</span>
             <textarea
+              ref={noteRef}
               rows={3}
               value={note}
               onChange={(event) => setNote(event.target.value)}
@@ -635,6 +820,12 @@ function TaskRow({
               </div>
               {pointError && <div className="evidence-error">{pointError}</div>}
             </section>
+          )}
+
+          {!sub.human_result && (
+            <div className="review-shortcuts" aria-label="终审快捷键说明">
+              快捷键：J / K 切换疑点 · 空格播放 / 暂停 · P 通过 · F 不通过 · N 备注
+            </div>
           )}
 
           {sub.human_result ? (

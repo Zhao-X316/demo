@@ -3,6 +3,7 @@ import { forwardRef, useImperativeHandle, useRef } from "react";
 
 export interface AudioPlayerHandle {
   playRange: (startMs: number, endMs: number) => Promise<void>;
+  togglePlayback: () => Promise<void>;
 }
 
 interface AudioPlayerProps {
@@ -61,6 +62,17 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, AudioPlayerProps>(funct
       } catch (error) {
         rangeEndSeconds.current = null;
         throw error;
+      }
+    },
+    async togglePlayback() {
+      const audio = audioRef.current;
+      if (!audio || audio.readyState < 2) {
+        throw new Error("录音尚未准备好，请稍后再试");
+      }
+      if (audio.paused) {
+        await audio.play();
+      } else {
+        audio.pause();
       }
     },
   }));
