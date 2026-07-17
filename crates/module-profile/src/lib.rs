@@ -6,6 +6,7 @@
 
 pub mod class_profile;
 pub mod profile;
+pub mod teaching_events;
 
 use suite_core::models::ModuleKey;
 use suite_core::ports::{Migration, Module};
@@ -18,6 +19,10 @@ static MIGRATIONS: &[Migration] = &[
     Migration {
         id: "profile_0002",
         sql: include_str!("../migrations/0002_class_profile_snapshots.sql"),
+    },
+    Migration {
+        id: "profile_0003",
+        sql: include_str!("../migrations/0003_class_teaching_events.sql"),
     },
 ];
 

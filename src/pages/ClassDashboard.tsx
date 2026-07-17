@@ -1,15 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   AppModule,
+  ClassTeachingEvent,
   ClassProfileNodeMetric,
   ClassProfilePreview,
   ClassProfileSnapshot,
   ClassOperationsDashboard,
   DashboardTargetView,
+  createClassTeachingEvent,
   generateClassProfile,
+  listClassTeachingEvents,
   loadClassOperationsDashboard,
   loadLatestClassProfile,
   previewClassProfile,
+  reviseClassTeachingEvent,
+  voidClassTeachingEvent,
 } from "../api/classDashboard";
 import { Class, classesList } from "../api/manage";
 
@@ -62,10 +67,44 @@ const PROFILE_STATUS: Record<string, string> = {
   stale_snapshot: "需更新",
   unassessed: "未评估",
   insufficient_evidence: "证据不足",
+  evidence_insufficient: "证据不足",
+  data_unavailable: "数据不足",
   needs_support: "需要支持",
   developing: "发展中",
   stable: "较稳定",
 };
+
+const TEACHING_EVENT_TYPES: Array<{
+  value: ClassTeachingEvent["event_type"];
+  label: string;
+}> = [
+  { value: "new_lesson", label: "新课" },
+  { value: "review", label: "复习" },
+  { value: "quiz", label: "随堂检测" },
+  { value: "exam", label: "考试" },
+  { value: "holiday", label: "假期" },
+  { value: "schedule_pause", label: "教学暂停" },
+];
+
+interface TeachingEventDraft {
+  eventType: ClassTeachingEvent["event_type"];
+  title: string;
+  rangeStart: string;
+  rangeEnd: string;
+  note: string;
+}
+
+function newRequestKey(prefix: string) {
+  const random = globalThis.crypto?.randomUUID?.()
+    ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `${prefix}-${random}`;
+}
+
+function formatDelta(value: number | null) {
+  if (value === null) return "—";
+  if (value > 0) return `+${value}`;
+  return String(value);
+}
 
 function profileCellClass(status: string) {
   return `class-profile-cell ${status.replace(/_/g, "-")}`;
@@ -96,6 +135,18 @@ export default function ClassDashboard({ onNavigate, onOpenLearning }: Props) {
   const [profileError, setProfileError] = useState("");
   const [profileView, setProfileView] = useState<"knowledge" | "ability">("knowledge");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [teachingEvents, setTeachingEvents] = useState<ClassTeachingEvent[]>([]);
+  const [teachingEventLoading, setTeachingEventLoading] = useState(false);
+  const [teachingEventError, setTeachingEventError] = useState("");
+  const [editingTeachingEvent, setEditingTeachingEvent] = useState<ClassTeachingEvent | null>(null);
+  const [showTeachingEventForm, setShowTeachingEventForm] = useState(false);
+  const [teachingEventDraft, setTeachingEventDraft] = useState<TeachingEventDraft>(() => ({
+    eventType: "new_lesson",
+    title: "",
+    rangeStart: localDate(),
+    rangeEnd: localDate(),
+    note: "",
+  }));
 
   useEffect(() => {
     classesList()
@@ -165,6 +216,36 @@ export default function ClassDashboard({ onNavigate, onOpenLearning }: Props) {
     };
   }, [classId]);
 
+  useEffect(() => {
+    if (classId === null) {
+      setTeachingEvents([]);
+      return;
+    }
+    let current = true;
+    setTeachingEventLoading(true);
+    setTeachingEventError("");
+    listClassTeachingEvents({
+      classId,
+      rangeStart: profileRangeStart,
+      rangeEnd: profileRangeEnd,
+    })
+      .then((items) => {
+        if (current) setTeachingEvents(items);
+      })
+      .catch((reason) => {
+        if (current) {
+          setTeachingEvents([]);
+          setTeachingEventError(String(reason));
+        }
+      })
+      .finally(() => {
+        if (current) setTeachingEventLoading(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [classId, profileRangeStart, profileRangeEnd]);
+
   const exceptionCount = useMemo(
     () =>
       (dashboard?.recitation.recognition_failure_count ?? 0)
@@ -217,6 +298,89 @@ export default function ClassDashboard({ onNavigate, onOpenLearning }: Props) {
       setProfileError(String(reason));
     } finally {
       setProfileLoading(false);
+    }
+  };
+
+  const startTeachingEvent = (event?: ClassTeachingEvent) => {
+    setEditingTeachingEvent(event ?? null);
+    setTeachingEventDraft(event ? {
+      eventType: event.event_type,
+      title: event.title,
+      rangeStart: event.range_start,
+      rangeEnd: event.range_end,
+      note: event.note ?? "",
+    } : {
+      eventType: "new_lesson",
+      title: "",
+      rangeStart: profileRangeEnd,
+      rangeEnd: profileRangeEnd,
+      note: "",
+    });
+    setTeachingEventError("");
+    setShowTeachingEventForm(true);
+  };
+
+  const reloadTeachingEvents = async () => {
+    if (classId === null) return;
+    const items = await listClassTeachingEvents({
+      classId,
+      rangeStart: profileRangeStart,
+      rangeEnd: profileRangeEnd,
+    });
+    setTeachingEvents(items);
+  };
+
+  const saveTeachingEvent = async () => {
+    if (classId === null || !teachingEventDraft.title.trim()) return;
+    setTeachingEventLoading(true);
+    setTeachingEventError("");
+    try {
+      const common = {
+        eventType: teachingEventDraft.eventType,
+        title: teachingEventDraft.title.trim(),
+        rangeStart: teachingEventDraft.rangeStart,
+        rangeEnd: teachingEventDraft.rangeEnd,
+        note: teachingEventDraft.note.trim() || null,
+      };
+      if (editingTeachingEvent) {
+        await reviseClassTeachingEvent({
+          requestKey: newRequestKey("class-teaching-event-revise"),
+          eventKey: editingTeachingEvent.event_key,
+          expectedRevision: editingTeachingEvent.revision,
+          ...common,
+        });
+      } else {
+        await createClassTeachingEvent({
+          requestKey: newRequestKey("class-teaching-event-create"),
+          classId,
+          ...common,
+        });
+      }
+      await reloadTeachingEvents();
+      setShowTeachingEventForm(false);
+      setEditingTeachingEvent(null);
+    } catch (reason) {
+      setTeachingEventError(String(reason));
+    } finally {
+      setTeachingEventLoading(false);
+    }
+  };
+
+  const voidTeachingEvent = async (event: ClassTeachingEvent) => {
+    if (!window.confirm(`作废“${event.title}”？历史 revision 会保留。`)) return;
+    setTeachingEventLoading(true);
+    setTeachingEventError("");
+    try {
+      await voidClassTeachingEvent({
+        requestKey: newRequestKey("class-teaching-event-void"),
+        eventKey: event.event_key,
+        expectedRevision: event.revision,
+      });
+      await reloadTeachingEvents();
+    } catch (reason) {
+      setTeachingEventError(String(reason));
+    } finally {
+      setTeachingEventLoading(false);
     }
   };
 
@@ -445,6 +609,76 @@ export default function ClassDashboard({ onNavigate, onOpenLearning }: Props) {
                   </div>
                 </div>
 
+                <div className="class-profile-insights">
+                  <section className="class-profile-status-panel">
+                    <div className="dashboard-panel-head">
+                      <div>
+                        <b>本次快照的临时学习状态</b>
+                        <span>用于安排教学支持，不写回学生档案，也不是固定能力标签</span>
+                      </div>
+                    </div>
+                    <div className="class-profile-status-counts">
+                      <div><span>较稳定</span><b>{profileSnapshot.student_status_counts.stable_count}</b></div>
+                      <div><span>发展中</span><b>{profileSnapshot.student_status_counts.developing_count}</b></div>
+                      <div><span>需要支持</span><b>{profileSnapshot.student_status_counts.needs_support_count}</b></div>
+                      <div><span>证据不足</span><b>{profileSnapshot.student_status_counts.evidence_insufficient_count}</b></div>
+                      <div><span>数据不足</span><b>{profileSnapshot.student_status_counts.data_unavailable_count}</b></div>
+                    </div>
+                    <div className="class-profile-status-list">
+                      {profileSnapshot.student_statuses.map((item) => (
+                        <div key={item.student.id}>
+                          <b>{item.student.student_no}号 {item.student.name}</b>
+                          <span className={profileCellClass(item.status)}>
+                            {PROFILE_STATUS[item.status] ?? item.status}
+                          </span>
+                          <small>{item.explanation}</small>
+                          {item.reason_node_titles.length > 0 && (
+                            <em>相关节点：{item.reason_node_titles.join("、")}</em>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+
+                  <section className="class-profile-trend-panel">
+                    <div className="dashboard-panel-head">
+                      <div>
+                        <b>同口径刷新对比</b>
+                        <span>只比较同班级、同日期范围、同策略的上一次快照</span>
+                      </div>
+                    </div>
+                    {profileSnapshot.trend.comparison_status !== "comparable" ? (
+                      <div className="empty-state compact">
+                        当前没有可比较的同口径历史快照。生成下一次同范围快照后才展示变化。
+                      </div>
+                    ) : (
+                      <div className="class-profile-trend-grid">
+                        <div>
+                          <span>有个人快照</span>
+                          <b>{profileSnapshot.trend.snapshot_student_count_before} → {profileSnapshot.trend.snapshot_student_count_current}</b>
+                          <em>{formatDelta(profileSnapshot.trend.snapshot_student_count_delta)}</em>
+                        </div>
+                        <div>
+                          <span>至少一节点达门槛</span>
+                          <b>{profileSnapshot.trend.eligible_student_count_before} → {profileSnapshot.trend.eligible_student_count_current}</b>
+                          <em>{formatDelta(profileSnapshot.trend.eligible_student_count_delta)}</em>
+                        </div>
+                        <div>
+                          <span>共同薄弱知识点</span>
+                          <b>{profileSnapshot.trend.knowledge_common_support_before} → {profileSnapshot.trend.knowledge_common_support_current}</b>
+                          <em>{formatDelta(profileSnapshot.trend.knowledge_common_support_delta)}</em>
+                        </div>
+                        <div>
+                          <span>共同薄弱能力项</span>
+                          <b>{profileSnapshot.trend.ability_common_support_before} → {profileSnapshot.trend.ability_common_support_current}</b>
+                          <em>{formatDelta(profileSnapshot.trend.ability_common_support_delta)}</em>
+                        </div>
+                      </div>
+                    )}
+                    <div className="dashboard-rule-note">{profileSnapshot.trend.note}</div>
+                  </section>
+                </div>
+
                 <div className="class-profile-grid">
                   <section className="class-profile-common">
                     <div className="dashboard-panel-head">
@@ -573,6 +807,136 @@ export default function ClassDashboard({ onNavigate, onOpenLearning }: Props) {
                 </div>
               </>
             )}
+
+            <section className="class-teaching-events">
+              <div className="dashboard-panel-head">
+                <div>
+                  <b>课堂事件</b>
+                  <span>只作为这段时间的背景说明，不参与掌握计算，也不自动解释因果</span>
+                </div>
+                <button onClick={() => startTeachingEvent()} disabled={teachingEventLoading || classId === null}>
+                  记录课堂事件
+                </button>
+              </div>
+              {teachingEventError && <div className="error">{teachingEventError}</div>}
+              {showTeachingEventForm && (
+                <div className="class-teaching-event-form">
+                  <div className="class-teaching-event-fields">
+                    <label>
+                      <span>类型</span>
+                      <select
+                        value={teachingEventDraft.eventType}
+                        onChange={(event) => setTeachingEventDraft((value) => ({
+                          ...value,
+                          eventType: event.target.value as ClassTeachingEvent["event_type"],
+                        }))}
+                      >
+                        {TEACHING_EVENT_TYPES.map((item) => (
+                          <option key={item.value} value={item.value}>{item.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="wide">
+                      <span>标题</span>
+                      <input
+                        value={teachingEventDraft.title}
+                        placeholder="例如：复习洋务运动失败原因"
+                        maxLength={80}
+                        onChange={(event) => setTeachingEventDraft((value) => ({
+                          ...value,
+                          title: event.target.value,
+                        }))}
+                      />
+                    </label>
+                    <label>
+                      <span>开始</span>
+                      <input
+                        type="date"
+                        value={teachingEventDraft.rangeStart}
+                        onChange={(event) => setTeachingEventDraft((value) => ({
+                          ...value,
+                          rangeStart: event.target.value,
+                        }))}
+                      />
+                    </label>
+                    <label>
+                      <span>结束</span>
+                      <input
+                        type="date"
+                        value={teachingEventDraft.rangeEnd}
+                        onChange={(event) => setTeachingEventDraft((value) => ({
+                          ...value,
+                          rangeEnd: event.target.value,
+                        }))}
+                      />
+                    </label>
+                    <label className="wide">
+                      <span>备注（可选）</span>
+                      <input
+                        value={teachingEventDraft.note}
+                        placeholder="只记录课堂事实，不写能力结论"
+                        maxLength={500}
+                        onChange={(event) => setTeachingEventDraft((value) => ({
+                          ...value,
+                          note: event.target.value,
+                        }))}
+                      />
+                    </label>
+                  </div>
+                  <div className="class-teaching-event-actions">
+                    <button
+                      onClick={() => {
+                        setShowTeachingEventForm(false);
+                        setEditingTeachingEvent(null);
+                      }}
+                    >
+                      取消
+                    </button>
+                    <button
+                      className="primary"
+                      disabled={
+                        teachingEventLoading
+                        || !teachingEventDraft.title.trim()
+                        || !teachingEventDraft.rangeStart
+                        || !teachingEventDraft.rangeEnd
+                      }
+                      onClick={saveTeachingEvent}
+                    >
+                      {editingTeachingEvent ? "保存修正版" : "保存事件"}
+                    </button>
+                  </div>
+                </div>
+              )}
+              {teachingEventLoading && teachingEvents.length === 0 ? (
+                <div className="loading">正在读取课堂事件…</div>
+              ) : teachingEvents.length === 0 ? (
+                <div className="empty-state compact">当前日期范围没有课堂事件。</div>
+              ) : (
+                <div className="class-teaching-event-list">
+                  {teachingEvents.map((event) => (
+                    <div key={event.public_id}>
+                      <span className="tag">
+                        {TEACHING_EVENT_TYPES.find((item) => item.value === event.event_type)?.label ?? event.event_type}
+                      </span>
+                      <div>
+                        <b>{event.title}</b>
+                        <small>
+                          {event.range_start === event.range_end
+                            ? event.range_start
+                            : `${event.range_start} 至 ${event.range_end}`}
+                          {" · "}revision {event.revision}
+                        </small>
+                        {event.note && <p>{event.note}</p>}
+                      </div>
+                      <div className="class-teaching-event-row-actions">
+                        <button className="link" onClick={() => startTeachingEvent(event)}>修正</button>
+                        <button className="link danger" onClick={() => voidTeachingEvent(event)}>作废</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
           </section>
 
           <section className="dashboard-panel dashboard-students">

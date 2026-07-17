@@ -133,6 +133,52 @@ pub struct ClassProfileNodeMetric {
     pub cells: Vec<ClassProfileCell>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClassProfileStudentStatusCounts {
+    pub total_student_count: i64,
+    pub data_unavailable_count: i64,
+    pub evidence_insufficient_count: i64,
+    pub needs_support_count: i64,
+    pub developing_count: i64,
+    pub stable_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClassProfileStudentStatus {
+    pub student: ProfileStudent,
+    pub status: String,
+    pub eligible_node_count: i64,
+    pub needs_support_node_count: i64,
+    pub developing_node_count: i64,
+    pub stable_node_count: i64,
+    pub reason_node_titles: Vec<String>,
+    pub explanation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClassProfileTrend {
+    pub comparison_status: String,
+    pub comparison_kind: Option<String>,
+    pub previous_snapshot_public_id: Option<String>,
+    pub previous_revision: Option<i64>,
+    pub previous_generated_at: Option<String>,
+    pub snapshot_student_count_before: Option<i64>,
+    pub snapshot_student_count_current: i64,
+    pub snapshot_student_count_delta: Option<i64>,
+    pub eligible_student_count_before: Option<i64>,
+    pub eligible_student_count_current: i64,
+    pub eligible_student_count_delta: Option<i64>,
+    pub knowledge_common_support_before: Option<i64>,
+    pub knowledge_common_support_current: i64,
+    pub knowledge_common_support_delta: Option<i64>,
+    pub ability_common_support_before: Option<i64>,
+    pub ability_common_support_current: i64,
+    pub ability_common_support_delta: Option<i64>,
+    pub previous_status_counts: Option<ClassProfileStudentStatusCounts>,
+    pub current_status_counts: ClassProfileStudentStatusCounts,
+    pub note: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClassProfileSnapshot {
     pub public_id: String,
@@ -162,6 +208,9 @@ pub struct ClassProfileSnapshot {
     pub inputs: Vec<ClassProfileStudentInputView>,
     pub knowledge_metrics: Vec<ClassProfileNodeMetric>,
     pub ability_metrics: Vec<ClassProfileNodeMetric>,
+    pub student_status_counts: ClassProfileStudentStatusCounts,
+    pub student_statuses: Vec<ClassProfileStudentStatus>,
+    pub trend: ClassProfileTrend,
 }
 
 #[derive(Debug, Clone)]
@@ -1160,6 +1209,228 @@ fn load_nodes(
     Ok((knowledge, ability))
 }
 
+#[derive(Default)]
+struct StudentStatusAccumulator {
+    eligible: i64,
+    needs_support: i64,
+    developing: i64,
+    stable: i64,
+    reasons: BTreeSet<String>,
+}
+
+fn derive_student_statuses(
+    inputs: &[ClassProfileStudentInputView],
+    knowledge_metrics: &[ClassProfileNodeMetric],
+    ability_metrics: &[ClassProfileNodeMetric],
+) -> (
+    ClassProfileStudentStatusCounts,
+    Vec<ClassProfileStudentStatus>,
+) {
+    let mut accumulators = BTreeMap::<i64, StudentStatusAccumulator>::new();
+    for metric in knowledge_metrics.iter().chain(ability_metrics) {
+        for cell in &metric.cells {
+            let accumulator = accumulators.entry(cell.student.id).or_default();
+            match cell.status.as_str() {
+                "needs_support" => {
+                    accumulator.eligible += 1;
+                    accumulator.needs_support += 1;
+                    accumulator.reasons.insert(metric.target_title.clone());
+                }
+                "developing" => {
+                    accumulator.eligible += 1;
+                    accumulator.developing += 1;
+                    accumulator.reasons.insert(metric.target_title.clone());
+                }
+                "stable" => {
+                    accumulator.eligible += 1;
+                    accumulator.stable += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut counts = ClassProfileStudentStatusCounts {
+        total_student_count: inputs.len() as i64,
+        data_unavailable_count: 0,
+        evidence_insufficient_count: 0,
+        needs_support_count: 0,
+        developing_count: 0,
+        stable_count: 0,
+    };
+    let mut statuses = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let accumulator = accumulators.remove(&input.student.id).unwrap_or_default();
+        let (status, explanation) = if input.inclusion_status != "included" {
+            counts.data_unavailable_count += 1;
+            (
+                "data_unavailable",
+                format!("未纳入当前班级快照：{}", input.detail),
+            )
+        } else if accumulator.eligible == 0 {
+            counts.evidence_insufficient_count += 1;
+            (
+                "evidence_insufficient",
+                "当前范围没有达到个人掌握门槛的知识或能力节点。".into(),
+            )
+        } else if accumulator.needs_support > 0 {
+            counts.needs_support_count += 1;
+            (
+                "needs_support",
+                format!(
+                    "当前范围有 {} 个节点需要支持；这是本快照的教学信号，不是永久标签。",
+                    accumulator.needs_support
+                ),
+            )
+        } else if accumulator.developing > 0 {
+            counts.developing_count += 1;
+            (
+                "developing",
+                format!(
+                    "当前范围有 {} 个节点处于发展中，暂未发现需要支持节点。",
+                    accumulator.developing
+                ),
+            )
+        } else {
+            counts.stable_count += 1;
+            (
+                "stable",
+                format!(
+                    "当前范围 {} 个达到门槛的节点均相对稳定。",
+                    accumulator.stable
+                ),
+            )
+        };
+        statuses.push(ClassProfileStudentStatus {
+            student: input.student.clone(),
+            status: status.into(),
+            eligible_node_count: accumulator.eligible,
+            needs_support_node_count: accumulator.needs_support,
+            developing_node_count: accumulator.developing,
+            stable_node_count: accumulator.stable,
+            reason_node_titles: accumulator.reasons.into_iter().collect(),
+            explanation,
+        });
+    }
+    (counts, statuses)
+}
+
+fn common_support_count(metrics: &[ClassProfileNodeMetric]) -> i64 {
+    metrics
+        .iter()
+        .filter(|metric| metric.class_status == "common_needs_support")
+        .count() as i64
+}
+
+struct TrendInput<'a> {
+    class_id: i64,
+    revision: i64,
+    range_start: &'a str,
+    range_end: &'a str,
+    policy_public_id: &'a str,
+    snapshot_student_count: i64,
+    eligible_student_count: i64,
+    status_counts: &'a ClassProfileStudentStatusCounts,
+    knowledge_metrics: &'a [ClassProfileNodeMetric],
+    ability_metrics: &'a [ClassProfileNodeMetric],
+}
+
+fn load_comparable_trend(
+    conn: &Connection,
+    input: &TrendInput<'_>,
+) -> CoreResult<ClassProfileTrend> {
+    let knowledge_current = common_support_count(input.knowledge_metrics);
+    let ability_current = common_support_count(input.ability_metrics);
+    let previous = conn
+        .query_row(
+            "SELECT p.id,p.public_id,p.revision,p.generated_at,p.snapshot_student_count,
+                    p.eligible_student_count
+             FROM class_profile_snapshots p
+             JOIN class_profile_policy_versions policy ON policy.id=p.policy_id
+             WHERE p.class_id=?1 AND p.revision<?2
+               AND p.range_start=?3 AND p.range_end=?4
+               AND policy.public_id=?5
+             ORDER BY p.revision DESC LIMIT 1",
+            params![
+                input.class_id,
+                input.revision,
+                input.range_start,
+                input.range_end,
+                input.policy_public_id
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        previous_id,
+        previous_public_id,
+        previous_revision,
+        previous_generated_at,
+        previous_snapshot_count,
+        previous_eligible_count,
+    )) = previous
+    else {
+        return Ok(ClassProfileTrend {
+            comparison_status: "no_comparable_baseline".into(),
+            comparison_kind: None,
+            previous_snapshot_public_id: None,
+            previous_revision: None,
+            previous_generated_at: None,
+            snapshot_student_count_before: None,
+            snapshot_student_count_current: input.snapshot_student_count,
+            snapshot_student_count_delta: None,
+            eligible_student_count_before: None,
+            eligible_student_count_current: input.eligible_student_count,
+            eligible_student_count_delta: None,
+            knowledge_common_support_before: None,
+            knowledge_common_support_current: knowledge_current,
+            knowledge_common_support_delta: None,
+            ability_common_support_before: None,
+            ability_common_support_current: ability_current,
+            ability_common_support_delta: None,
+            previous_status_counts: None,
+            current_status_counts: input.status_counts.clone(),
+            note: "暂无同班级、同日期范围且同策略的上一版快照；不跨口径拼接趋势。".into(),
+        });
+    };
+    let previous_inputs = load_inputs(conn, previous_id)?;
+    let (previous_knowledge, previous_ability) = load_nodes(conn, previous_id)?;
+    let (previous_status_counts, _) =
+        derive_student_statuses(&previous_inputs, &previous_knowledge, &previous_ability);
+    let knowledge_before = common_support_count(&previous_knowledge);
+    let ability_before = common_support_count(&previous_ability);
+    Ok(ClassProfileTrend {
+        comparison_status: "comparable".into(),
+        comparison_kind: Some("same_scope_refresh".into()),
+        previous_snapshot_public_id: Some(previous_public_id),
+        previous_revision: Some(previous_revision),
+        previous_generated_at: Some(previous_generated_at),
+        snapshot_student_count_before: Some(previous_snapshot_count),
+        snapshot_student_count_current: input.snapshot_student_count,
+        snapshot_student_count_delta: Some(input.snapshot_student_count - previous_snapshot_count),
+        eligible_student_count_before: Some(previous_eligible_count),
+        eligible_student_count_current: input.eligible_student_count,
+        eligible_student_count_delta: Some(input.eligible_student_count - previous_eligible_count),
+        knowledge_common_support_before: Some(knowledge_before),
+        knowledge_common_support_current: knowledge_current,
+        knowledge_common_support_delta: Some(knowledge_current - knowledge_before),
+        ability_common_support_before: Some(ability_before),
+        ability_common_support_current: ability_current,
+        ability_common_support_delta: Some(ability_current - ability_before),
+        previous_status_counts: Some(previous_status_counts),
+        current_status_counts: input.status_counts.clone(),
+        note: "仅比较同一日期范围、同一策略的两次快照刷新；分母变化会影响结果，不能据此自动宣称教学导致进步或退步。".into(),
+    })
+}
+
 pub fn get_class_profile(
     conn: &Connection,
     public_id: &str,
@@ -1269,6 +1540,23 @@ pub fn get_class_profile(
     };
     let inputs = load_inputs(conn, snapshot_id)?;
     let (knowledge_metrics, ability_metrics) = load_nodes(conn, snapshot_id)?;
+    let (student_status_counts, student_statuses) =
+        derive_student_statuses(&inputs, &knowledge_metrics, &ability_metrics);
+    let trend = load_comparable_trend(
+        conn,
+        &TrendInput {
+            class_id,
+            revision,
+            range_start: &range_start,
+            range_end: &range_end,
+            policy_public_id: &policy.public_id,
+            snapshot_student_count,
+            eligible_student_count,
+            status_counts: &student_status_counts,
+            knowledge_metrics: &knowledge_metrics,
+            ability_metrics: &ability_metrics,
+        },
+    )?;
     Ok(Some(ClassProfileSnapshot {
         public_id,
         revision,
@@ -1303,6 +1591,9 @@ pub fn get_class_profile(
         inputs,
         knowledge_metrics,
         ability_metrics,
+        student_status_counts,
+        student_statuses,
+        trend,
     }))
 }
 
@@ -1589,6 +1880,10 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(generated.student_status_counts.needs_support_count, 3);
+        assert_eq!(generated.student_status_counts.data_unavailable_count, 1);
+        assert_eq!(generated.student_statuses.len(), 4);
+        assert_eq!(generated.trend.comparison_status, "no_comparable_baseline");
         let audit_count: i64 = fixture
             .conn
             .query_row(
@@ -1744,5 +2039,71 @@ mod tests {
             .unwrap();
         assert!(loaded.is_stale);
         assert_eq!(loaded.revision, 1);
+    }
+
+    #[test]
+    fn same_scope_same_policy_refresh_has_explainable_non_causal_trend() {
+        let mut fixture = setup();
+        for index in 0..3 {
+            let student_id = fixture.students[index];
+            generate_personal(
+                &mut fixture,
+                student_id,
+                &format!("trend-weak-{index}"),
+                0.0,
+                "2026-07-01",
+                "2026-07-31",
+            );
+        }
+        let first_preview = preview_class_profile(&fixture.conn, &scope(&fixture)).unwrap();
+        let first = generate_class_profile(
+            &mut fixture.conn,
+            &GenerateClassProfileInput {
+                scope: ClassProfileScope {
+                    class_id: fixture.class_id,
+                    range_start: "2026-07-01",
+                    range_end: "2026-07-31",
+                },
+                expected_source_watermark: &first_preview.source_watermark,
+                confirmed_by: "teacher-1",
+            },
+        )
+        .unwrap();
+        for index in 0..3 {
+            let student_id = fixture.students[index];
+            generate_personal(
+                &mut fixture,
+                student_id,
+                &format!("trend-good-{index}"),
+                1.0,
+                "2026-07-01",
+                "2026-07-31",
+            );
+        }
+        let second_preview = preview_class_profile(&fixture.conn, &scope(&fixture)).unwrap();
+        let second = generate_class_profile(
+            &mut fixture.conn,
+            &GenerateClassProfileInput {
+                scope: ClassProfileScope {
+                    class_id: fixture.class_id,
+                    range_start: "2026-07-01",
+                    range_end: "2026-07-31",
+                },
+                expected_source_watermark: &second_preview.source_watermark,
+                confirmed_by: "teacher-1",
+            },
+        )
+        .unwrap();
+        assert_eq!(second.trend.comparison_status, "comparable");
+        assert_eq!(
+            second.trend.comparison_kind.as_deref(),
+            Some("same_scope_refresh")
+        );
+        assert_eq!(
+            second.trend.previous_snapshot_public_id.as_deref(),
+            Some(first.public_id.as_str())
+        );
+        assert_eq!(second.trend.snapshot_student_count_delta, Some(0));
+        assert!(second.trend.note.contains("不能据此自动宣称"));
     }
 }

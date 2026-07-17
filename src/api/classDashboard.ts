@@ -169,6 +169,54 @@ export interface ClassProfileNodeMetric {
   cells: ClassProfileCell[];
 }
 
+export interface ClassProfileStudentStatusCounts {
+  total_student_count: number;
+  data_unavailable_count: number;
+  evidence_insufficient_count: number;
+  needs_support_count: number;
+  developing_count: number;
+  stable_count: number;
+}
+
+export interface ClassProfileStudentStatus {
+  student: ClassProfileStudent;
+  status:
+    | "data_unavailable"
+    | "evidence_insufficient"
+    | "needs_support"
+    | "developing"
+    | "stable";
+  eligible_node_count: number;
+  needs_support_node_count: number;
+  developing_node_count: number;
+  stable_node_count: number;
+  reason_node_titles: string[];
+  explanation: string;
+}
+
+export interface ClassProfileTrend {
+  comparison_status: string;
+  comparison_kind: string | null;
+  previous_snapshot_public_id: string | null;
+  previous_revision: number | null;
+  previous_generated_at: string | null;
+  snapshot_student_count_before: number | null;
+  snapshot_student_count_current: number;
+  snapshot_student_count_delta: number | null;
+  eligible_student_count_before: number | null;
+  eligible_student_count_current: number;
+  eligible_student_count_delta: number | null;
+  knowledge_common_support_before: number | null;
+  knowledge_common_support_current: number;
+  knowledge_common_support_delta: number | null;
+  ability_common_support_before: number | null;
+  ability_common_support_current: number;
+  ability_common_support_delta: number | null;
+  previous_status_counts: ClassProfileStudentStatusCounts | null;
+  current_status_counts: ClassProfileStudentStatusCounts;
+  note: string;
+}
+
 export interface ClassProfileSnapshot {
   public_id: string;
   revision: number;
@@ -197,12 +245,58 @@ export interface ClassProfileSnapshot {
   inputs: ClassProfileStudentInput[];
   knowledge_metrics: ClassProfileNodeMetric[];
   ability_metrics: ClassProfileNodeMetric[];
+  student_status_counts: ClassProfileStudentStatusCounts;
+  student_statuses: ClassProfileStudentStatus[];
+  trend: ClassProfileTrend;
 }
 
 export interface ClassProfileScopeInput {
   classId: number;
   rangeStart: string;
   rangeEnd: string;
+}
+
+export interface ClassTeachingEvent {
+  public_id: string;
+  event_key: string;
+  class_id: number;
+  revision: number;
+  event_type: "new_lesson" | "review" | "quiz" | "exam" | "holiday" | "schedule_pause";
+  title: string;
+  range_start: string;
+  range_end: string;
+  note: string | null;
+  state: "active" | "voided";
+  supersedes_public_id: string | null;
+  created_by: string;
+  created_at: string;
+}
+
+export interface CreateClassTeachingEventInput {
+  requestKey: string;
+  classId: number;
+  eventType: ClassTeachingEvent["event_type"];
+  title: string;
+  rangeStart: string;
+  rangeEnd: string;
+  note?: string | null;
+}
+
+export interface ReviseClassTeachingEventInput {
+  requestKey: string;
+  eventKey: string;
+  expectedRevision: number;
+  eventType: ClassTeachingEvent["event_type"];
+  title: string;
+  rangeStart: string;
+  rangeEnd: string;
+  note?: string | null;
+}
+
+export interface VoidClassTeachingEventInput {
+  requestKey: string;
+  eventKey: string;
+  expectedRevision: number;
 }
 
 export const loadClassOperationsDashboard = (classId: number, asOfDate?: string) =>
@@ -220,3 +314,15 @@ export const generateClassProfile = (
 
 export const loadLatestClassProfile = (classId: number) =>
   call<ClassProfileSnapshot | null>("latest_class_profile", { classId });
+
+export const listClassTeachingEvents = (input: ClassProfileScopeInput) =>
+  call<ClassTeachingEvent[]>("list_class_teaching_events", { input });
+
+export const createClassTeachingEvent = (input: CreateClassTeachingEventInput) =>
+  call<ClassTeachingEvent>("create_class_teaching_event", { input });
+
+export const reviseClassTeachingEvent = (input: ReviseClassTeachingEventInput) =>
+  call<ClassTeachingEvent>("revise_class_teaching_event", { input });
+
+export const voidClassTeachingEvent = (input: VoidClassTeachingEventInput) =>
+  call<ClassTeachingEvent>("void_class_teaching_event", { input });

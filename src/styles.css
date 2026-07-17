@@ -151,6 +151,22 @@ button.dashboard-action { display: grid; grid-template-columns: 34px minmax(0, 1
 .class-profile-summary > div { display: flex; flex-direction: column; gap: 6px; padding: 11px; border-radius: 8px; background: var(--bg-sub); }
 .class-profile-summary span { color: var(--muted); font-size: 11px; }
 .class-profile-summary b { font-size: 14px; line-height: 1.35; }
+.class-profile-insights { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(320px, .85fr); gap: 12px; margin: 12px 0; }
+.class-profile-status-panel, .class-profile-trend-panel { padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg-sub); }
+.class-profile-status-counts { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 7px; margin-bottom: 9px; }
+.class-profile-status-counts > div { padding: 8px; border-radius: 7px; background: var(--panel); }
+.class-profile-status-counts span { display: block; color: var(--muted); font-size: 10px; }
+.class-profile-status-counts b { display: block; margin-top: 3px; font-size: 16px; }
+.class-profile-status-list { display: flex; flex-direction: column; gap: 6px; max-height: 250px; overflow: auto; }
+.class-profile-status-list > div { display: grid; grid-template-columns: minmax(110px, auto) auto minmax(0, 1fr); gap: 6px 8px; align-items: center; padding: 8px; border-radius: 7px; background: var(--panel); }
+.class-profile-status-list b { font-size: 11.5px; }
+.class-profile-status-list small { color: var(--muted); font-size: 10.5px; line-height: 1.4; }
+.class-profile-status-list em { grid-column: 1 / -1; color: var(--text-2); font-size: 10px; font-style: normal; }
+.class-profile-trend-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin-bottom: 9px; }
+.class-profile-trend-grid > div { position: relative; padding: 9px 32px 9px 9px; border-radius: 7px; background: var(--panel); }
+.class-profile-trend-grid span { display: block; color: var(--muted); font-size: 10px; }
+.class-profile-trend-grid b { display: block; margin-top: 4px; font-size: 14px; }
+.class-profile-trend-grid em { position: absolute; top: 9px; right: 9px; color: var(--brand); font-size: 11px; font-style: normal; }
 .class-profile-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(280px, .8fr); gap: 12px; margin: 12px 0; }
 .class-profile-common, .class-profile-inputs { padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg-sub); }
 .class-profile-common-item { display: grid; grid-template-columns: minmax(160px, 1fr) auto auto; gap: 12px; align-items: center; width: 100%; margin-top: 7px; padding: 10px; text-align: left; }
@@ -185,6 +201,21 @@ button.dashboard-action { display: grid; grid-template-columns: 34px minmax(0, 1
 .class-profile-detail-students b { font-size: 11.5px; }
 .class-profile-detail-students small { grid-column: 1 / -1; color: var(--muted); font-size: 10.5px; }
 .class-profile-footnote { margin-top: 9px; color: var(--muted); font-size: 10.5px; text-align: right; }
+.class-teaching-events { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.class-teaching-event-form { margin: 10px 0; padding: 12px; border: 1px solid var(--brand-line); border-radius: 9px; background: var(--brand-weak); }
+.class-teaching-event-fields { display: grid; grid-template-columns: minmax(120px, .65fr) minmax(140px, .7fr) minmax(140px, .7fr) minmax(220px, 1.4fr); gap: 8px; }
+.class-teaching-event-fields label { display: flex; flex-direction: column; gap: 4px; }
+.class-teaching-event-fields label.wide { grid-column: span 2; }
+.class-teaching-event-fields label > span { color: var(--muted); font-size: 10.5px; }
+.class-teaching-event-fields input, .class-teaching-event-fields select { width: 100%; }
+.class-teaching-event-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.class-teaching-event-list { display: flex; flex-direction: column; gap: 7px; }
+.class-teaching-event-list > div { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 10px; border-radius: 8px; background: var(--bg-sub); }
+.class-teaching-event-list b { display: block; font-size: 12px; }
+.class-teaching-event-list small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
+.class-teaching-event-list p { margin-top: 5px; color: var(--text-2); font-size: 11px; line-height: 1.5; }
+.class-teaching-event-row-actions { display: flex; gap: 6px; }
+.class-teaching-event-row-actions .danger { color: var(--bad); }
 .empty-state.compact { padding: 14px 10px; }
 
 /* ───── M3 错题事实 / M6 掌握入口 ───── */
@@ -698,9 +729,10 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
   .dashboard-grid { grid-template-columns: 1fr; }
   .dashboard-head { flex-direction: column; }
   .dashboard-scope { flex-wrap: wrap; }
-  .class-profile-grid { grid-template-columns: 1fr; }
+  .class-profile-grid, .class-profile-insights { grid-template-columns: 1fr; }
   .class-profile-preview-counts, .class-profile-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .class-profile-detail-students { grid-template-columns: 1fr; }
+  .class-teaching-event-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .exam-grid, .exam-grid.wide-left, .intake-layout { grid-template-columns: 1fr; }
   .answer-row { grid-template-columns: 1fr; }
   .objective-toolbar { grid-template-columns: 1fr; }
@@ -733,12 +765,18 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
   .class-profile-head { align-items: stretch; flex-direction: column; }
   .class-profile-scope { align-items: stretch; flex-direction: column; width: 100%; }
   .class-profile-scope input { width: 100%; }
-  .class-profile-preview-counts, .class-profile-summary, .class-profile-detail-counts { grid-template-columns: 1fr; }
+  .class-profile-preview-counts, .class-profile-summary, .class-profile-detail-counts, .class-profile-status-counts, .class-profile-trend-grid { grid-template-columns: 1fr; }
   .class-profile-preview-actions { align-items: stretch; flex-direction: column; }
   .class-profile-common-item { grid-template-columns: 1fr; }
   .class-profile-input-list > div { grid-template-columns: 1fr auto; }
   .class-profile-input-list small { grid-column: 1 / -1; }
+  .class-profile-status-list > div { grid-template-columns: 1fr auto; }
+  .class-profile-status-list small { grid-column: 1 / -1; }
   .class-profile-toolbar { align-items: flex-start; flex-direction: column; }
+  .class-teaching-event-fields { grid-template-columns: 1fr; }
+  .class-teaching-event-fields label.wide { grid-column: auto; }
+  .class-teaching-event-list > div { grid-template-columns: auto minmax(0, 1fr); }
+  .class-teaching-event-row-actions { grid-column: 1 / -1; justify-content: flex-end; }
   .objective-evidence, .objective-facts { grid-template-columns: 1fr; }
   .intake-step-fields, .intake-upload-line { grid-template-columns: 1fr; }
   .intake-upload-line strong { text-align: left; }

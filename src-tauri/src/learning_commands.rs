@@ -8,6 +8,10 @@ use module_profile::profile::{
     self, GenerateStudentProfileInput, StudentProfilePreview, StudentProfileScope,
     StudentProfileSnapshot,
 };
+use module_profile::teaching_events::{
+    self, ClassTeachingEvent, CreateTeachingEventInput, ReviseTeachingEventInput,
+    VoidTeachingEventInput,
+};
 use module_wrongbook::correction::{self, CorrectionAssignment, CreateCorrectionInput};
 use module_wrongbook::error_cause::{self, ConfirmErrorCausesInput, ErrorCauseReview};
 use module_wrongbook::read_model::{self, ClassWrongbookDashboard};
@@ -124,6 +128,39 @@ pub struct GenerateClassProfileRequest {
     range_start: String,
     range_end: String,
     expected_source_watermark: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateTeachingEventRequest {
+    request_key: String,
+    class_id: i64,
+    event_type: String,
+    title: String,
+    range_start: String,
+    range_end: String,
+    note: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviseTeachingEventRequest {
+    request_key: String,
+    event_key: String,
+    expected_revision: i64,
+    event_type: String,
+    title: String,
+    range_start: String,
+    range_end: String,
+    note: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoidTeachingEventRequest {
+    request_key: String,
+    event_key: String,
+    expected_revision: i64,
 }
 
 #[tauri::command]
@@ -393,4 +430,82 @@ pub fn latest_class_profile(
     let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     class_profile_service::latest_class_profile(&connection, class_id)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn list_class_teaching_events(
+    state: State<'_, AppState>,
+    input: ClassProfileScopeRequest,
+) -> Result<Vec<ClassTeachingEvent>, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    teaching_events::list_teaching_events(
+        &connection,
+        input.class_id,
+        &input.range_start,
+        &input.range_end,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn create_class_teaching_event(
+    state: State<'_, AppState>,
+    input: CreateTeachingEventRequest,
+) -> Result<ClassTeachingEvent, String> {
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    teaching_events::create_teaching_event(
+        &mut connection,
+        &CreateTeachingEventInput {
+            request_key: &input.request_key,
+            class_id: input.class_id,
+            event_type: &input.event_type,
+            title: &input.title,
+            range_start: &input.range_start,
+            range_end: &input.range_end,
+            note: input.note.as_deref(),
+            actor_id: "local_teacher",
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn revise_class_teaching_event(
+    state: State<'_, AppState>,
+    input: ReviseTeachingEventRequest,
+) -> Result<ClassTeachingEvent, String> {
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    teaching_events::revise_teaching_event(
+        &mut connection,
+        &ReviseTeachingEventInput {
+            request_key: &input.request_key,
+            event_key: &input.event_key,
+            expected_revision: input.expected_revision,
+            event_type: &input.event_type,
+            title: &input.title,
+            range_start: &input.range_start,
+            range_end: &input.range_end,
+            note: input.note.as_deref(),
+            actor_id: "local_teacher",
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn void_class_teaching_event(
+    state: State<'_, AppState>,
+    input: VoidTeachingEventRequest,
+) -> Result<ClassTeachingEvent, String> {
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    teaching_events::void_teaching_event(
+        &mut connection,
+        &VoidTeachingEventInput {
+            request_key: &input.request_key,
+            event_key: &input.event_key,
+            expected_revision: input.expected_revision,
+            actor_id: "local_teacher",
+        },
+    )
+    .map_err(|error| error.to_string())
 }

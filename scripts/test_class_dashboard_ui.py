@@ -1,7 +1,7 @@
-"""M6.1 班级运行仪表盘与掌握快照浏览器冒烟测试。
+"""M6.1 班级运行仪表盘、掌握快照与课堂事件浏览器冒烟测试。
 
 通过浏览器端 Tauri invoke mock 验证运行事实、掌握预览/确认、热力图、
-班级切换和跨模块跳转；
+临时学习状态、同口径趋势、课堂事件 revision、班级切换和跨模块跳转；
 后端 SQL 口径由 Rust 单元测试覆盖。
 """
 
@@ -98,8 +98,93 @@ window.__makeClassProfile = (revision = 1) => ({
       }
     ]
   }],
-  ability_metrics: []
+  ability_metrics: [],
+  student_status_counts: {
+    total_student_count: 4, data_unavailable_count: 1,
+    evidence_insufficient_count: 0, needs_support_count: 2,
+    developing_count: 1, stable_count: 0
+  },
+  student_statuses: [
+    {
+      student: { id: 1, class_id: 1, student_no: "01", name: "小林" },
+      status: "needs_support", eligible_node_count: 1,
+      needs_support_node_count: 1, developing_node_count: 0, stable_node_count: 0,
+      reason_node_titles: ["洋务运动失败原因"],
+      explanation: "本次快照中有 1 个节点需要支持；这是临时教学线索。"
+    },
+    {
+      student: { id: 2, class_id: 1, student_no: "02", name: "小周" },
+      status: "needs_support", eligible_node_count: 1,
+      needs_support_node_count: 1, developing_node_count: 0, stable_node_count: 0,
+      reason_node_titles: ["洋务运动失败原因"],
+      explanation: "本次快照中有 1 个节点需要支持；这是临时教学线索。"
+    },
+    {
+      student: { id: 3, class_id: 1, student_no: "03", name: "小郑" },
+      status: "developing", eligible_node_count: 1,
+      needs_support_node_count: 0, developing_node_count: 1, stable_node_count: 0,
+      reason_node_titles: [],
+      explanation: "本次快照中的合格节点处于发展中。"
+    },
+    {
+      student: { id: 4, class_id: 1, student_no: "04", name: "小吴" },
+      status: "data_unavailable", eligible_node_count: 0,
+      needs_support_node_count: 0, developing_node_count: 0, stable_node_count: 0,
+      reason_node_titles: [],
+      explanation: "没有范围一致且未过期的个人快照，不能判断学习状态。"
+    }
+  ],
+  trend: revision === 1 ? {
+    comparison_status: "no_comparable_baseline", comparison_kind: null,
+    previous_snapshot_public_id: null, previous_revision: null,
+    previous_generated_at: null,
+    snapshot_student_count_before: null, snapshot_student_count_current: 3,
+    snapshot_student_count_delta: null,
+    eligible_student_count_before: null, eligible_student_count_current: 3,
+    eligible_student_count_delta: null,
+    knowledge_common_support_before: null, knowledge_common_support_current: 1,
+    knowledge_common_support_delta: null,
+    ability_common_support_before: null, ability_common_support_current: 0,
+    ability_common_support_delta: null, previous_status_counts: null,
+    current_status_counts: {
+      total_student_count: 4, data_unavailable_count: 1,
+      evidence_insufficient_count: 0, needs_support_count: 2,
+      developing_count: 1, stable_count: 0
+    },
+    note: "暂无同班级、同日期范围且同策略的上一次快照，不能展示趋势。"
+  } : {
+    comparison_status: "comparable", comparison_kind: "same_scope_refresh",
+    previous_snapshot_public_id: "class-profile-1", previous_revision: 1,
+    previous_generated_at: "2026-07-16T12:00:00Z",
+    snapshot_student_count_before: 2, snapshot_student_count_current: 3,
+    snapshot_student_count_delta: 1,
+    eligible_student_count_before: 2, eligible_student_count_current: 3,
+    eligible_student_count_delta: 1,
+    knowledge_common_support_before: 2, knowledge_common_support_current: 1,
+    knowledge_common_support_delta: -1,
+    ability_common_support_before: 0, ability_common_support_current: 0,
+    ability_common_support_delta: 0,
+    previous_status_counts: {
+      total_student_count: 4, data_unavailable_count: 2,
+      evidence_insufficient_count: 0, needs_support_count: 2,
+      developing_count: 0, stable_count: 0
+    },
+    current_status_counts: {
+      total_student_count: 4, data_unavailable_count: 1,
+      evidence_insufficient_count: 0, needs_support_count: 2,
+      developing_count: 1, stable_count: 0
+    },
+    note: "分母从 2 份个人快照变为 3 份；变化只能说明同口径刷新结果不同，不能据此宣称课堂教学导致进步或退步。"
+  }
 });
+window.__teachingEvents = [{
+  public_id: "teaching-event-1-r1", event_key: "teaching-event-1",
+  class_id: 1, revision: 1, event_type: "review",
+  title: "复习洋务运动失败原因", range_start: "2026-07-15",
+  range_end: "2026-07-15", note: "课堂集中梳理四个评分点。",
+  state: "active", supersedes_public_id: null,
+  created_by: "local_teacher", created_at: "2026-07-15T10:00:00Z"
+}];
 window.__TAURI_INTERNALS__ = {
   transformCallback: () => 1,
   unregisterCallback: () => undefined,
@@ -242,6 +327,49 @@ window.__TAURI_INTERNALS__ = {
     if (cmd === "generate_class_profile") {
       return window.__makeClassProfile(2);
     }
+    if (cmd === "list_class_teaching_events") {
+      return Number(args.input.classId) === 1 ? window.__teachingEvents : [];
+    }
+    if (cmd === "create_class_teaching_event") {
+      const input = args.input;
+      const item = {
+        public_id: "teaching-event-2-r1", event_key: "teaching-event-2",
+        class_id: input.classId, revision: 1, event_type: input.eventType,
+        title: input.title, range_start: input.rangeStart, range_end: input.rangeEnd,
+        note: input.note, state: "active", supersedes_public_id: null,
+        created_by: "local_teacher", created_at: "2026-07-17T12:10:00Z"
+      };
+      window.__teachingEvents = [...window.__teachingEvents, item];
+      return item;
+    }
+    if (cmd === "revise_class_teaching_event") {
+      const input = args.input;
+      const previous = window.__teachingEvents.find((item) => item.event_key === input.eventKey);
+      const item = {
+        ...previous, public_id: `${input.eventKey}-r${input.expectedRevision + 1}`,
+        revision: input.expectedRevision + 1, event_type: input.eventType,
+        title: input.title, range_start: input.rangeStart, range_end: input.rangeEnd,
+        note: input.note, supersedes_public_id: previous.public_id,
+        created_at: "2026-07-17T12:20:00Z"
+      };
+      window.__teachingEvents = window.__teachingEvents.map(
+        (event) => event.event_key === input.eventKey ? item : event
+      );
+      return item;
+    }
+    if (cmd === "void_class_teaching_event") {
+      const input = args.input;
+      const previous = window.__teachingEvents.find((item) => item.event_key === input.eventKey);
+      const item = {
+        ...previous, public_id: `${input.eventKey}-r${input.expectedRevision + 1}`,
+        revision: input.expectedRevision + 1, state: "voided",
+        supersedes_public_id: previous.public_id, created_at: "2026-07-17T12:30:00Z"
+      };
+      window.__teachingEvents = window.__teachingEvents.filter(
+        (event) => event.event_key !== input.eventKey
+      );
+      return item;
+    }
     if (cmd === "day_rollover") return { rolled: 0, reviews: 0 };
     if (cmd === "dashboard_today") {
       return {
@@ -271,6 +399,7 @@ def test_dashboard(base_url: str) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1440, "height": 1000})
+        page.on("dialog", lambda dialog: dialog.accept())
         page.add_init_script(MOCK_SCRIPT)
         page.goto(base_url)
         page.wait_for_load_state("networkidle")
@@ -285,7 +414,12 @@ def test_dashboard(base_url: str) -> None:
         expect(page.get_by_text("3/4 人", exact=True).first).to_be_visible()
         expect(page.get_by_text("洋务运动失败原因", exact=True).first).to_be_visible()
         expect(page.locator(".class-profile-heatmap tbody tr")).to_have_count(4)
-        expect(page.locator(".class-profile-cell.needs-support")).to_have_count(2)
+        expect(page.locator(".class-profile-heatmap .class-profile-cell.needs-support")).to_have_count(2)
+        expect(page.get_by_text("本次快照的临时学习状态", exact=True)).to_be_visible()
+        expect(page.locator(".class-profile-status-list > div")).to_have_count(4)
+        expect(page.get_by_text("不是固定能力标签", exact=False)).to_be_visible()
+        expect(page.get_by_text("当前没有可比较的同口径历史快照", exact=False)).to_be_visible()
+        expect(page.get_by_text("复习洋务运动失败原因", exact=True)).to_be_visible()
 
         page.locator(".class-profile-heatmap thead button").click()
         expect(page.locator(".class-profile-detail")).to_contain_text("合格样本")
@@ -295,6 +429,26 @@ def test_dashboard(base_url: str) -> None:
         expect(page.get_by_text("有当前快照", exact=False)).to_be_visible()
         page.get_by_role("button", name="确认生成班级快照").click()
         expect(page.locator(".class-profile-footnote")).to_contain_text("快照 v2")
+        expect(page.locator(".class-profile-trend-grid")).to_contain_text("2 → 3")
+        expect(page.get_by_text("不能据此宣称课堂教学导致进步或退步", exact=False)).to_be_visible()
+
+        page.get_by_role("button", name="记录课堂事件").click()
+        page.locator(".class-teaching-event-form input").nth(0).fill("进行辛亥革命随堂检测")
+        page.get_by_role("button", name="保存事件").click()
+        expect(page.get_by_text("进行辛亥革命随堂检测", exact=True)).to_be_visible()
+
+        created_event = page.locator(".class-teaching-event-list > div").filter(
+            has_text="进行辛亥革命随堂检测"
+        )
+        created_event.get_by_role("button", name="修正").click()
+        page.locator(".class-teaching-event-form input").nth(0).fill("进行辛亥革命随堂检测（修正）")
+        page.get_by_role("button", name="保存修正版").click()
+        expect(page.get_by_text("进行辛亥革命随堂检测（修正）", exact=True)).to_be_visible()
+        expect(page.get_by_text("revision 2", exact=False)).to_be_visible()
+        page.locator(".class-teaching-event-list > div").filter(
+            has_text="进行辛亥革命随堂检测（修正）"
+        ).get_by_role("button", name="作废").click()
+        expect(page.get_by_text("进行辛亥革命随堂检测（修正）", exact=True)).to_have_count(0)
         page.screenshot(path="/tmp/jiaofu-class-dashboard.png", full_page=True)
 
         page.locator(".dashboard-scope select").select_option("2")
