@@ -707,6 +707,7 @@ struct DecisionHashInput {
 
 #[derive(Debug)]
 struct EvidenceDecision {
+    id: i64,
     public_id: String,
     revision: i64,
     teacher_score: f64,
@@ -750,6 +751,100 @@ fn evidence_sources(
         }]);
     }
     if decision.subjective_source {
+        let component_rows: Vec<(String, String, f64, f64)> = {
+            let mut stmt = conn.prepare(
+                "SELECT source_type,source_public_id,teacher_score,max_score
+                 FROM exam_grade_decision_subjective_components_v2
+                 WHERE grade_decision_id=?1
+                 ORDER BY order_index,id",
+            )?;
+            let rows = stmt.query_map([decision.id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if !component_rows.is_empty() {
+            let (expected_type, expected_count): (&str, i64) =
+                if decision.question_type == "fill_blank" {
+                    (
+                        "answer_slot",
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM k1_answer_slots
+                             WHERE answer_key_version_id=?1",
+                            [decision.answer_key_version_id],
+                            |row| row.get(0),
+                        )?,
+                    )
+                } else if decision.question_type == "short_answer" {
+                    (
+                        "rubric_point",
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM k1_rubric_points
+                             WHERE rubric_version_id=?1",
+                            [decision.rubric_version_id],
+                            |row| row.get(0),
+                        )?,
+                    )
+                } else {
+                    return Err(CoreError::Invalid(
+                        "逐项主观题结论绑定了不支持的题型".into(),
+                    ));
+                };
+            if component_rows.len() as i64 != expected_count
+                || component_rows
+                    .iter()
+                    .any(|component| component.0 != expected_type)
+            {
+                return Err(CoreError::Invalid(
+                    "逐项主观题结论没有完整覆盖当前槽位或评分点".into(),
+                ));
+            }
+            let score_total: f64 = component_rows.iter().map(|component| component.2).sum();
+            let max_total: f64 = component_rows.iter().map(|component| component.3).sum();
+            if (score_total - decision.teacher_score).abs() > 0.000_001
+                || (max_total - decision.item_score).abs() > 0.000_001
+            {
+                return Err(CoreError::Invalid(
+                    "逐项主观题结论与老师总分或题目满分不一致".into(),
+                ));
+            }
+            return component_rows
+                .into_iter()
+                .map(
+                    |(source_type, source_public_id, teacher_score, max_score)| {
+                        let (source_type, source_ref_type, link_source_type, rule_version) =
+                            match source_type.as_str() {
+                                "answer_slot" => (
+                                    "fill_blank_slot",
+                                    "answer_slot",
+                                    "answer_slot",
+                                    "fill-blank-teacher-components-v1",
+                                ),
+                                "rubric_point" => (
+                                    "question_rubric_point",
+                                    "rubric_point",
+                                    "rubric_point",
+                                    "short-answer-teacher-components-v1",
+                                ),
+                                _ => {
+                                    return Err(CoreError::Invalid(
+                                        "逐项主观题来源类型非法".into(),
+                                    ));
+                                }
+                            };
+                        Ok(EvidenceSource {
+                            source_type,
+                            source_ref_type,
+                            source_ref_id: source_public_id.clone(),
+                            link_source_type,
+                            link_source_public_id: source_public_id,
+                            rule_version,
+                            value: (teacher_score / max_score).clamp(0.0, 1.0),
+                        })
+                    },
+                )
+                .collect();
+        }
         if decision.question_type == "fill_blank" {
             let mut stmt = conn.prepare(
                 "SELECT public_id FROM k1_answer_slots
@@ -963,8 +1058,10 @@ fn activate_evidence_target(
             object_revision: Some(decision.revision),
             note: Some(match target.source.source_type {
                 "dictation_rubric_point" => "老师显式发布后激活默写评分点正式学习证据",
-                "fill_blank_slot" => "老师显式发布后激活单槽填空正式学习证据",
-                "question_rubric_point" => "老师接受逐点评分并发布后激活简答评分点正式学习证据",
+                "fill_blank_slot" => "老师逐槽确认或接受单槽建议并发布后激活填空正式学习证据",
+                "question_rubric_point" => {
+                    "老师接受或逐点修正评分并发布后激活简答评分点正式学习证据"
+                }
                 _ => "老师显式发布后激活客观题正式学习证据",
             }),
             meta_json: None,
@@ -1016,7 +1113,7 @@ fn activate_publication_evidence(
     };
     let assessment_context = evidence_context(&context_raw);
     let mut stmt = conn.prepare(
-        "SELECT d.public_id,d.revision,d.teacher_score,d.confirmation_level,d.decided_at,
+        "SELECT d.id,d.public_id,d.revision,d.teacher_score,d.confirmation_level,d.decided_at,
                 i.public_id,i.score,i.link_set_id,rp.public_id,q.question_type,
                 i.answer_key_version_id,i.rubric_version_id,
                 CASE WHEN subjective.grade_decision_id IS NULL THEN 0 ELSE 1 END,
@@ -1040,20 +1137,21 @@ fn activate_publication_evidence(
     )?;
     let rows = stmt.query_map([attempt_id], |row| {
         Ok(EvidenceDecision {
-            public_id: row.get(0)?,
-            revision: row.get(1)?,
-            teacher_score: row.get(2)?,
-            confirmation_level: row.get(3)?,
-            decided_at: row.get(4)?,
-            item_public_id: row.get(5)?,
-            item_score: row.get(6)?,
-            link_set_id: row.get(7)?,
-            dictation_rubric_point_public_id: row.get(8)?,
-            question_type: row.get(9)?,
-            answer_key_version_id: row.get(10)?,
-            rubric_version_id: row.get(11)?,
-            subjective_source: row.get::<_, i64>(12)? != 0,
-            short_answer_result_json: row.get(13)?,
+            id: row.get(0)?,
+            public_id: row.get(1)?,
+            revision: row.get(2)?,
+            teacher_score: row.get(3)?,
+            confirmation_level: row.get(4)?,
+            decided_at: row.get(5)?,
+            item_public_id: row.get(6)?,
+            item_score: row.get(7)?,
+            link_set_id: row.get(8)?,
+            dictation_rubric_point_public_id: row.get(9)?,
+            question_type: row.get(10)?,
+            answer_key_version_id: row.get(11)?,
+            rubric_version_id: row.get(12)?,
+            subjective_source: row.get::<_, i64>(13)? != 0,
+            short_answer_result_json: row.get(14)?,
         })
     })?;
     let decisions = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1656,6 +1754,7 @@ mod tests {
         result_json: Option<String>,
     ) -> EvidenceDecision {
         EvidenceDecision {
+            id: 1,
             public_id: "decision-test".into(),
             revision: 1,
             teacher_score: 1.0,

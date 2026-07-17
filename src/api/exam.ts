@@ -622,6 +622,7 @@ export interface SubjectiveWorkbenchRow {
   teacher_corrected_text: string | null;
   confidence: number | null;
   answer_json: string;
+  answer_slots_json: string;
   rubric_points_json: string;
   suggestion_id: number;
   short_answer_analysis_id: number | null;
@@ -638,8 +639,17 @@ export interface SubjectiveWorkbenchRow {
   review_mode: "single" | "teacher_corrected" | null;
   current_suggestion_confirmed: boolean;
   decided_at: string | null;
+  teacher_components_json: string;
   accepted_answer_promotion_id: number | null;
   accepted_answer_promoted_at: string | null;
+}
+
+export interface SubjectiveComponentGradeInput {
+  source_type: "answer_slot" | "rubric_point";
+  source_public_id: string;
+  teacher_score: number;
+  evidence_text: string | null;
+  teacher_note: string | null;
 }
 
 export interface ShortAnswerGradeAnalysis {
@@ -1072,6 +1082,16 @@ export const examAnswerSheetSubjectiveCorrect = (
 ) => call<GradeDecision>("exam_answer_sheet_subjective_correct", {
   suggestionId: suggestion_id,
   teacherScore: teacher_score,
+  teacherNote: teacher_note,
+});
+
+export const examAnswerSheetSubjectiveCorrectComponents = (
+  suggestion_id: number,
+  components: SubjectiveComponentGradeInput[],
+  teacher_note: string,
+) => call<GradeDecision>("exam_answer_sheet_subjective_correct_components", {
+  suggestionId: suggestion_id,
+  components,
   teacherNote: teacher_note,
 });
 

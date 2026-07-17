@@ -43,6 +43,7 @@ import {
   examAnswerSheetPromoteAcceptedAnswer,
   examAnswerSheetSubjectiveAccept,
   examAnswerSheetSubjectiveCorrect,
+  examAnswerSheetSubjectiveCorrectComponents,
   examAnswerSheetSubjectivePublishAttempt,
   examAnswerSheetSubjectiveWorkbench,
   examSubjectiveLinkEditor,
@@ -204,14 +205,73 @@ function shortAnswerRubricPoints(raw: string | null) {
   try {
     const value = JSON.parse(raw) as Record<string, unknown>;
     if (!Array.isArray(value.rubric_points)) return [];
-    return value.rubric_points.map((rawPoint, index) => {
+    return value.rubric_points.flatMap((rawPoint, index) => {
+      if (!rawPoint || typeof rawPoint !== "object" || Array.isArray(rawPoint)) return [];
       const point = rawPoint as Record<string, unknown>;
-      return {
+      return [{
+        sourcePublicId: typeof point.source_public_id === "string" ? point.source_public_id : "",
         stableId: typeof point.stable_id === "string" ? point.stable_id : `point-${index}`,
         orderIndex: typeof point.order_index === "number" ? point.order_index : index,
         canonicalText: typeof point.canonical_text === "string" ? point.canonical_text : "未识别评分点",
         maxScore: typeof point.max_score === "number" ? point.max_score : 0,
-      };
+      }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function fillAnswerSlots(raw: string | null) {
+  if (!raw) return [];
+  try {
+    const value = JSON.parse(raw) as Record<string, unknown>;
+    if (!Array.isArray(value.answer_slots)) return [];
+    return value.answer_slots.flatMap((rawSlot, index) => {
+      if (!rawSlot || typeof rawSlot !== "object" || Array.isArray(rawSlot)) return [];
+      const slot = rawSlot as Record<string, unknown>;
+      let canonicalAnswers: string[] = [];
+      if (typeof slot.canonical_answers_json === "string") {
+        try {
+          const canonical = JSON.parse(slot.canonical_answers_json) as Record<string, unknown>;
+          if (Array.isArray(canonical.answers)) {
+            canonicalAnswers = canonical.answers.filter((item): item is string => typeof item === "string");
+          }
+        } catch {
+          canonicalAnswers = [];
+        }
+      }
+      return [{
+        sourcePublicId: typeof slot.source_public_id === "string" ? slot.source_public_id : "",
+        stableId: typeof slot.stable_id === "string" ? slot.stable_id : `slot-${index}`,
+        orderIndex: typeof slot.order_index === "number" ? slot.order_index : index,
+        canonicalText: canonicalAnswers.join(" / ") || "标准答案待核对",
+        maxScore: typeof slot.max_score === "number" ? slot.max_score : 0,
+      }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function teacherComponentResults(raw: string | null) {
+  if (!raw) return [];
+  try {
+    const value = JSON.parse(raw) as Record<string, unknown>;
+    if (!Array.isArray(value.component_results)) return [];
+    return value.component_results.flatMap((rawComponent) => {
+      if (!rawComponent || typeof rawComponent !== "object" || Array.isArray(rawComponent)) return [];
+      const component = rawComponent as Record<string, unknown>;
+      if (component.source_type !== "answer_slot" && component.source_type !== "rubric_point") return [];
+      return [{
+        sourceType: component.source_type,
+        sourcePublicId: typeof component.source_public_id === "string" ? component.source_public_id : "",
+        stableId: typeof component.stable_id === "string" ? component.stable_id : "unknown",
+        teacherScore: typeof component.teacher_score === "number" ? component.teacher_score : 0,
+        maxScore: typeof component.max_score === "number" ? component.max_score : 0,
+        resultStatus: typeof component.result_status === "string" ? component.result_status : "incorrect",
+        evidenceText: typeof component.evidence_text === "string" ? component.evidence_text : "",
+        teacherNote: typeof component.teacher_note === "string" ? component.teacher_note : "",
+      }];
     });
   } catch {
     return [];
@@ -2194,6 +2254,9 @@ function SubjectiveReviewTab({
   const [corrections, setCorrections] = useState<Record<number, string>>({});
   const [manualScores, setManualScores] = useState<Record<number, string>>({});
   const [manualNotes, setManualNotes] = useState<Record<number, string>>({});
+  const [componentScores, setComponentScores] = useState<Record<string, string>>({});
+  const [componentEvidence, setComponentEvidence] = useState<Record<string, string>>({});
+  const [componentNotes, setComponentNotes] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (!assessmentVersions.some((version) => version.id === assessmentVersionId)) {
@@ -2331,6 +2394,77 @@ function SubjectiveReviewTab({
     }
   }
 
+  async function correctComponents(row: SubjectiveWorkbenchRow) {
+    const note = (manualNotes[row.suggestion_id] ?? "").trim();
+    if (!note) {
+      onError("逐项终审仍需填写本题整体判定依据");
+      return;
+    }
+    const pointResults = shortAnswerPointResults(row.suggestion_result_json);
+    const specs = row.question_type === "fill_blank"
+      ? fillAnswerSlots(row.answer_slots_json).map((slot) => ({ ...slot, sourceType: "answer_slot" as const }))
+      : shortAnswerRubricPoints(row.rubric_points_json).map((point) => ({
+        ...point,
+        sourceType: "rubric_point" as const,
+      }));
+    if (!specs.length || specs.some((spec) => !spec.sourcePublicId || spec.maxScore <= 0)) {
+      onError("当前答案版本缺少完整槽位或评分点，请先修正答案规则");
+      return;
+    }
+    const components = specs.map((spec) => {
+      const key = `${row.suggestion_id}:${spec.sourcePublicId}`;
+      const machinePoint = pointResults.find((point) => point.stableId === spec.stableId);
+      const defaultScore = row.question_type === "short_answer"
+        ? machinePoint?.suggestedScore
+        : specs.length === 1
+          ? row.suggested_score
+          : undefined;
+      const defaultEvidence = row.question_type === "short_answer"
+        ? machinePoint?.evidenceSnippets[0] ?? ""
+        : specs.length === 1
+          ? row.teacher_corrected_text ?? row.normalized_text ?? row.raw_ocr_text ?? ""
+          : "";
+      return {
+        source_type: spec.sourceType,
+        source_public_id: spec.sourcePublicId,
+        teacher_score: Number(componentScores[key] ?? String(defaultScore ?? "")),
+        evidence_text: (componentEvidence[key] ?? defaultEvidence).trim() || null,
+        teacher_note: (componentNotes[key] ?? "").trim() || null,
+        label: spec.canonicalText,
+        maxScore: spec.maxScore,
+      };
+    });
+    const invalid = components.find((component) => (
+      !Number.isFinite(component.teacher_score)
+      || component.teacher_score < 0
+      || component.teacher_score > component.maxScore
+      || (component.teacher_score > 0 && !component.evidence_text)
+    ));
+    if (invalid) {
+      onError(`${invalid.label}：得分必须位于 0~${invalid.maxScore}，给分时必须填写学生作答证据`);
+      return;
+    }
+    setBusy(true);
+    try {
+      const decision = await examAnswerSheetSubjectiveCorrectComponents(
+        row.suggestion_id,
+        components.map((component) => ({
+          source_type: component.source_type,
+          source_public_id: component.source_public_id,
+          teacher_score: component.teacher_score,
+          evidence_text: component.evidence_text,
+          teacher_note: component.teacher_note,
+        })),
+        note,
+      );
+      onDone(`已逐项确认 ${row.student_name} 的第${row.question_no}题，自动汇总为 ${decision.teacher_score} 分`);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function promoteAcceptedAnswer(row: SubjectiveWorkbenchRow) {
     if (row.grade_decision_id == null) {
       onError("请先完成本题人工终审");
@@ -2424,9 +2558,14 @@ function SubjectiveReviewTab({
             ?? row.raw_ocr_text
             ?? "";
           const rubricPoints = shortAnswerRubricPoints(row.rubric_points_json);
+          const answerSlots = fillAnswerSlots(row.answer_slots_json);
           const pointResults = row.short_answer_analysis_id == null
             ? []
             : shortAnswerPointResults(row.suggestion_result_json);
+          const componentSpecs = row.question_type === "fill_blank"
+            ? answerSlots.map((slot) => ({ ...slot, sourceType: "answer_slot" as const }))
+            : rubricPoints.map((point) => ({ ...point, sourceType: "rubric_point" as const }));
+          const confirmedComponents = teacherComponentResults(row.teacher_components_json);
           return (
             <article className={row.current_suggestion_confirmed ? "objective-review-row confirmed" : "objective-review-row"} key={row.suggestion_id}>
               <div className="objective-student">
@@ -2479,6 +2618,22 @@ function SubjectiveReviewTab({
                   </div>
                 )
               )}
+              {confirmedComponents.length > 0 && (
+                <div className="short-answer-analysis teacher-components">
+                  {confirmedComponents.map((component) => (
+                    <div className={`short-answer-point ${component.resultStatus}`} key={component.sourcePublicId}>
+                      <div>
+                        <b>{componentSpecs.find((item) => item.sourcePublicId === component.sourcePublicId)?.canonicalText || component.stableId}</b>
+                        <span>老师逐项确认 · {component.teacherScore} / {component.maxScore} 分</span>
+                      </div>
+                      {component.evidenceText
+                        ? <q>{component.evidenceText}</q>
+                        : <em>本项未给分，无需填写作答证据</em>}
+                      {component.teacherNote && <p>{component.teacherNote}</p>}
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="objective-actions">
                 {!row.current_suggestion_confirmed
                   && row.question_type === "short_answer"
@@ -2506,9 +2661,77 @@ function SubjectiveReviewTab({
                 {!row.current_suggestion_confirmed && row.result_state === "recognize_failed" && (
                   <button disabled={busy} onClick={() => void retry(row)}>重新识别本题</button>
                 )}
+                {!row.current_suggestion_confirmed && componentSpecs.length > 0 && (
+                  <details open={row.question_type === "short_answer" || componentSpecs.length > 1}>
+                    <summary>{row.question_type === "fill_blank" ? "按空格逐项确认" : "按评分点逐项确认"}</summary>
+                    <div className="short-answer-analysis component-editor">
+                      {componentSpecs.map((component) => {
+                        const key = `${row.suggestion_id}:${component.sourcePublicId}`;
+                        const machinePoint = pointResults.find((point) => point.stableId === component.stableId);
+                        const defaultScore = row.question_type === "short_answer"
+                          ? machinePoint?.suggestedScore
+                          : componentSpecs.length === 1
+                            ? row.suggested_score
+                            : undefined;
+                        const defaultEvidence = row.question_type === "short_answer"
+                          ? machinePoint?.evidenceSnippets[0] ?? ""
+                          : componentSpecs.length === 1
+                            ? row.teacher_corrected_text ?? row.normalized_text ?? row.raw_ocr_text ?? ""
+                            : "";
+                        return (
+                          <div className="short-answer-point" key={component.sourcePublicId}>
+                            <div>
+                              <b>{component.canonicalText}</b>
+                              <span>满分 {component.maxScore} 分</span>
+                            </div>
+                            <label className="field">
+                              <span className="fl">本项得分</span>
+                              <input type="number" min="0" max={component.maxScore} step="0.5"
+                                value={componentScores[key] ?? String(defaultScore ?? "")}
+                                onChange={(event) => setComponentScores((current) => ({
+                                  ...current,
+                                  [key]: event.target.value,
+                                }))} />
+                            </label>
+                            <label className="field">
+                              <span className="fl">学生作答证据（给分时必填）</span>
+                              <input type="text" placeholder="按原图填写本槽答案或引用学生答案原文"
+                                value={componentEvidence[key] ?? defaultEvidence}
+                                onChange={(event) => setComponentEvidence((current) => ({
+                                  ...current,
+                                  [key]: event.target.value,
+                                }))} />
+                            </label>
+                            <label className="field">
+                              <span className="fl">本项备注（可选）</span>
+                              <input type="text" placeholder="如：表述不完整，给一半分"
+                                value={componentNotes[key] ?? ""}
+                                onChange={(event) => setComponentNotes((current) => ({
+                                  ...current,
+                                  [key]: event.target.value,
+                                }))} />
+                            </label>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <label className="field">
+                      <span className="fl">本题整体判定依据（必填）</span>
+                      <input type="text" placeholder="如：第1空正确，第2空年份错误"
+                        value={manualNotes[row.suggestion_id] ?? ""}
+                        onChange={(event) => setManualNotes((current) => ({
+                          ...current,
+                          [row.suggestion_id]: event.target.value,
+                        }))} />
+                    </label>
+                    <button className="primary" disabled={busy} onClick={() => void correctComponents(row)}>
+                      保存逐项结论并自动汇总
+                    </button>
+                  </details>
+                )}
                 {!row.current_suggestion_confirmed && (
-                  <details open={row.question_type === "short_answer" || row.suggested_score == null}>
-                    <summary>人工记分</summary>
+                  <details>
+                    <summary>仅记整题总分（不形成逐项图谱证据）</summary>
                     <label className="field">
                       <span className="fl">得分（满分 {row.max_score}）</span>
                       <input type="number" min="0" max={row.max_score} step="0.5"
@@ -2525,6 +2748,7 @@ function SubjectiveReviewTab({
                   </details>
                 )}
                 {row.question_type === "fill_blank"
+                  && answerSlots.length === 1
                   && row.current_suggestion_confirmed
                   && row.confirmation_level === "teacher_corrected"
                   && row.teacher_score != null

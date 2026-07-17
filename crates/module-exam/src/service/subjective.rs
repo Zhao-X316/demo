@@ -118,6 +118,7 @@ pub struct SubjectiveWorkbenchRow {
     pub teacher_corrected_text: Option<String>,
     pub confidence: Option<f64>,
     pub answer_json: String,
+    pub answer_slots_json: String,
     pub rubric_points_json: String,
     pub suggestion_id: i64,
     pub short_answer_analysis_id: Option<i64>,
@@ -134,6 +135,7 @@ pub struct SubjectiveWorkbenchRow {
     pub review_mode: Option<String>,
     pub current_suggestion_confirmed: bool,
     pub decided_at: Option<String>,
+    pub teacher_components_json: String,
     pub accepted_answer_promotion_id: Option<i64>,
     pub accepted_answer_promoted_at: Option<String>,
 }
@@ -142,6 +144,28 @@ pub struct SubjectiveWorkbenchRow {
 pub struct SubjectiveWorkbench {
     pub rows: Vec<SubjectiveWorkbenchRow>,
     pub attempts: Vec<ObjectiveAttemptSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubjectiveComponentGradeInput {
+    pub source_type: String,
+    pub source_public_id: String,
+    pub teacher_score: f64,
+    pub evidence_text: Option<String>,
+    pub teacher_note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubjectiveComponentGradeResult {
+    pub source_type: String,
+    pub source_public_id: String,
+    pub stable_id: String,
+    pub order_index: i64,
+    pub teacher_score: f64,
+    pub max_score: f64,
+    pub result_status: String,
+    pub evidence_text: Option<String>,
+    pub teacher_note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -170,9 +194,21 @@ struct ReviewScope {
     suggestion: SubjectiveGradeSuggestion,
     short_answer_analysis_id: Option<i64>,
     max_score: f64,
+    question_type: String,
+    transcription_result_state: String,
+    effective_text: Option<String>,
     transcription_state: String,
     region_state: String,
     region_decision: String,
+}
+
+#[derive(Debug)]
+struct ExpectedSubjectiveComponent {
+    source_type: &'static str,
+    source_public_id: String,
+    stable_id: String,
+    order_index: i64,
+    max_score: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1309,7 +1345,9 @@ fn review_scope(conn: &Connection, suggestion_id: i64) -> CoreResult<ReviewScope
                 COALESCE(analysis.result_json,s.result_json),
                 COALESCE(analysis.confidence,s.confidence),
                 s.batch_eligible,COALESCE(analysis.exclusion_reason,s.exclusion_reason),s.state,
-                analysis.id,item.score,t.state,region.state,region.decision
+                analysis.id,item.score,t.question_type,t.result_state,
+                COALESCE(t.teacher_corrected_text,t.normalized_text,t.raw_ocr_text),
+                t.state,region.state,region.decision
          FROM exam_subjective_grade_suggestions_v2 s
          JOIN exam_subjective_transcription_revisions_v2 t
            ON t.id=s.transcription_revision_id
@@ -1348,9 +1386,12 @@ fn review_scope(conn: &Connection, suggestion_id: i64) -> CoreResult<ReviewScope
                 },
                 short_answer_analysis_id: row.get(15)?,
                 max_score: row.get(16)?,
-                transcription_state: row.get(17)?,
-                region_state: row.get(18)?,
-                region_decision: row.get(19)?,
+                question_type: row.get(17)?,
+                transcription_result_state: row.get(18)?,
+                effective_text: row.get(19)?,
+                transcription_state: row.get(20)?,
+                region_state: row.get(21)?,
+                region_decision: row.get(22)?,
             })
         },
     )
@@ -1449,6 +1490,286 @@ fn validate_active_review(scope: &ReviewScope) -> CoreResult<()> {
         ));
     }
     Ok(())
+}
+
+fn expected_subjective_components(
+    conn: &Connection,
+    scope: &ReviewScope,
+) -> CoreResult<Vec<ExpectedSubjectiveComponent>> {
+    let components = if scope.question_type == "fill_blank" {
+        let mut stmt = conn.prepare(
+            "SELECT public_id,stable_id,order_index,max_score
+             FROM k1_answer_slots
+             WHERE answer_key_version_id=?1
+             ORDER BY order_index,id",
+        )?;
+        let rows = stmt.query_map([scope.suggestion.answer_key_version_id], |row| {
+            Ok(ExpectedSubjectiveComponent {
+                source_type: "answer_slot",
+                source_public_id: row.get(0)?,
+                stable_id: row.get(1)?,
+                order_index: row.get(2)?,
+                max_score: row.get(3)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    } else if scope.question_type == "short_answer" {
+        let mut stmt = conn.prepare(
+            "SELECT public_id,stable_id,order_index,max_score
+             FROM k1_rubric_points
+             WHERE rubric_version_id=?1
+             ORDER BY order_index,id",
+        )?;
+        let rows = stmt.query_map([scope.suggestion.rubric_version_id], |row| {
+            Ok(ExpectedSubjectiveComponent {
+                source_type: "rubric_point",
+                source_public_id: row.get(0)?,
+                stable_id: row.get(1)?,
+                order_index: row.get(2)?,
+                max_score: row.get(3)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        return Err(CoreError::Invalid("当前题型不支持逐项人工终审".into()));
+    };
+    if components.is_empty() {
+        return Err(CoreError::Invalid(
+            "当前主观题没有已确认的槽位或评分点".into(),
+        ));
+    }
+    let component_max: f64 = components.iter().map(|component| component.max_score).sum();
+    if (component_max - scope.max_score).abs() > 0.000_001 {
+        return Err(CoreError::Invalid(
+            "槽位或评分点分值之和与题目总分不一致，请先修正答案规则".into(),
+        ));
+    }
+    Ok(components)
+}
+
+fn normalized_optional(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn component_evidence_matches(
+    question_type: &str,
+    effective_text: &str,
+    evidence_text: &str,
+) -> bool {
+    if question_type == "fill_blank" {
+        normalize_fill_value(effective_text).contains(&normalize_fill_value(evidence_text))
+    } else {
+        effective_text.contains(evidence_text)
+    }
+}
+
+/// 老师按填空槽位或简答评分点逐项终审。
+///
+/// 总分由逐项得分自动汇总，所有当前槽位/评分点都必须提交且只能提交一次。保存时先写
+/// 追加式 grade decision，再绑定当前题区/转写/机器分析，最后写不可变逐项账本；任一步
+/// 失败都会回滚。旧的整题人工总分接口继续兼容，但不会产生伪精确逐项学习证据。
+pub fn correct_subjective_components(
+    conn: &Connection,
+    suggestion_id: i64,
+    components: &[SubjectiveComponentGradeInput],
+    teacher_note: &str,
+    reviewed_by: &str,
+) -> CoreResult<GradeDecision> {
+    required(reviewed_by, "终审人")?;
+    required(teacher_note, "人工判定依据")?;
+    let tx = conn.unchecked_transaction()?;
+    let scope = review_scope(&tx, suggestion_id)?;
+    validate_active_review(&scope)?;
+    let expected = expected_subjective_components(&tx, &scope)?;
+
+    let mut supplied = std::collections::BTreeMap::new();
+    for input in components {
+        required(&input.source_type, "逐项来源类型")?;
+        required(&input.source_public_id, "逐项来源")?;
+        let key = (
+            input.source_type.trim().to_owned(),
+            input.source_public_id.trim().to_owned(),
+        );
+        if supplied.insert(key, input).is_some() {
+            return Err(CoreError::Invalid("同一槽位或评分点不能重复提交".into()));
+        }
+    }
+
+    let mut results = Vec::with_capacity(expected.len());
+    for component in expected {
+        let key = (
+            component.source_type.to_owned(),
+            component.source_public_id.clone(),
+        );
+        let input = supplied
+            .remove(&key)
+            .ok_or_else(|| CoreError::Invalid("必须完整提交当前全部槽位或评分点".into()))?;
+        if !input.teacher_score.is_finite()
+            || input.teacher_score < 0.0
+            || input.teacher_score > component.max_score + 0.000_001
+        {
+            return Err(CoreError::Invalid(format!(
+                "{} 的得分必须位于 0~{} 分",
+                component.stable_id, component.max_score
+            )));
+        }
+        let evidence_text = normalized_optional(input.evidence_text.as_deref());
+        if input.teacher_score > 0.000_001 && evidence_text.is_none() {
+            return Err(CoreError::Invalid(format!(
+                "{} 给分时必须填写学生作答证据",
+                component.stable_id
+            )));
+        }
+        if scope.transcription_result_state == "recognized" {
+            if let (Some(actual), Some(evidence)) =
+                (scope.effective_text.as_deref(), evidence_text.as_deref())
+            {
+                if !component_evidence_matches(&scope.question_type, actual, evidence) {
+                    return Err(CoreError::Invalid(format!(
+                        "{} 的给分证据不是当前学生转写原文片段",
+                        component.stable_id
+                    )));
+                }
+            }
+        }
+        let result_status = if input.teacher_score <= 0.000_001 {
+            "incorrect"
+        } else if input.teacher_score >= component.max_score - 0.000_001 {
+            "correct"
+        } else {
+            "partial"
+        };
+        results.push(SubjectiveComponentGradeResult {
+            source_type: component.source_type.to_owned(),
+            source_public_id: component.source_public_id,
+            stable_id: component.stable_id,
+            order_index: component.order_index,
+            teacher_score: input.teacher_score,
+            max_score: component.max_score,
+            result_status: result_status.to_owned(),
+            evidence_text,
+            teacher_note: normalized_optional(input.teacher_note.as_deref()),
+        });
+    }
+    if !supplied.is_empty() {
+        return Err(CoreError::Invalid(
+            "提交内容包含不属于当前答案版本的槽位或评分点".into(),
+        ));
+    }
+
+    let teacher_score: f64 = results.iter().map(|result| result.teacher_score).sum();
+    let machine_result: Value = serde_json::from_str(&scope.suggestion.result_json)
+        .map_err(|error| CoreError::Parse(format!("主观题建议 JSON 损坏：{error}")))?;
+    let point_results_json = serde_json::json!({
+        "schema_version": 2,
+        "source": "answer_sheet_subjective_teacher_component_correction",
+        "suggestion_id": suggestion_id,
+        "transcription_revision_id": scope.suggestion.transcription_revision_id,
+        "question_type": scope.question_type,
+        "machine_result": machine_result,
+        "component_results": results
+    })
+    .to_string();
+    let decision = decide_grade_in_transaction(
+        &tx,
+        &NewGradeDecision {
+            attempt_id: scope.suggestion.attempt_id,
+            assessment_item_id: scope.suggestion.assessment_item_id,
+            machine_grade_ai_run_id: scope.suggestion.machine_grade_ai_run_id,
+            teacher_score,
+            point_results_json: &point_results_json,
+            teacher_note: Some(teacher_note.trim()),
+            confirmation_level: "teacher_corrected",
+            decided_by: reviewed_by,
+        },
+    )?;
+    let now = time::utc_now_rfc3339();
+    link_decision_source(
+        &tx,
+        decision.id,
+        &scope,
+        "teacher_corrected",
+        reviewed_by.trim(),
+        &now,
+    )?;
+    for result in &results {
+        tx.execute(
+            "INSERT INTO exam_grade_decision_subjective_components_v2
+             (public_id,grade_decision_id,source_type,source_public_id,stable_id,
+              order_index,teacher_score,max_score,result_status,evidence_text,
+              teacher_note,created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+             ON CONFLICT(grade_decision_id,source_type,source_public_id) DO NOTHING",
+            (
+                ids::new_public_id(),
+                decision.id,
+                &result.source_type,
+                &result.source_public_id,
+                &result.stable_id,
+                result.order_index,
+                result.teacher_score,
+                result.max_score,
+                &result.result_status,
+                result.evidence_text.as_deref(),
+                result.teacher_note.as_deref(),
+                &now,
+            ),
+        )?;
+        let stored: (
+            String,
+            i64,
+            f64,
+            f64,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = tx.query_row(
+            "SELECT stable_id,order_index,teacher_score,max_score,result_status,
+                        evidence_text,teacher_note
+                 FROM exam_grade_decision_subjective_components_v2
+                 WHERE grade_decision_id=?1 AND source_type=?2 AND source_public_id=?3",
+            (decision.id, &result.source_type, &result.source_public_id),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )?;
+        let expected_stored = (
+            result.stable_id.clone(),
+            result.order_index,
+            result.teacher_score,
+            result.max_score,
+            result.result_status.clone(),
+            result.evidence_text.clone(),
+            result.teacher_note.clone(),
+        );
+        if stored != expected_stored {
+            return Err(CoreError::Invalid(
+                "评分 revision 已绑定不同的逐项人工结论".into(),
+            ));
+        }
+    }
+    let component_count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM exam_grade_decision_subjective_components_v2
+         WHERE grade_decision_id=?1",
+        [decision.id],
+        |row| row.get(0),
+    )?;
+    if component_count != results.len() as i64 {
+        return Err(CoreError::Invalid("逐项人工结论未完整写入".into()));
+    }
+    tx.commit()?;
+    Ok(decision)
 }
 
 pub fn accept_subjective_suggestion(
@@ -1969,7 +2290,19 @@ pub fn list_subjective_workbench(
                 answer.answer_json,
                 COALESCE((SELECT json_object(
                     'schema_version',1,
+                    'answer_slots',json_group_array(json_object(
+                      'source_public_id',slot.public_id,
+                      'stable_id',slot.stable_id,
+                      'order_index',slot.order_index,
+                      'canonical_answers_json',slot.canonical_answers_json,
+                      'max_score',slot.max_score)))
+                  FROM k1_answer_slots slot
+                  WHERE slot.answer_key_version_id=item.answer_key_version_id),
+                  '{\"schema_version\":1,\"answer_slots\":[]}'),
+                COALESCE((SELECT json_object(
+                    'schema_version',1,
                     'rubric_points',json_group_array(json_object(
+                      'source_public_id',point.public_id,
                       'stable_id',point.stable_id,
                       'order_index',point.order_index,
                       'canonical_text',point.canonical_text,
@@ -1989,7 +2322,23 @@ pub fn list_subjective_workbench(
                 CASE WHEN source.suggestion_id=suggestion.id
                        AND (analysis.id IS NULL OR short_source.analysis_id=analysis.id)
                      THEN 1 ELSE 0 END,
-                decision.decided_at,promotion.id,promotion.created_at
+                decision.decided_at,
+                COALESCE((SELECT json_object(
+                    'schema_version',1,
+                    'component_results',json_group_array(json_object(
+                      'source_type',component.source_type,
+                      'source_public_id',component.source_public_id,
+                      'stable_id',component.stable_id,
+                      'order_index',component.order_index,
+                      'teacher_score',component.teacher_score,
+                      'max_score',component.max_score,
+                      'result_status',component.result_status,
+                      'evidence_text',component.evidence_text,
+                      'teacher_note',component.teacher_note)))
+                  FROM exam_grade_decision_subjective_components_v2 component
+                  WHERE component.grade_decision_id=decision.id),
+                  '{\"schema_version\":1,\"component_results\":[]}'),
+                promotion.id,promotion.created_at
          FROM exam_subjective_grade_suggestions_v2 suggestion
          JOIN exam_subjective_transcription_revisions_v2 transcription
            ON transcription.id=suggestion.transcription_revision_id
@@ -2051,24 +2400,26 @@ pub fn list_subjective_workbench(
                 teacher_corrected_text: row.get(22)?,
                 confidence: row.get(23)?,
                 answer_json: row.get(24)?,
-                rubric_points_json: row.get(25)?,
-                suggestion_id: row.get(26)?,
-                short_answer_analysis_id: row.get(27)?,
-                machine_grade_ai_run_id: row.get(28)?,
-                suggestion_outcome: row.get(29)?,
-                suggested_score: row.get(30)?,
-                suggestion_result_json: row.get(31)?,
-                batch_eligible: row.get(32)?,
-                exclusion_reason: row.get(33)?,
-                grade_decision_id: row.get(34)?,
-                grade_decision_revision: row.get(35)?,
-                teacher_score: row.get(36)?,
-                confirmation_level: row.get(37)?,
-                review_mode: row.get(38)?,
-                current_suggestion_confirmed: row.get(39)?,
-                decided_at: row.get(40)?,
-                accepted_answer_promotion_id: row.get(41)?,
-                accepted_answer_promoted_at: row.get(42)?,
+                answer_slots_json: row.get(25)?,
+                rubric_points_json: row.get(26)?,
+                suggestion_id: row.get(27)?,
+                short_answer_analysis_id: row.get(28)?,
+                machine_grade_ai_run_id: row.get(29)?,
+                suggestion_outcome: row.get(30)?,
+                suggested_score: row.get(31)?,
+                suggestion_result_json: row.get(32)?,
+                batch_eligible: row.get(33)?,
+                exclusion_reason: row.get(34)?,
+                grade_decision_id: row.get(35)?,
+                grade_decision_revision: row.get(36)?,
+                teacher_score: row.get(37)?,
+                confirmation_level: row.get(38)?,
+                review_mode: row.get(39)?,
+                current_suggestion_confirmed: row.get(40)?,
+                decided_at: row.get(41)?,
+                teacher_components_json: row.get(42)?,
+                accepted_answer_promotion_id: row.get(43)?,
+                accepted_answer_promoted_at: row.get(44)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

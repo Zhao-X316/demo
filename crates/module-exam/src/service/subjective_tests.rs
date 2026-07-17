@@ -455,6 +455,116 @@ fn add_short_answer_region(fixture: &mut Fixture) -> i64 {
     region.id
 }
 
+fn add_multi_slot_fill_region(fixture: &mut Fixture) -> i64 {
+    let hash = "9".repeat(64);
+    fixture
+        .conn
+        .execute_batch(&format!(
+            r#"INSERT INTO k1_questions
+                 (public_id,owner_scope,owner_id,rights_status,sharing_allowed,created_at)
+                 VALUES ('question-multi-fill','personal','teacher','unknown',0,
+                         '2026-07-16T09:00:00.000Z');
+               INSERT INTO k1_question_versions
+                 (public_id,question_id,revision,question_type,stem,max_score,content_hash,
+                  quality_level,state,created_at)
+                 VALUES ('question-version-multi-fill',2,1,'fill_blank',
+                         '《南京条约》签订于____年，开放____等通商口岸',2,'{hash}',
+                         'L3','published','2026-07-16T09:00:00.000Z');
+               INSERT INTO k1_answer_key_versions
+                 (public_id,question_version_id,revision,answer_json,state,created_at,
+                  confirmed_by,confirmed_at)
+                 VALUES ('answer-multi-fill',2,1,
+                         '{{"schema_version":1,"slots":[
+                           {{"stable_id":"year","canonical_answers":["1842年"]}},
+                           {{"stable_id":"port","canonical_answers":["广州"]}}
+                         ]}}',
+                         'confirmed','2026-07-16T09:00:00.000Z','teacher',
+                         '2026-07-16T09:00:00.000Z');
+               INSERT INTO k1_answer_slots
+                 (public_id,stable_id,answer_key_version_id,order_index,
+                  canonical_answers_json,max_score,created_at)
+                 VALUES
+                 ('answer-slot-multi-year','year',2,0,
+                  '{{"schema_version":1,"answers":["1842年"]}}',1,
+                  '2026-07-16T09:00:00.000Z'),
+                 ('answer-slot-multi-port','port',2,1,
+                  '{{"schema_version":1,"answers":["广州"]}}',1,
+                  '2026-07-16T09:00:00.000Z');
+               INSERT INTO k1_rubric_versions
+                 (public_id,question_version_id,revision,max_score,state,created_at,
+                  confirmed_by,confirmed_at)
+                 VALUES ('rubric-multi-fill',2,1,2,'confirmed',
+                         '2026-07-16T09:00:00.000Z','teacher',
+                         '2026-07-16T09:00:00.000Z');
+               INSERT INTO k1_rubric_points
+                 (public_id,rubric_version_id,stable_id,order_index,canonical_text,
+                  max_score,created_at)
+                 VALUES
+                 ('rubric-point-multi-year',2,'year',0,'1842年',1,
+                  '2026-07-16T09:00:00.000Z'),
+                 ('rubric-point-multi-port',2,'port',1,'广州',1,
+                  '2026-07-16T09:00:00.000Z');
+               INSERT INTO k1_link_sets
+                 (public_id,question_version_id,knowledge_map_id,revision,state,created_at,
+                  confirmed_by,confirmed_at)
+                 VALUES ('link-multi-fill',2,1,1,'confirmed',
+                         '2026-07-16T09:00:00.000Z','teacher',
+                         '2026-07-16T09:00:00.000Z');
+               INSERT INTO k1_knowledge_nodes
+                 (public_id,stable_id,knowledge_map_id,code,title,order_index,state,created_at)
+                 VALUES
+                 ('knowledge-multi-year','nanjing-treaty-year',1,'K-M1',
+                  '南京条约签订时间',1,'active','2026-07-16T09:00:00.000Z'),
+                 ('knowledge-multi-port','nanjing-treaty-port',1,'K-M2',
+                  '南京条约通商口岸',2,'active','2026-07-16T09:00:00.000Z');
+               INSERT INTO k1_knowledge_links
+                 (public_id,link_set_id,source_type,source_public_id,knowledge_node_id,
+                  relation_type,confirmation_level,verified_by,verified_at,created_at)
+                 VALUES
+                 ('knowledge-link-multi-year',2,'answer_slot','answer-slot-multi-year',1,
+                  'answer_basis','teacher_confirmed','teacher',
+                  '2026-07-16T09:00:00.000Z','2026-07-16T09:00:00.000Z'),
+                 ('knowledge-link-multi-port',2,'answer_slot','answer-slot-multi-port',2,
+                  'answer_basis','teacher_confirmed','teacher',
+                  '2026-07-16T09:00:00.000Z','2026-07-16T09:00:00.000Z');
+               INSERT INTO exam_assessment_items_v2
+                 (public_id,assessment_version_id,question_version_id,answer_key_version_id,
+                  rubric_version_id,link_set_id,order_index,score,presentation_snapshot_json,
+                  state,created_at)
+                 VALUES ('item-multi-fill',1,2,2,2,2,1,2,
+                         '{{"schema_version":1,"question_no":"2","page_no":1}}',
+                         'active','2026-07-16T09:00:00.000Z');"#
+        ))
+        .unwrap();
+    let region = papers::record_answer_region(
+        &fixture.conn,
+        &NewAnswerRegionRevision {
+            page_id: 1,
+            assessment_item_id: 2,
+            region_index: 1,
+            bbox_json: r#"{"schema_version":1,"x":0.1,"y":0.5,"width":0.8,"height":0.15}"#,
+            crop_artifact_id: Some(fixture.crop_id),
+            mapping_confidence: Some(0.99),
+            decision: "teacher_confirmed",
+            reason_code: Some("FIXTURE"),
+            confirmed_by: Some("teacher"),
+        },
+    )
+    .unwrap();
+    fixture
+        .conn
+        .execute(
+            "INSERT INTO exam_answer_sheet_region_routes_v2
+             (materialization_id,answer_region_revision_id,assessment_item_id,region_index,
+              recognition_route,question_type,created_at)
+             VALUES (1,?1,2,1,'handwriting_ocr','fill_blank',
+                     '2026-07-16T09:00:00.000Z')",
+            [region.id],
+        )
+        .unwrap();
+    region.id
+}
+
 #[test]
 fn handwriting_ocr_persists_raw_text_without_answer_and_is_idempotent() {
     let mut fixture = setup();
@@ -588,6 +698,237 @@ fn published_single_slot_fill_activates_teacher_confirmed_slot_evidence() {
         .iter()
         .all(|row| row.1 == "answer_slot" && row.2 == "answer-slot-s"));
     assert!(evidence.iter().all(|row| (row.3 - 1.0).abs() < 0.000_001));
+}
+
+#[test]
+fn multi_slot_fill_component_review_is_idempotent_immutable_and_publishes_slot_evidence() {
+    let mut fixture = setup();
+    let multi_region_id = add_multi_slot_fill_region(&mut fixture);
+
+    let first_run = successful_run(&mut fixture, "subjective-ocr-base-before-multi", "1842年");
+    subjective::record_ocr_ai_run_transcription(&mut fixture.conn, first_run).unwrap();
+    let first_row = subjective::list_subjective_workbench(&fixture.conn, Some(1), 10)
+        .unwrap()
+        .rows
+        .into_iter()
+        .find(|row| row.assessment_item_id == 1)
+        .unwrap();
+    subjective::accept_subjective_suggestion(&fixture.conn, first_row.suggestion_id, "teacher")
+        .unwrap();
+
+    fixture.region_id = multi_region_id;
+    let multi_run = successful_run(&mut fixture, "subjective-ocr-multi-fill", "1842年，广州");
+    subjective::record_ocr_ai_run_transcription(&mut fixture.conn, multi_run).unwrap();
+    let multi_row = subjective::list_subjective_workbench(&fixture.conn, Some(1), 10)
+        .unwrap()
+        .rows
+        .into_iter()
+        .find(|row| row.assessment_item_id == 2)
+        .unwrap();
+    assert_eq!(multi_row.suggestion_outcome, "unscored");
+    assert_eq!(
+        multi_row.exclusion_reason.as_deref(),
+        Some("ANSWER_FORMAT_REVIEW_REQUIRED")
+    );
+    assert!(multi_row
+        .answer_slots_json
+        .contains("answer-slot-multi-year"));
+    assert!(multi_row
+        .answer_slots_json
+        .contains("answer-slot-multi-port"));
+
+    let components = vec![
+        subjective::SubjectiveComponentGradeInput {
+            source_type: "answer_slot".into(),
+            source_public_id: "answer-slot-multi-year".into(),
+            teacher_score: 1.0,
+            evidence_text: Some("1842年".into()),
+            teacher_note: None,
+        },
+        subjective::SubjectiveComponentGradeInput {
+            source_type: "answer_slot".into(),
+            source_public_id: "answer-slot-multi-port".into(),
+            teacher_score: 0.0,
+            evidence_text: None,
+            teacher_note: Some("未按本题要求给分".into()),
+        },
+    ];
+    let decision = subjective::correct_subjective_components(
+        &fixture.conn,
+        multi_row.suggestion_id,
+        &components,
+        "第一空正确，第二空不计分",
+        "teacher",
+    )
+    .unwrap();
+    assert_eq!(decision.teacher_score, 1.0);
+    assert_eq!(decision.revision, 1);
+
+    let repeated = subjective::correct_subjective_components(
+        &fixture.conn,
+        multi_row.suggestion_id,
+        &components,
+        "第一空正确，第二空不计分",
+        "teacher",
+    )
+    .unwrap();
+    assert_eq!(repeated.id, decision.id);
+    let stored: Vec<(String, f64, String, Option<String>)> = {
+        let mut stmt = fixture
+            .conn
+            .prepare(
+                "SELECT source_public_id,teacher_score,result_status,evidence_text
+                 FROM exam_grade_decision_subjective_components_v2
+                 WHERE grade_decision_id=?1 ORDER BY order_index",
+            )
+            .unwrap();
+        stmt.query_map([decision.id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+    };
+    assert_eq!(
+        stored,
+        vec![
+            (
+                "answer-slot-multi-year".into(),
+                1.0,
+                "correct".into(),
+                Some("1842年".into())
+            ),
+            (
+                "answer-slot-multi-port".into(),
+                0.0,
+                "incorrect".into(),
+                None
+            ),
+        ]
+    );
+    let update_error = fixture
+        .conn
+        .execute(
+            "UPDATE exam_grade_decision_subjective_components_v2
+             SET teacher_score=0 WHERE grade_decision_id=?1",
+            [decision.id],
+        )
+        .unwrap_err();
+    assert!(update_error
+        .to_string()
+        .contains("M2_SUBJECTIVE_COMPONENT_IMMUTABLE"));
+    let delete_error = fixture
+        .conn
+        .execute(
+            "DELETE FROM exam_grade_decision_subjective_components_v2
+             WHERE grade_decision_id=?1",
+            [decision.id],
+        )
+        .unwrap_err();
+    assert!(delete_error
+        .to_string()
+        .contains("M2_SUBJECTIVE_COMPONENT_IMMUTABLE"));
+
+    assessment::publish_attempt(&fixture.conn, 1, "teacher").unwrap();
+    let evidence: Vec<(String, String, f64, String)> = {
+        let mut stmt = fixture
+            .conn
+            .prepare(
+                "SELECT source_type,source_ref_id,value,rule_version
+                 FROM learning_evidence
+                 WHERE source_ref_id IN ('answer-slot-multi-year','answer-slot-multi-port')
+                 ORDER BY source_ref_id",
+            )
+            .unwrap();
+        stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+    };
+    assert_eq!(
+        evidence,
+        vec![
+            (
+                "fill_blank_slot".into(),
+                "answer-slot-multi-port".into(),
+                0.0,
+                "fill-blank-teacher-components-v1".into()
+            ),
+            (
+                "fill_blank_slot".into(),
+                "answer-slot-multi-year".into(),
+                1.0,
+                "fill-blank-teacher-components-v1".into()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn component_review_rejects_incomplete_foreign_and_non_evidence_inputs_atomically() {
+    let mut fixture = setup();
+    let run_id = successful_run(&mut fixture, "subjective-ocr-invalid-component", "1842年");
+    subjective::record_ocr_ai_run_transcription(&mut fixture.conn, run_id).unwrap();
+    let row = subjective::list_subjective_workbench(&fixture.conn, Some(1), 10)
+        .unwrap()
+        .rows
+        .pop()
+        .unwrap();
+
+    let incomplete = subjective::correct_subjective_components(
+        &fixture.conn,
+        row.suggestion_id,
+        &[],
+        "查看原图",
+        "teacher",
+    )
+    .unwrap_err();
+    assert!(incomplete.to_string().contains("必须完整提交"));
+    let foreign = subjective::correct_subjective_components(
+        &fixture.conn,
+        row.suggestion_id,
+        &[subjective::SubjectiveComponentGradeInput {
+            source_type: "answer_slot".into(),
+            source_public_id: "answer-slot-from-another-version".into(),
+            teacher_score: 1.0,
+            evidence_text: Some("1842年".into()),
+            teacher_note: None,
+        }],
+        "查看原图",
+        "teacher",
+    )
+    .unwrap_err();
+    assert!(foreign.to_string().contains("必须完整提交"));
+    let invented_evidence = subjective::correct_subjective_components(
+        &fixture.conn,
+        row.suggestion_id,
+        &[subjective::SubjectiveComponentGradeInput {
+            source_type: "answer_slot".into(),
+            source_public_id: "answer-slot-s".into(),
+            teacher_score: 1.0,
+            evidence_text: Some("1840年".into()),
+            teacher_note: None,
+        }],
+        "查看原图",
+        "teacher",
+    )
+    .unwrap_err();
+    assert!(invented_evidence
+        .to_string()
+        .contains("不是当前学生转写原文片段"));
+    let counts: (i64, i64) = fixture
+        .conn
+        .query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM exam_grade_decisions_v2),
+               (SELECT COUNT(*) FROM exam_grade_decision_subjective_components_v2)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(counts, (0, 0));
 }
 
 #[test]
@@ -939,6 +1280,113 @@ fn short_answer_stays_unscored_until_teacher_or_rubric_ai_reviews_it() {
     .unwrap();
     assert_eq!(decision.teacher_score, 3.0);
     assert_eq!(decision.confirmation_level, "teacher_corrected");
+}
+
+#[test]
+fn teacher_corrected_short_answer_points_publish_rubric_evidence() {
+    let mut fixture = setup();
+    let base_run = successful_run(
+        &mut fixture,
+        "subjective-ocr-base-before-short-components",
+        "1842年",
+    );
+    subjective::record_ocr_ai_run_transcription(&mut fixture.conn, base_run).unwrap();
+    let base_row = subjective::list_subjective_workbench(&fixture.conn, Some(1), 10)
+        .unwrap()
+        .rows
+        .pop()
+        .unwrap();
+    subjective::accept_subjective_suggestion(&fixture.conn, base_row.suggestion_id, "teacher")
+        .unwrap();
+
+    fixture.region_id = add_short_answer_region(&mut fixture);
+    fixture
+        .conn
+        .execute_batch(
+            "INSERT INTO k1_knowledge_nodes
+               (public_id,stable_id,knowledge_map_id,code,title,order_index,state,created_at)
+             VALUES ('knowledge-short-institution','westernization-institution',1,'K-S1',
+                     '洋务运动制度局限',1,'active','2026-07-16T09:00:00.000Z');
+             INSERT INTO k1_knowledge_links
+               (public_id,link_set_id,source_type,source_public_id,knowledge_node_id,
+                relation_type,confirmation_level,verified_by,verified_at,created_at)
+             VALUES ('knowledge-link-short-institution',2,'rubric_point',
+                     'rubric-point-short',1,'rubric_basis','teacher_confirmed','teacher',
+                     '2026-07-16T09:00:00.000Z','2026-07-16T09:00:00.000Z');",
+        )
+        .unwrap();
+    let short_run = successful_run(
+        &mut fixture,
+        "subjective-ocr-short-components",
+        "只学习技术，没有改变封建制度",
+    );
+    subjective::record_ocr_ai_run_transcription(&mut fixture.conn, short_run).unwrap();
+    let row = subjective::list_subjective_workbench(&fixture.conn, Some(1), 10)
+        .unwrap()
+        .rows
+        .into_iter()
+        .find(|row| row.question_type == "short_answer")
+        .unwrap();
+    let decision = subjective::correct_subjective_components(
+        &fixture.conn,
+        row.suggestion_id,
+        &[subjective::SubjectiveComponentGradeInput {
+            source_type: "rubric_point".into(),
+            source_public_id: "rubric-point-short".into(),
+            teacher_score: 4.0,
+            evidence_text: Some("没有改变封建制度".into()),
+            teacher_note: Some("明确写出根本局限".into()),
+        }],
+        "按评分点核对原图后给满分",
+        "teacher",
+    )
+    .unwrap();
+    assert_eq!(decision.teacher_score, 4.0);
+    assert!(decision
+        .point_results_json
+        .contains("answer_sheet_subjective_teacher_component_correction"));
+
+    let current = subjective::list_subjective_workbench(&fixture.conn, Some(1), 10)
+        .unwrap()
+        .rows
+        .into_iter()
+        .find(|row| row.question_type == "short_answer")
+        .unwrap();
+    assert!(current.current_suggestion_confirmed);
+    assert!(current
+        .teacher_components_json
+        .contains("rubric-point-short"));
+    assert!(current.teacher_components_json.contains("没有改变封建制度"));
+
+    assessment::publish_attempt(&fixture.conn, 1, "teacher").unwrap();
+    let evidence: (String, String, f64, String, String) = fixture
+        .conn
+        .query_row(
+            "SELECT source_type,source_ref_id,value,rule_version,confirmation_level
+             FROM learning_evidence
+             WHERE source_ref_id='rubric-point-short'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        evidence,
+        (
+            "question_rubric_point".into(),
+            "rubric-point-short".into(),
+            1.0,
+            "short-answer-teacher-components-v1".into(),
+            "teacher_corrected".into(),
+        )
+    );
 }
 
 #[test]

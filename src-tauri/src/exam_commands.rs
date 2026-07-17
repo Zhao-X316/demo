@@ -39,8 +39,8 @@ use module_exam::service::objective::{
 };
 use module_exam::service::ordinary_structure::OrdinaryStructureConfirmationResult;
 use module_exam::service::subjective::{
-    AcceptedAnswerPromotionResult, ShortAnswerGradeAnalysis, SubjectiveTranscriptionRevision,
-    SubjectiveWorkbench,
+    AcceptedAnswerPromotionResult, ShortAnswerGradeAnalysis, SubjectiveComponentGradeInput,
+    SubjectiveTranscriptionRevision, SubjectiveWorkbench,
 };
 use module_exam::service::subjective_links::{
     SubjectiveLinkEditResult, SubjectiveLinkEditor, SubjectiveSourceLinkInput,
@@ -908,6 +908,25 @@ pub fn exam_answer_sheet_subjective_correct(
         suggestion_id,
         teacher_score,
         teacher_note.as_deref(),
+        LOCAL_TEACHER_ACTOR,
+    )
+    .map_err(e)
+}
+
+/// 老师按填空槽位或简答评分点逐项确认；总分由逐项得分自动汇总。
+#[tauri::command]
+pub fn exam_answer_sheet_subjective_correct_components(
+    state: State<'_, AppState>,
+    suggestion_id: i64,
+    components: Vec<SubjectiveComponentGradeInput>,
+    teacher_note: String,
+) -> R<GradeDecision> {
+    let conn = lock(&state)?;
+    module_exam::service::subjective::correct_subjective_components(
+        &conn,
+        suggestion_id,
+        &components,
+        &teacher_note,
         LOCAL_TEACHER_ACTOR,
     )
     .map_err(e)
