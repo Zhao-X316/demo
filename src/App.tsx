@@ -6,11 +6,14 @@ import Students from "./pages/Students";
 import Records from "./pages/Records";
 import Settings from "./pages/Settings";
 import Exam from "./pages/Exam";
+import ClassDashboard from "./pages/ClassDashboard";
+import { AppModule, DashboardTargetView } from "./api/classDashboard";
 
-type Module = "recitation" | "exam";
-type View = "today" | "desk" | "library" | "students" | "records" | "settings" | "exam";
+type Module = AppModule;
+type View = "dashboard" | "today" | "desk" | "library" | "students" | "records" | "settings" | "exam";
 
 const NAV: { key: View; icon: string; label: string }[] = [
+  { key: "dashboard", icon: "▦", label: "班级概览" },
   { key: "today", icon: "◎", label: "今日" },
   { key: "desk", icon: "◷", label: "批改台" },
   { key: "library", icon: "▤", label: "内容库" },
@@ -20,6 +23,7 @@ const NAV: { key: View; icon: string; label: string }[] = [
 ];
 
 const EXAM_NAV: { key: View; icon: string; label: string }[] = [
+  { key: "dashboard", icon: "▦", label: "班级概览" },
   { key: "exam", icon: "✎", label: "题目批改" },
   { key: "students", icon: "◍", label: "学生" },
   { key: "settings", icon: "⚙", label: "设置" },
@@ -27,12 +31,16 @@ const EXAM_NAV: { key: View; icon: string; label: string }[] = [
 
 export default function App() {
   const [module, setModule] = useState<Module>("recitation");
-  const [view, setView] = useState<View>("today");
+  const [view, setView] = useState<View>("dashboard");
   const nav = module === "recitation" ? NAV : EXAM_NAV;
 
   const switchModule = (next: Module) => {
     setModule(next);
-    setView(next === "recitation" ? "today" : "exam");
+    setView("dashboard");
+  };
+  const navigate = (nextModule: AppModule, nextView: DashboardTargetView | "students") => {
+    setModule(nextModule);
+    setView(nextView);
   };
   return (
     <div className="app">
@@ -72,6 +80,7 @@ export default function App() {
         <div className="sidebar-foot">本机 · 数据不出门 · v0.3</div>
       </aside>
       <main className="main">
+        {view === "dashboard" && <ClassDashboard onNavigate={navigate} />}
         {view === "today" && <Today />}
         {view === "desk" && <GradingDesk />}
         {view === "library" && <Library />}

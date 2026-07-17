@@ -91,6 +91,7 @@ fn main() {
             commands::anomalies_list,
             commands::anomaly_reassign,
             commands::suggest_match,
+            exam_commands::class_operations_dashboard,
             exam_commands::kp_list,
             exam_commands::kp_create,
             exam_commands::kp_rename,

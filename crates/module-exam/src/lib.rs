@@ -6,6 +6,7 @@
 pub mod answer_sheet_recognition;
 pub mod answer_sheet_template_recognition;
 pub mod answer_source_recognition;
+pub mod class_dashboard;
 pub mod db;
 pub mod dictation;
 pub mod dictation_recognition;

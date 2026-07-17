@@ -11,6 +11,7 @@ use module_exam::answer_source_recognition::{
     AnswerSourceErrorCode, AnswerSourceFailure, AnswerSourceRecognizer,
     ANSWER_SOURCE_SCHEMA_VERSION,
 };
+use module_exam::class_dashboard::{self as class_dashboard_service, ClassOperationsDashboard};
 use module_exam::db::knowledge_points::{self as kp, KnowledgePoint, KpInput};
 use module_exam::db::questions::{self, NewOption, NewQuestion, Question, QuestionOption};
 use module_exam::dictation_recognition::{
@@ -92,6 +93,25 @@ fn e<E: ToString>(err: E) -> String {
 }
 fn lock<'a>(state: &'a State<'a, AppState>) -> R<std::sync::MutexGuard<'a, rusqlite::Connection>> {
     state.db.lock().map_err(|_| "数据库忙".to_string())
+}
+
+// ───────────────────────── 班级运行仪表盘 ─────────────────────────
+
+/// M6.1-1 只读运行事实：不计算掌握度，也不执行终审、发布或日切。
+#[tauri::command]
+pub fn class_operations_dashboard(
+    state: State<'_, AppState>,
+    class_id: i64,
+    as_of_date: Option<String>,
+) -> R<ClassOperationsDashboard> {
+    let date = as_of_date.unwrap_or_else(|| {
+        chrono::Local::now()
+            .date_naive()
+            .format("%Y-%m-%d")
+            .to_string()
+    });
+    let conn = lock(&state)?;
+    class_dashboard_service::class_operations_dashboard(&conn, class_id, &date).map_err(e)
 }
 
 // ───────────────────────── 知识点 ─────────────────────────
