@@ -1,5 +1,12 @@
 //! M3 错题事实 / M6 掌握分析教师入口命令。
 
+use module_exam::service::assessment::{
+    self as assessment_service, NewMultiItemTargetedAssessment, NewTargetedAssessmentItem,
+};
+use module_profile::action_drafts::{
+    self, ClassActionDraft, ClassActionPreview, ConfirmClassActionInput, PreviewClassActionInput,
+    RecordPracticeMaterializationInput, CLASS_ACTION_PRACTICE_TEMPLATE_VERSION,
+};
 use module_profile::class_profile::{
     self as class_profile_service, ClassProfilePreview, ClassProfileScope, ClassProfileSnapshot,
     GenerateClassProfileInput,
@@ -161,6 +168,36 @@ pub struct VoidTeachingEventRequest {
     request_key: String,
     event_key: String,
     expected_revision: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewClassActionRequest {
+    snapshot_public_id: String,
+    node_metric_public_id: String,
+    action_kind: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmClassActionRequest {
+    request_key: String,
+    snapshot_public_id: String,
+    node_metric_public_id: String,
+    action_kind: String,
+    expected_snapshot_payload_sha256: String,
+    title: String,
+    rationale: String,
+    estimated_minutes: i64,
+    target_student_ids: Vec<i64>,
+    candidate_question_version_public_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaterializeClassActionRequest {
+    request_key: String,
+    draft_public_id: String,
 }
 
 #[tauri::command]
@@ -508,4 +545,177 @@ pub fn void_class_teaching_event(
         },
     )
     .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn preview_class_action(
+    state: State<'_, AppState>,
+    input: PreviewClassActionRequest,
+) -> Result<ClassActionPreview, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    action_drafts::preview_class_action(
+        &connection,
+        &PreviewClassActionInput {
+            snapshot_public_id: &input.snapshot_public_id,
+            node_metric_public_id: &input.node_metric_public_id,
+            action_kind: &input.action_kind,
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn confirm_class_action(
+    state: State<'_, AppState>,
+    input: ConfirmClassActionRequest,
+) -> Result<ClassActionDraft, String> {
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    action_drafts::confirm_class_action(
+        &mut connection,
+        &ConfirmClassActionInput {
+            request_key: &input.request_key,
+            snapshot_public_id: &input.snapshot_public_id,
+            node_metric_public_id: &input.node_metric_public_id,
+            action_kind: &input.action_kind,
+            expected_snapshot_payload_sha256: &input.expected_snapshot_payload_sha256,
+            title: &input.title,
+            rationale: &input.rationale,
+            estimated_minutes: input.estimated_minutes,
+            target_student_ids: &input.target_student_ids,
+            candidate_question_version_public_ids: &input.candidate_question_version_public_ids,
+            confirmed_by: "local_teacher",
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn list_class_action_drafts(
+    state: State<'_, AppState>,
+    class_id: i64,
+    limit: Option<i64>,
+) -> Result<Vec<ClassActionDraft>, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    action_drafts::list_class_action_drafts(&connection, class_id, limit.unwrap_or(20))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn materialize_class_action(
+    state: State<'_, AppState>,
+    input: MaterializeClassActionRequest,
+) -> Result<ClassActionDraft, String> {
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    if let Some(existing) =
+        action_drafts::get_class_action_draft(&connection, &input.draft_public_id)
+            .map_err(|error| error.to_string())?
+    {
+        if existing.materialization.is_some() {
+            return Ok(existing);
+        }
+    }
+    let plan = action_drafts::prepare_practice_materialization(&connection, &input.draft_public_id)
+        .map_err(|error| error.to_string())?;
+    struct ResolvedItem {
+        question_version_id: i64,
+        answer_key_version_id: i64,
+        rubric_version_id: i64,
+        link_set_id: i64,
+        score: f64,
+        presentation_snapshot_json: String,
+    }
+    let mut resolved = Vec::with_capacity(plan.candidates.len());
+    for candidate in &plan.candidates {
+        let item = connection
+            .query_row(
+                "SELECT question.id,answer.id,rubric.id,links.id,question.max_score,
+                        question.public_id,question.stem,question.question_type
+                 FROM k1_question_versions question
+                 JOIN k1_answer_key_versions answer
+                   ON answer.public_id=?2 AND answer.question_version_id=question.id
+                 JOIN k1_rubric_versions rubric
+                   ON rubric.public_id=?3 AND rubric.question_version_id=question.id
+                 JOIN k1_link_sets links
+                   ON links.public_id=?4 AND links.question_version_id=question.id
+                 WHERE question.public_id=?1
+                   AND question.state='published'
+                   AND question.quality_level IN ('L2','L3','L4')
+                   AND answer.state='confirmed'
+                   AND rubric.state='confirmed'
+                   AND links.state='confirmed'",
+                (
+                    &candidate.question_version_public_id,
+                    &candidate.answer_key_version_public_id,
+                    &candidate.rubric_version_public_id,
+                    &candidate.link_set_public_id,
+                ),
+                |row| {
+                    let question_public_id: String = row.get(5)?;
+                    let stem: String = row.get(6)?;
+                    let question_type: String = row.get(7)?;
+                    Ok(ResolvedItem {
+                        question_version_id: row.get(0)?,
+                        answer_key_version_id: row.get(1)?,
+                        rubric_version_id: row.get(2)?,
+                        link_set_id: row.get(3)?,
+                        score: row.get(4)?,
+                        presentation_snapshot_json: serde_json::json!({
+                            "schema_version": 1,
+                            "source": "m6.1_class_action",
+                            "question_version_public_id": question_public_id,
+                            "stem": stem,
+                            "question_type": question_type
+                        })
+                        .to_string(),
+                    })
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        resolved.push(item);
+    }
+    let borrowed_items: Vec<_> = resolved
+        .iter()
+        .map(|item| NewTargetedAssessmentItem {
+            question_version_id: item.question_version_id,
+            answer_key_version_id: item.answer_key_version_id,
+            rubric_version_id: item.rubric_version_id,
+            link_set_id: item.link_set_id,
+            score: item.score,
+            option_order_json: None,
+            presentation_snapshot_json: &item.presentation_snapshot_json,
+        })
+        .collect();
+    let tx = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let assessment = assessment_service::create_confirmed_multi_item_targeted_in_transaction(
+        &tx,
+        &NewMultiItemTargetedAssessment {
+            title: &plan.title,
+            class_id: plan.class_id,
+            target_student_ids: &plan.target_student_ids,
+            assessment_context: "homework",
+            evidence_policy: "include_low_weight",
+            template_version: CLASS_ACTION_PRACTICE_TEMPLATE_VERSION,
+            created_by: "local_teacher",
+            items: &borrowed_items,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    action_drafts::record_practice_materialization_in_transaction(
+        &tx,
+        &RecordPracticeMaterializationInput {
+            request_key: &input.request_key,
+            draft_id: plan.draft_id,
+            draft_public_id: &plan.draft_public_id,
+            destination_public_id: &assessment.assessment_public_id,
+            destination_version_public_id: &assessment.assessment_version_public_id,
+            created_by: "local_teacher",
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    tx.commit().map_err(|error| error.to_string())?;
+    action_drafts::get_class_action_draft(&connection, &input.draft_public_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "教学行动草稿不存在".to_string())
 }

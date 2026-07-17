@@ -1,7 +1,8 @@
-"""M6.1 班级运行仪表盘、掌握快照与课堂事件浏览器冒烟测试。
+"""M6.1 班级运行仪表盘、掌握快照、课堂事件与教学行动浏览器冒烟测试。
 
 通过浏览器端 Tauri invoke mock 验证运行事实、掌握预览/确认、热力图、
-临时学习状态、同口径趋势、课堂事件 revision、班级切换和跨模块跳转；
+临时学习状态、同口径趋势、课堂事件 revision、老师确认的定向练习、
+背诵映射阻断、班级切换和跨模块跳转；
 后端 SQL 口径由 Rust 单元测试覆盖。
 """
 
@@ -185,6 +186,65 @@ window.__teachingEvents = [{
   state: "active", supersedes_public_id: null,
   created_by: "local_teacher", created_at: "2026-07-15T10:00:00Z"
 }];
+window.__classActionDrafts = [];
+window.__makeClassActionPreview = (actionKind) => ({
+  schema_version: 1,
+  rule_version: "m6.1-teacher-confirmed-action-drafts-v1",
+  calculated_at: "2026-07-17T12:40:00Z",
+  class_id: 1,
+  class_name: "八年级一班",
+  snapshot_public_id: "class-profile-1",
+  snapshot_revision: 1,
+  snapshot_payload_sha256: "b".repeat(64),
+  snapshot_source_watermark: "a".repeat(64),
+  node_metric_public_id: "class-node-1",
+  target_type: "knowledge_node",
+  target_public_id: "knowledge-1",
+  target_title: "洋务运动失败原因",
+  action_kind: actionKind,
+  suggested_title: actionKind === "practice"
+    ? "针对性题目练习：洋务运动失败原因"
+    : `${actionKind}：洋务运动失败原因`,
+  suggested_rationale: "基于当前班级快照安排一次短时教学支持",
+  suggested_estimated_minutes: 15,
+  destination_module: actionKind === "practice"
+    ? "exam"
+    : actionKind === "recitation" ? "recitation" : "class_dashboard",
+  destination_view: actionKind === "practice"
+    ? "exam"
+    : actionKind === "recitation" ? "today" : "dashboard",
+  targets: [
+    {
+      student: { id: 1, class_id: 1, student_no: "01", name: "小林" },
+      source_status: "needs_support", recommended: true
+    },
+    {
+      student: { id: 2, class_id: 1, student_no: "02", name: "小周" },
+      source_status: "needs_support", recommended: true
+    },
+    {
+      student: { id: 3, class_id: 1, student_no: "03", name: "小郑" },
+      source_status: "developing", recommended: false
+    }
+  ],
+  candidates: actionKind === "practice" ? [{
+    question_version_public_id: "question-version-1",
+    answer_key_version_public_id: "answer-version-1",
+    rubric_version_public_id: "rubric-version-1",
+    link_set_public_id: "link-set-1",
+    title: "洋务运动失败的根本原因是什么？",
+    question_type: "true_false",
+    max_score: 2,
+    active_assignment_count: 0,
+    reason: "题目版本已由老师确认直接考查该知识点。"
+  }] : [],
+  can_confirm: actionKind !== "recitation",
+  blockers: actionKind === "recitation"
+    ? ["背诵内容尚未建立到 K1 知识节点的可靠版本映射；本阶段不按标题相似度猜测内容。"]
+    : [],
+  warnings: [],
+  boundary_note: "行动草稿不会修改成绩、掌握快照、学生标签或背诵排程；题目练习只有老师明确确认后才建立作业。"
+});
 window.__TAURI_INTERNALS__ = {
   transformCallback: () => 1,
   unregisterCallback: () => undefined,
@@ -370,6 +430,70 @@ window.__TAURI_INTERNALS__ = {
       );
       return item;
     }
+    if (cmd === "preview_class_action") {
+      return window.__makeClassActionPreview(args.input.actionKind);
+    }
+    if (cmd === "list_class_action_drafts") {
+      return Number(args.classId) === 1 ? window.__classActionDrafts : [];
+    }
+    if (cmd === "confirm_class_action") {
+      const input = args.input;
+      const preview = window.__makeClassActionPreview(input.actionKind);
+      const draft = {
+        public_id: "class-action-draft-1",
+        class_id: 1,
+        class_name: "八年级一班",
+        snapshot_public_id: preview.snapshot_public_id,
+        snapshot_revision: preview.snapshot_revision,
+        node_metric_public_id: preview.node_metric_public_id,
+        target_type: preview.target_type,
+        target_public_id: preview.target_public_id,
+        target_title: preview.target_title,
+        action_kind: input.actionKind,
+        title: input.title,
+        rationale: input.rationale,
+        estimated_minutes: input.estimatedMinutes,
+        destination_module: preview.destination_module,
+        destination_view: preview.destination_view,
+        snapshot_payload_sha256: preview.snapshot_payload_sha256,
+        payload_sha256: "d".repeat(64),
+        state: "teacher_confirmed",
+        confirmed_by: "local_teacher",
+        confirmed_at: "2026-07-17T12:45:00Z",
+        targets: preview.targets.filter(
+          (target) => input.targetStudentIds.includes(target.student.id)
+        ),
+        candidates: preview.candidates.filter(
+          (candidate) => input.candidateQuestionVersionPublicIds.includes(
+            candidate.question_version_public_id
+          )
+        ),
+        materialization: null
+      };
+      window.__classActionDrafts = [draft];
+      return draft;
+    }
+    if (cmd === "materialize_class_action") {
+      if (window.__FAIL_ACTION_MATERIALIZATION__) {
+        throw new Error("模拟作业事务失败");
+      }
+      const draft = window.__classActionDrafts.find(
+        (item) => item.public_id === args.input.draftPublicId
+      );
+      const materialized = {
+        ...draft,
+        materialization: {
+          public_id: "class-action-materialization-1",
+          destination_type: "exam_assessment",
+          destination_public_id: "assessment-action-1",
+          destination_version_public_id: "assessment-action-version-1",
+          created_by: "local_teacher",
+          created_at: "2026-07-17T12:46:00Z"
+        }
+      };
+      window.__classActionDrafts = [materialized];
+      return materialized;
+    }
     if (cmd === "day_rollover") return { rolled: 0, reviews: 0 };
     if (cmd === "dashboard_today") {
       return {
@@ -423,6 +547,21 @@ def test_dashboard(base_url: str) -> None:
 
         page.locator(".class-profile-heatmap thead button").click()
         expect(page.locator(".class-profile-detail")).to_contain_text("合格样本")
+        expect(page.get_by_text("下一步教学行动", exact=True)).to_be_visible()
+        expect(page.locator(".class-action-check-list input:checked")).to_have_count(3)
+        page.get_by_role("button", name="确认并建立练习").click()
+        expect(page.locator(".class-action-success")).to_contain_text("已冻结 2 名学生、1 道题")
+        expect(page.get_by_role("button", name="去作业台")).to_be_visible()
+        action_calls = page.evaluate(
+            """window.__dashboardCalls
+              .filter((item) => item.cmd === "confirm_class_action"
+                || item.cmd === "materialize_class_action")
+              .map((item) => item.cmd)"""
+        )
+        assert action_calls == ["confirm_class_action", "materialize_class_action"]
+        page.get_by_role("button", name="背诵巩固").click()
+        expect(page.get_by_text("不按标题相似度猜测内容", exact=False)).to_be_visible()
+        expect(page.get_by_role("button", name="确认行动草稿")).to_be_disabled()
 
         page.get_by_role("button", name="预览班级掌握").click()
         expect(page.get_by_text("生成前确认", exact=True)).to_be_visible()
@@ -474,8 +613,23 @@ def test_dashboard(base_url: str) -> None:
         expect(narrow.locator(".dashboard-stat")).to_have_count(5)
         expect(narrow.get_by_text("班级掌握快照", exact=True)).to_be_visible()
         narrow.screenshot(path="/tmp/jiaofu-class-dashboard-narrow.png", full_page=True)
-        narrow.get_by_text("班级掌握快照", exact=True).scroll_into_view_if_needed()
-        narrow.screenshot(path="/tmp/jiaofu-class-dashboard-profile-narrow.png")
+        narrow.locator(".class-profile-heatmap thead button").click()
+        narrow.get_by_text("下一步教学行动", exact=True).scroll_into_view_if_needed()
+        expect(narrow.locator(".class-action-kind-list button")).to_have_count(4)
+        narrow.screenshot(path="/tmp/jiaofu-class-dashboard-action-narrow.png")
+
+        retry = browser.new_page(viewport={"width": 1200, "height": 900})
+        retry.add_init_script("window.__FAIL_ACTION_MATERIALIZATION__ = true;")
+        retry.add_init_script(MOCK_SCRIPT)
+        retry.goto(base_url)
+        retry.wait_for_load_state("networkidle")
+        retry.locator(".class-profile-heatmap thead button").click()
+        retry.get_by_role("button", name="确认并建立练习").click()
+        expect(retry.get_by_text("行动草稿已保存，但练习作业尚未建立", exact=False)).to_be_visible()
+        expect(retry.get_by_role("button", name="重试建立作业")).to_be_visible()
+        retry.evaluate("window.__FAIL_ACTION_MATERIALIZATION__ = false")
+        retry.get_by_role("button", name="重试建立作业").click()
+        expect(retry.get_by_role("button", name="去作业台")).to_be_visible()
 
         empty = browser.new_page(viewport={"width": 1100, "height": 800})
         empty.add_init_script("window.__NO_CLASSES__ = true;")

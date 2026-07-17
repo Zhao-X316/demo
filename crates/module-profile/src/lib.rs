@@ -4,6 +4,7 @@
 //! 快照。未评估、证据不足和需要支持严格分开；快照不会修改成绩、任务、错题
 //! 或上游证据。
 
+pub mod action_drafts;
 pub mod class_profile;
 pub mod profile;
 pub mod teaching_events;
@@ -23,6 +24,10 @@ static MIGRATIONS: &[Migration] = &[
     Migration {
         id: "profile_0003",
         sql: include_str!("../migrations/0003_class_teaching_events.sql"),
+    },
+    Migration {
+        id: "profile_0004",
+        sql: include_str!("../migrations/0004_class_action_drafts.sql"),
     },
 ];
 
