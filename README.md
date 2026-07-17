@@ -8,7 +8,7 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 
 ## 当前进度
 
-> 2026-07-16：独立分支 `codex/t2-artifacts` 已完成 T2～T6、B3a0、B3a1 普通卷纵切、B3a2 固定答题卡首建/复用与多页模板集、M2-C0 固定格式默写正式终审，以及答案图片/TXT/PDF/DOCX/XLSX 结构化、冲突预检和“采用上传答案与评分点，另存新版本”。答题卡现在要求每个实际页码的模板全部确认且题目逐项覆盖后才允许处理；客观格进入本地 OMR，填空/简答主观区先形成答案隔离、追加式手写 OCR 转写，再进入独立主观题工作台。填空题只按老师已确认答案做确定性精确匹配；简答题按确认 rubric 逐点输出覆盖、部分覆盖、遗漏、矛盾或不确定，得分建议必须引用学生答案原文，老师接受/修正后形成 grade decision，仍须整份显式发布。默写继续走独立 policy/rubric 语义。普通试卷、答题卡和默写共用按文件自然顺序、页面重复周期、起始学号与缺交名单的归组外壳，但使用独立识别算法。三类材料已具备分开的合成黄金集合同和 hash-only 离线评估报告；真实照片/provider/GUI 和三类脱敏真图黄金集仍未完成，合成结果不得宣称生产准确率。未 tag、合并、推送或发布。
+> 2026-07-16：独立分支 `codex/t2-artifacts` 已完成 T2～T6、B3a0、B3a1 普通卷纵切、B3a2 固定答题卡首建/复用与多页模板集、M2-C0 固定格式默写正式终审，以及答案图片/TXT/PDF/DOCX/XLSX 结构化、冲突预检和“采用上传答案与评分点，另存新版本”。答题卡现在要求每个实际页码的模板全部确认且题目逐项覆盖后才允许处理；客观格进入本地 OMR，填空/简答主观区先形成答案隔离、追加式手写 OCR 转写，再进入独立主观题工作台。填空题只按老师已确认答案做确定性精确匹配；简答题按确认 rubric 逐点输出覆盖、部分覆盖、遗漏、矛盾或不确定，得分建议必须引用学生答案原文，老师接受/修正后形成 grade decision，仍须整份显式发布。老师可把人工确认的填空写法沉淀为未来答案版本，并按填空槽位/简答评分点确认未来知识与能力链接；当前成绩、发布和既有证据不被重绑。默写继续走独立 policy/rubric 语义。普通试卷、答题卡和默写共用按文件自然顺序、页面重复周期、起始学号与缺交名单的归组外壳，但使用独立识别算法。三类材料已具备合成黄金集、hash-only 单会话报告和老师人工基线/AI 辅助复核耗时合同；真实脱敏材料/provider 阈值与真实老师影子试点仍未完成，合成结果不得宣称生产准确率或减负比例。未 tag、合并、推送或发布。
 
 | 部分 | 状态 | 说明 |
 |------|------|------|
@@ -18,21 +18,21 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 | `crates/module-recitation` M1 域 | ✅ 实现 + 单测 | 文件名解析、熟练度 A/B/C、评分编排、识别 ports、rec_contents 仓储 |
 | `crates/module-recitation` M1 服务 | ✅ 实现 + 单测 | import 去重/归档、ASR 可恢复状态机、机器建议、老师终审、补背/到期复习/日切、双向改判 |
 | `crates/module-knowledge` K1 | 🟡 T3 兼容底座 | 教材/知识/考点/能力稳定版本，题目/答案/rubric/link 不可变版本，C0～L4 质量闸门与旧表显式映射；导入、搜索和 UI 尚未接入 |
-| `crates/module-exam` M2 | 🟡 A1 + B0/B1 + M2.5 + B2 + B3a1/B3a2/B3c3 + M2-C0 | 普通卷、固定答题卡多页模板集/客观主观分流、答题卡主观区追加式 OCR、填空确定性建议与老师主观题工作台、固定默写正式链、五类答案版本链已落；三材料黄金合同、真实闸门、受限数据权利演练和 hash-only 影子会话已落。简答题分项 AI 建议、真实脱敏样本/provider、评分点结构变化映射仍缺 |
+| `crates/module-exam` M2 | 🟡 A1 + B0/B1 + M2.5 + B2 + B3a1/B3a2/B3c3 + M2-C0 | 普通卷、固定答题卡多页模板集/客观主观分流、答题卡主观区追加式 OCR、填空确定性建议、简答逐评分点建议与老师主观题工作台、固定默写正式链、五类答案版本链、评分点结构变化映射、未来答案/知识/能力版本均已落；三材料黄金合同、真实闸门、受限数据权利演练、hash-only 影子会话和老师耗时观察合同已落。真实脱敏样本/provider 阈值和真实老师影子试点仍缺 |
 | Tauri 应用外壳 `src-tauri` | ✅ 实现 + 独立检查 | DB+迁移、M1 终审，以及 T6 工作台/接受建议/人工记分/严格批量/显式发布、T6.1b 固定卷上传归档/PDF 真拆页、Ark 题区识别 run 和答题卡主观区答案隔离手写 OCR；在线备份恢复、按 hash 归档、凭据掩码与最小 asset scope |
 | 前端 `src` | 🟡 M1/M2 已接入 | 方向 B 模块切换；M1 六区、M2-A1 手工兜底，以及“上传批改”单入口、T6 标准卷按题终审、异常处理、严格批量和整卷发布页面 |
 | 跨平台 CI | ✅ 后端三平台 + 应用 Win/Mac 编译 | `.github/workflows/ci.yml` |
 | 打包 CI（安装包） | ✅ 工作流就绪 | `release.yml`：手动/tag 触发出 `.msi/.exe/.dmg` |
 | 火山 ASR 真接口 | ✅ 标准版 submit+query | 境内端点绕系统代理；processing/ok/failed 可恢复，失败可重试、同 hash 重定位或作废 |
 | 页面与老师终审 | ✅ A6b 真机通过 | 机器只给建议；老师核对录音/ASR/答案版本/评分/备注后终审，副作用才生效 |
-| M2 页面证据链 / OCR | 🟡 三材料固定版式纵切已接 | 普通卷按 `structure run → teacher confirmation → alignment/region/crop → observation`；答题卡按 `逐页 blank image → 完整 template set → four-anchor alignment → 客观 OMR / 主观 crop → answer-free OCR → suggestion → teacher review`；默写按 `blank image → template/policy confirmation → aligned derivative/region crop → answer-free OCR → exception review`。简答题分项 AI 评分和真实照片准确率未验证 |
+| M2 页面证据链 / OCR | 🟡 三材料固定版式纵切已接 | 普通卷按 `structure run → teacher confirmation → alignment/region/crop → observation`；答题卡按 `逐页 blank image → 完整 template set → four-anchor alignment → 客观 OMR / 主观 crop → answer-free OCR → suggestion → teacher review`；默写按 `blank image → template/policy confirmation → aligned derivative/region crop → answer-free OCR → exception review`。简答题分项建议已有答案原文证据门禁；真实照片/provider 准确率仍未验证 |
 | M2.5 题目自动沉淀 | 🟡 T5 核心合同完成 | 精确复用当前作业已固定的 K1 版本；否则创建老师私有 C0 候选；冲突/歧义进入待确认，学生卷只允许脱敏文本；相似题语义检索、候选整理 UI 和晋级尚未接入 |
 | M2 拍照批改 | 🟡 普通卷/固定答题卡/固定默写纵切 | 三类材料共用“学号升序拍摄、文件自然排序、重复页面周期、起始学生/缺交一次确认”的学生归组，缺页不得平移后续学生；普通卷、答题卡和默写识别方式独立。默写已分开未写、无法辨认、识别失败、涂改终态和真实不匹配，并支持失败重试、追加式校正、人工补录/记分、严格批量终审与显式发布 |
 | M2 傻瓜式固定卷预检 | 🟡 三材料固定版式 + 图片/TXT/PDF/Word/Excel 答案核对已贯通 | “上传批改”仍是唯一主入口；普通卷确认结构，答题卡确认一次空白模板，默写确认一次空白区域/评分策略，之后整批自动处理并只展示异常。答案全一致一次确认；冲突/缺题阻断；老师可沿用当前答案，或把客观题/固定填空冲突答案另存为新 K1/作业版本且不改写本批绑定 |
 | 音频回放 | ✅ app-managed archive | 按 hash 归档；原文件改名、重启和数据库恢复后仍可回放，原路径只兜底 |
 | ffmpeg 转码/时长探测 | ✅ 可选集成 | 装了 ffmpeg 则转 16k 单声道 wav + 探测时长，否则降级 |
 
-当前已验证：module-exam **134 tests**、workspace **263 tests**、Tauri 应用 **48 tests**（另有隔离夹具 2 tests）、两套 Clippy `-D warnings`、Tauri test/check、前端 build 和 `git diff --check` 全通过；exam 迁移已到 `exam_0023`。新增回归证明 OCR 后只形成建议且不会自动写成绩；高置信填空精确命中可由老师接受，分歧可人工记分并要求依据；简答题在独立 `answer_grade` 分项 AI 接入前保持 `unscored`，只能由老师按原图/rubric 终审；任何 grade decision 都不会自动发布或提前生成学习证据。真实答题卡/默写/答案文件、真实 provider、阈值、真机主观题点击链与真实脱敏数据演练仍未验证，正式库未写入。
+当前已验证：module-exam **158 tests**、workspace **287 tests**、Tauri 应用 **50 tests**（另有客观夹具 2、主观夹具 3）、两套 Clippy `-D warnings`、Tauri test/check、前端 build、老师影子报告 CLI 幂等/拒绝覆盖和 `git diff --check` 全通过；exam 迁移已到 `exam_0027`。新增回归证明 OCR 后只形成建议且不会自动写成绩；高置信填空精确命中可由老师接受，分歧可人工记分并要求依据；简答题只有老师接受逐点评分分析后才能按确认链接形成正式证据，人工只改总分时保持 fail-closed；任何 grade decision 都不会自动发布或提前生成学习证据。真实答题卡/默写/答案文件、真实 provider、阈值、真实老师并行耗时和真实脱敏数据演练仍未验证，正式库未写入。
 
 > 这些结果不等于授权发布。异模型复核、tag、合并和安装包发布仍需单独放行。
 

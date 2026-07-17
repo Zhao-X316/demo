@@ -101,3 +101,18 @@ cargo run -p module-exam --example run_shadow_pilot -- \
 ```
 
 真实材料在同一命令追加 `--gate` 与 `--rights-evidence`。三类清单必须全部引用同一当前有效闸门；缺一类、重复材料类型、混用合成/真实、闸门或数据权利证据漂移都会拒绝。会话把危险批量放行、错误识别值、误接受、缺失/额外输出和覆盖缺口列为安全发现；保守转人工只进入报告指标，不被伪装成安全通过率。
+
+## 老师并行影子耗时
+
+同一批三类材料还要各记录一组“纯人工基线”和“AI 辅助复核”。仓库中的
+`teacher_shadow_observations_contract_v1.json` 只是合成命令合同；真实观察文件仍放在仓库外受限目录。观察只保留不透明老师引用、样本 hash、时间与计数，不得填写姓名、答案/OCR 正文、图片或文件路径。三类辅助观察必须绑定同一个 `run_shadow_pilot` 结果 hash：
+
+```bash
+mkdir -p /tmp/jiaofu-teacher-shadow
+cargo run -p module-exam --example evaluate_teacher_shadow -- \
+  --observations crates/module-exam/tests/fixtures/material_golden/teacher_shadow_observations_contract_v1.json \
+  --generated-at 2026-07-16T09:05:00Z \
+  --output /tmp/jiaofu-teacher-shadow/report.json
+```
+
+报告给出每 100 份材料的人工/辅助主动耗时 P50、P80、P95，以及异常复核、机器结论修正和老师必要操作计数。人工与辅助若不是同一老师、同一材料、同一样本 hash 和同一工作量，或缺任一材料/配对，报告会拒绝生成。报告采用一次写入语义，且 `release_authorized` 永远为 `false`；它只能说明试点减负表现，不能替代老师终审或发布闸门。

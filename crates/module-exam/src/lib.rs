@@ -17,6 +17,7 @@ pub mod pilot_data_rights;
 pub mod service;
 pub mod shadow_pilot;
 pub mod short_answer_grading;
+pub mod teacher_shadow;
 pub mod vlm;
 
 use suite_core::models::ModuleKey;
