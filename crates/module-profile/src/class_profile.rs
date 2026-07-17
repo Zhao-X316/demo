@@ -1619,6 +1619,11 @@ pub fn latest_class_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::class_exports::{
+        create_export_snapshot, write_export_snapshot_csv, CreateClassProfileExportInput,
+        CLASS_PROFILE_EXPORT_MIN_GROUP_SIZE, CLASS_PROFILE_EXPORT_RULE_VERSION,
+        LOCAL_TEACHER_ACTOR_ID,
+    };
     use suite_core::db::repo::learning_evidence::{create_or_get, NewLearningEvidence};
     use suite_core::db::{open_in_memory, run_migrations, CORE_MIGRATIONS};
     use suite_core::models::{
@@ -2105,5 +2110,230 @@ mod tests {
         );
         assert_eq!(second.trend.snapshot_student_count_delta, Some(0));
         assert!(second.trend.note.contains("不能据此自动宣称"));
+    }
+
+    #[test]
+    fn deidentified_export_is_idempotent_immutable_private_and_contains_no_student_rows() {
+        let mut fixture = setup();
+        for index in 0..3 {
+            let student_id = fixture.students[index];
+            generate_personal(
+                &mut fixture,
+                student_id,
+                &format!("export-weak-{index}"),
+                0.0,
+                "2026-07-01",
+                "2026-07-31",
+            );
+        }
+        let preview = preview_class_profile(&fixture.conn, &scope(&fixture)).unwrap();
+        let class_snapshot = generate_class_profile(
+            &mut fixture.conn,
+            &GenerateClassProfileInput {
+                scope: ClassProfileScope {
+                    class_id: fixture.class_id,
+                    range_start: "2026-07-01",
+                    range_end: "2026-07-31",
+                },
+                expected_source_watermark: &preview.source_watermark,
+                confirmed_by: "teacher-1",
+            },
+        )
+        .unwrap();
+        let request = CreateClassProfileExportInput {
+            request_key: "class-export-request-1",
+            snapshot_public_id: &class_snapshot.public_id,
+            expected_snapshot_payload_sha256: &class_snapshot.payload_sha256,
+            report_kind: "deidentified_class_summary",
+            purpose: "internal_teaching",
+            actor_role: "local_teacher",
+            actor_id: LOCAL_TEACHER_ACTOR_ID,
+        };
+        let export = create_export_snapshot(&mut fixture.conn, &request).unwrap();
+        assert_eq!(export.snapshot_public_id, class_snapshot.public_id);
+        assert_eq!(export.class_id, fixture.class_id);
+        assert_eq!(export.min_group_size, CLASS_PROFILE_EXPORT_MIN_GROUP_SIZE);
+        assert_eq!(export.rule_version, CLASS_PROFILE_EXPORT_RULE_VERSION);
+        assert!(export.suggested_file_name.ends_with(".csv"));
+
+        let payload_json: String = fixture
+            .conn
+            .query_row(
+                "SELECT payload_json FROM class_profile_export_snapshots
+                 WHERE public_id=?1",
+                [&export.public_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(payload_json.contains("洋务运动失败原因"));
+        for private_value in ["学生1", "学生2", "学生3", "\"01\"", "\"02\"", "\"03\""] {
+            assert!(!payload_json.contains(private_value));
+        }
+        let student_rows: i64 = fixture
+            .conn
+            .query_row(
+                "SELECT COALESCE(json_array_length(payload_json,'$.nodes'),0)
+                 FROM class_profile_export_snapshots WHERE public_id=?1",
+                [&export.public_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(student_rows, 1);
+
+        let repeated = create_export_snapshot(&mut fixture.conn, &request).unwrap();
+        assert_eq!(repeated.public_id, export.public_id);
+        let conflicting_hash = "f".repeat(64);
+        let conflicting = create_export_snapshot(
+            &mut fixture.conn,
+            &CreateClassProfileExportInput {
+                request_key: request.request_key,
+                snapshot_public_id: request.snapshot_public_id,
+                expected_snapshot_payload_sha256: &conflicting_hash,
+                report_kind: request.report_kind,
+                purpose: request.purpose,
+                actor_role: request.actor_role,
+                actor_id: request.actor_id,
+            },
+        );
+        assert!(conflicting.is_err());
+        let export_count: i64 = fixture
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM class_profile_export_snapshots",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let audit_count: i64 = fixture
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_events
+                 WHERE object_type='class_profile_export_snapshot'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let outbox_count: i64 = fixture
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM outbox_events
+                 WHERE event_type='class_profile_deidentified_export_created'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((export_count, audit_count, outbox_count), (1, 1, 1));
+        assert!(fixture
+            .conn
+            .execute(
+                "UPDATE class_profile_export_snapshots SET purpose=purpose WHERE public_id=?1",
+                [&export.public_id],
+            )
+            .is_err());
+        assert!(fixture
+            .conn
+            .execute(
+                "DELETE FROM class_profile_export_snapshots WHERE public_id=?1",
+                [&export.public_id],
+            )
+            .is_err());
+
+        let output_path = std::env::temp_dir().join(format!(
+            "jiaofu-class-profile-export-{}.csv",
+            ids::new_public_id()
+        ));
+        let written = write_export_snapshot_csv(
+            &fixture.conn,
+            &export.public_id,
+            output_path.to_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(written.sha256, export.csv_sha256);
+        let csv = std::fs::read_to_string(&output_path).unwrap();
+        assert!(csv.starts_with('\u{feff}'));
+        assert!(csv.contains("洋务运动失败原因"));
+        assert!(!csv.contains("学生1"));
+        assert!(!csv.contains("学生2"));
+        assert!(!csv.contains("学生3"));
+        assert!(!csv.contains("排名,"));
+        assert!(write_export_snapshot_csv(
+            &fixture.conn,
+            &export.public_id,
+            output_path.to_str().unwrap(),
+        )
+        .is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&output_path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        std::fs::remove_file(output_path).unwrap();
+    }
+
+    #[test]
+    fn stale_class_snapshot_cannot_be_exported() {
+        let mut fixture = setup();
+        for index in 0..3 {
+            let student_id = fixture.students[index];
+            generate_personal(
+                &mut fixture,
+                student_id,
+                &format!("stale-export-{index}"),
+                1.0,
+                "2026-07-01",
+                "2026-07-31",
+            );
+        }
+        let preview = preview_class_profile(&fixture.conn, &scope(&fixture)).unwrap();
+        let class_snapshot = generate_class_profile(
+            &mut fixture.conn,
+            &GenerateClassProfileInput {
+                scope: ClassProfileScope {
+                    class_id: fixture.class_id,
+                    range_start: "2026-07-01",
+                    range_end: "2026-07-31",
+                },
+                expected_source_watermark: &preview.source_watermark,
+                confirmed_by: "teacher-1",
+            },
+        )
+        .unwrap();
+        add_evidence(
+            &fixture,
+            fixture.students[0],
+            "stale-export-new",
+            "stale-export-new-q",
+            "2026-07-25T00:00:00.000Z",
+            0.0,
+        );
+        let result = create_export_snapshot(
+            &mut fixture.conn,
+            &CreateClassProfileExportInput {
+                request_key: "stale-class-export-request",
+                snapshot_public_id: &class_snapshot.public_id,
+                expected_snapshot_payload_sha256: &class_snapshot.payload_sha256,
+                report_kind: "deidentified_class_summary",
+                purpose: "internal_teaching",
+                actor_role: "local_teacher",
+                actor_id: LOCAL_TEACHER_ACTOR_ID,
+            },
+        );
+        assert!(result.is_err());
+        let export_count: i64 = fixture
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM class_profile_export_snapshots",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(export_count, 0);
     }
 }

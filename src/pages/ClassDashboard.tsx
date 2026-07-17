@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { save } from "@tauri-apps/plugin-dialog";
 import {
   AppModule,
   ClassActionDraft,
@@ -10,6 +11,7 @@ import {
   ClassProfileSnapshot,
   ClassOperationsDashboard,
   DashboardTargetView,
+  createClassProfileExportSnapshot,
   createClassTeachingEvent,
   confirmClassAction,
   generateClassProfile,
@@ -22,6 +24,7 @@ import {
   previewClassProfile,
   reviseClassTeachingEvent,
   voidClassTeachingEvent,
+  writeClassProfileExportSnapshot,
 } from "../api/classDashboard";
 import { Class, classesList } from "../api/manage";
 
@@ -114,6 +117,11 @@ function newRequestKey(prefix: string) {
   return `${prefix}-${random}`;
 }
 
+function classProfileExportFileName(snapshot: ClassProfileSnapshot) {
+  const safeClassName = snapshot.class.name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim();
+  return `${safeClassName || "班级"}_班级掌握脱敏摘要_${snapshot.range_start}_至${snapshot.range_end}.csv`;
+}
+
 function formatDelta(value: number | null) {
   if (value === null) return "—";
   if (value > 0) return `+${value}`;
@@ -147,6 +155,9 @@ export default function ClassDashboard({ onNavigate, onOpenLearning }: Props) {
   const [profileSnapshot, setProfileSnapshot] = useState<ClassProfileSnapshot | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileError, setProfileError] = useState("");
+  const [profileExporting, setProfileExporting] = useState(false);
+  const [profileExportError, setProfileExportError] = useState("");
+  const [profileExportedFile, setProfileExportedFile] = useState("");
   const [profileView, setProfileView] = useState<"knowledge" | "ability">("knowledge");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [teachingEvents, setTeachingEvents] = useState<ClassTeachingEvent[]>([]);
@@ -212,6 +223,8 @@ export default function ClassDashboard({ onNavigate, onOpenLearning }: Props) {
     setProfileError("");
     setProfilePreview(null);
     setSelectedNodeId(null);
+    setProfileExportError("");
+    setProfileExportedFile("");
     loadLatestClassProfile(classId)
       .then((value) => {
         if (current) setProfileSnapshot(Array.isArray(value) ? null : value);
@@ -308,10 +321,40 @@ export default function ClassDashboard({ onNavigate, onOpenLearning }: Props) {
       setProfileSnapshot(value);
       setProfilePreview(null);
       setSelectedNodeId(null);
+      setProfileExportError("");
+      setProfileExportedFile("");
     } catch (reason) {
       setProfileError(String(reason));
     } finally {
       setProfileLoading(false);
+    }
+  };
+
+  const exportClassProfile = async () => {
+    if (!profileSnapshot || profileSnapshot.is_stale) return;
+    setProfileExporting(true);
+    setProfileExportError("");
+    setProfileExportedFile("");
+    try {
+      const outputPath = await save({
+        defaultPath: classProfileExportFileName(profileSnapshot),
+        filters: [{ name: "CSV 表格", extensions: ["csv"] }],
+      });
+      if (!outputPath) return;
+      const exportSnapshot = await createClassProfileExportSnapshot(
+        newRequestKey("class-profile-export"),
+        profileSnapshot.public_id,
+        profileSnapshot.payload_sha256,
+      );
+      const written = await writeClassProfileExportSnapshot(
+        exportSnapshot.public_id,
+        outputPath,
+      );
+      setProfileExportedFile(written.file_name);
+    } catch (reason) {
+      setProfileExportError(String(reason));
+    } finally {
+      setProfileExporting(false);
     }
   };
 
@@ -602,6 +645,31 @@ export default function ClassDashboard({ onNavigate, onOpenLearning }: Props) {
                 {profileSnapshot.is_stale && (
                   <div className="warn class-profile-stale">
                     {profileSnapshot.stale_reason ?? "班级掌握快照已有新输入，建议重新生成。"}
+                  </div>
+                )}
+                <div className="class-profile-export">
+                  <div>
+                    <b>导出脱敏班级摘要</b>
+                    <span>
+                      仅供当前老师内部教学；不含学生姓名、学号、逐人状态、排名或原始证据。
+                    </span>
+                  </div>
+                  <button
+                    onClick={exportClassProfile}
+                    disabled={profileExporting || profileSnapshot.is_stale}
+                  >
+                    {profileExporting ? "正在导出…" : "导出 CSV"}
+                  </button>
+                </div>
+                {profileSnapshot.is_stale && (
+                  <div className="dashboard-rule-note">
+                    快照过期时禁止导出，请先预览并生成新的班级掌握快照。
+                  </div>
+                )}
+                {profileExportError && <div className="error">{profileExportError}</div>}
+                {profileExportedFile && (
+                  <div className="class-profile-export-success">
+                    已导出：{profileExportedFile}
                   </div>
                 )}
                 <div className="class-profile-summary">

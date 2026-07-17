@@ -5,6 +5,7 @@
 //! 或上游证据。
 
 pub mod action_drafts;
+pub mod class_exports;
 pub mod class_profile;
 pub mod profile;
 pub mod teaching_events;
@@ -28,6 +29,10 @@ static MIGRATIONS: &[Migration] = &[
     Migration {
         id: "profile_0004",
         sql: include_str!("../migrations/0004_class_action_drafts.sql"),
+    },
+    Migration {
+        id: "profile_0005",
+        sql: include_str!("../migrations/0005_class_profile_exports.sql"),
     },
 ];
 

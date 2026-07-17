@@ -7,6 +7,10 @@ use module_profile::action_drafts::{
     self, ClassActionDraft, ClassActionPreview, ConfirmClassActionInput, PreviewClassActionInput,
     RecordPracticeMaterializationInput, CLASS_ACTION_PRACTICE_TEMPLATE_VERSION,
 };
+use module_profile::class_exports::{
+    self, ClassProfileExportSnapshot, CreateClassProfileExportInput, WrittenClassProfileExport,
+    LOCAL_TEACHER_ACTOR_ID,
+};
 use module_profile::class_profile::{
     self as class_profile_service, ClassProfilePreview, ClassProfileScope, ClassProfileSnapshot,
     GenerateClassProfileInput,
@@ -135,6 +139,14 @@ pub struct GenerateClassProfileRequest {
     range_start: String,
     range_end: String,
     expected_source_watermark: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateClassProfileExportRequest {
+    request_key: String,
+    snapshot_public_id: String,
+    expected_snapshot_payload_sha256: String,
 }
 
 #[derive(Deserialize)]
@@ -466,6 +478,38 @@ pub fn latest_class_profile(
 ) -> Result<Option<ClassProfileSnapshot>, String> {
     let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     class_profile_service::latest_class_profile(&connection, class_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn create_class_profile_export_snapshot(
+    state: State<'_, AppState>,
+    input: CreateClassProfileExportRequest,
+) -> Result<ClassProfileExportSnapshot, String> {
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    class_exports::create_export_snapshot(
+        &mut connection,
+        &CreateClassProfileExportInput {
+            request_key: &input.request_key,
+            snapshot_public_id: &input.snapshot_public_id,
+            expected_snapshot_payload_sha256: &input.expected_snapshot_payload_sha256,
+            report_kind: "deidentified_class_summary",
+            purpose: "internal_teaching",
+            actor_role: "local_teacher",
+            actor_id: LOCAL_TEACHER_ACTOR_ID,
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn write_class_profile_export_snapshot(
+    state: State<'_, AppState>,
+    export_public_id: String,
+    output_path: String,
+) -> Result<WrittenClassProfileExport, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    class_exports::write_export_snapshot_csv(&connection, &export_public_id, &output_path)
         .map_err(|error| error.to_string())
 }
 

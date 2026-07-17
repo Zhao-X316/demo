@@ -1,7 +1,7 @@
-"""M6.1 班级运行仪表盘、掌握快照、课堂事件与教学行动浏览器冒烟测试。
+"""M6.1 班级运行仪表盘、掌握快照、脱敏导出、课堂事件与教学行动浏览器冒烟测试。
 
 通过浏览器端 Tauri invoke mock 验证运行事实、掌握预览/确认、热力图、
-临时学习状态、同口径趋势、课堂事件 revision、老师确认的定向练习、
+临时学习状态、同口径趋势、脱敏班级摘要、课堂事件 revision、老师确认的定向练习、
 背诵映射阻断、班级切换和跨模块跳转；
 后端 SQL 口径由 Rust 单元测试覆盖。
 """
@@ -33,7 +33,10 @@ window.__makeClassProfile = (revision = 1) => ({
   state: "teacher_confirmed", payload_sha256: "b".repeat(64),
   generated_by: "local_teacher", generated_at: "2026-07-16T12:00:00Z",
   confirmed_by: "local_teacher", confirmed_at: "2026-07-16T12:00:00Z",
-  is_stale: false, stale_reason: null,
+  is_stale: Boolean(window.__STALE_PROFILE__),
+  stale_reason: window.__STALE_PROFILE__
+    ? "班级掌握快照已有新输入，请先刷新。"
+    : null,
   inputs: [
     {
       student: { id: 1, class_id: 1, student_no: "01", name: "小林" },
@@ -251,6 +254,9 @@ window.__TAURI_INTERNALS__ = {
   convertFileSrc: (path) => path,
   invoke: async (cmd, args = {}) => {
     window.__dashboardCalls.push({ cmd, args });
+    if (cmd === "plugin:dialog|save") {
+      return "/tmp/八年级一班_班级掌握脱敏摘要.csv";
+    }
     if (cmd === "classes_list") {
       return window.__NO_CLASSES__ ? [] : [
         { id: 1, name: "八年级一班", term: "2026秋", textbook: "中国历史八上" },
@@ -358,6 +364,33 @@ window.__TAURI_INTERNALS__ = {
     }
     if (cmd === "latest_class_profile") {
       return Number(args.classId) === 1 ? window.__makeClassProfile(1) : null;
+    }
+    if (cmd === "create_class_profile_export_snapshot") {
+      return {
+        public_id: "class-profile-export-1",
+        snapshot_public_id: args.input.snapshotPublicId,
+        class_id: 1,
+        report_kind: "deidentified_class_summary",
+        purpose: "internal_teaching",
+        actor_role: "local_teacher",
+        min_group_size: 3,
+        schema_version: 1,
+        rule_version: "m6.1-deidentified-class-summary-local-v1",
+        source_snapshot_payload_sha256: args.input.expectedSnapshotPayloadSha256,
+        payload_sha256: "e".repeat(64),
+        csv_sha256: "f".repeat(64),
+        suggested_file_name: "八年级一班_班级掌握脱敏摘要_2026-06-18_至2026-07-17.csv",
+        generated_by: "local_teacher",
+        generated_at: "2026-07-17T13:00:00Z"
+      };
+    }
+    if (cmd === "write_class_profile_export_snapshot") {
+      return {
+        snapshot_public_id: args.exportPublicId,
+        file_name: "八年级一班_班级掌握脱敏摘要.csv",
+        byte_size: 2048,
+        sha256: "f".repeat(64)
+      };
     }
     if (cmd === "preview_class_profile") {
       return {
@@ -544,6 +577,22 @@ def test_dashboard(base_url: str) -> None:
         expect(page.get_by_text("不是固定能力标签", exact=False)).to_be_visible()
         expect(page.get_by_text("当前没有可比较的同口径历史快照", exact=False)).to_be_visible()
         expect(page.get_by_text("复习洋务运动失败原因", exact=True)).to_be_visible()
+        expect(page.get_by_text("不含学生姓名、学号、逐人状态、排名或原始证据", exact=False)).to_be_visible()
+        page.get_by_role("button", name="导出 CSV").click()
+        expect(page.get_by_text("已导出：八年级一班_班级掌握脱敏摘要.csv", exact=True)).to_be_visible()
+        export_calls = page.evaluate(
+            """window.__dashboardCalls
+              .filter((item) => item.cmd === "create_class_profile_export_snapshot"
+                || item.cmd === "write_class_profile_export_snapshot")"""
+        )
+        assert [item["cmd"] for item in export_calls] == [
+            "create_class_profile_export_snapshot",
+            "write_class_profile_export_snapshot",
+        ]
+        assert export_calls[0]["args"]["input"]["snapshotPublicId"] == "class-profile-1"
+        assert export_calls[0]["args"]["input"]["expectedSnapshotPayloadSha256"] == "b" * 64
+        assert export_calls[1]["args"]["exportPublicId"] == "class-profile-export-1"
+        assert export_calls[1]["args"]["outputPath"].endswith(".csv")
 
         page.locator(".class-profile-heatmap thead button").click()
         expect(page.locator(".class-profile-detail")).to_contain_text("合格样本")
@@ -630,6 +679,20 @@ def test_dashboard(base_url: str) -> None:
         retry.evaluate("window.__FAIL_ACTION_MATERIALIZATION__ = false")
         retry.get_by_role("button", name="重试建立作业").click()
         expect(retry.get_by_role("button", name="去作业台")).to_be_visible()
+
+        stale = browser.new_page(viewport={"width": 1100, "height": 800})
+        stale.add_init_script("window.__STALE_PROFILE__ = true;")
+        stale.add_init_script(MOCK_SCRIPT)
+        stale.goto(base_url)
+        stale.wait_for_load_state("networkidle")
+        expect(stale.get_by_role("button", name="导出 CSV")).to_be_disabled()
+        expect(stale.get_by_text("快照过期时禁止导出", exact=False)).to_be_visible()
+        stale_calls = stale.evaluate(
+            """window.__dashboardCalls
+              .filter((item) => item.cmd === "plugin:dialog|save"
+                || item.cmd === "create_class_profile_export_snapshot")"""
+        )
+        assert stale_calls == []
 
         empty = browser.new_page(viewport={"width": 1100, "height": 800})
         empty.add_init_script("window.__NO_CLASSES__ = true;")

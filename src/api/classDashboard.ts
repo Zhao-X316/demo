@@ -250,6 +250,31 @@ export interface ClassProfileSnapshot {
   trend: ClassProfileTrend;
 }
 
+export interface ClassProfileExportSnapshot {
+  public_id: string;
+  snapshot_public_id: string;
+  class_id: number;
+  report_kind: "deidentified_class_summary";
+  purpose: "internal_teaching";
+  actor_role: "local_teacher";
+  min_group_size: number;
+  schema_version: number;
+  rule_version: string;
+  source_snapshot_payload_sha256: string;
+  payload_sha256: string;
+  csv_sha256: string;
+  suggested_file_name: string;
+  generated_by: string;
+  generated_at: string;
+}
+
+export interface WrittenClassProfileExport {
+  snapshot_public_id: string;
+  file_name: string;
+  byte_size: number;
+  sha256: string;
+}
+
 export interface ClassProfileScopeInput {
   classId: number;
   rangeStart: string;
@@ -413,6 +438,22 @@ export const generateClassProfile = (
 
 export const loadLatestClassProfile = (classId: number) =>
   call<ClassProfileSnapshot | null>("latest_class_profile", { classId });
+
+export const createClassProfileExportSnapshot = (
+  requestKey: string,
+  snapshotPublicId: string,
+  expectedSnapshotPayloadSha256: string,
+) => call<ClassProfileExportSnapshot>("create_class_profile_export_snapshot", {
+  input: { requestKey, snapshotPublicId, expectedSnapshotPayloadSha256 },
+});
+
+export const writeClassProfileExportSnapshot = (
+  exportPublicId: string,
+  outputPath: string,
+) => call<WrittenClassProfileExport>("write_class_profile_export_snapshot", {
+  exportPublicId,
+  outputPath,
+});
 
 export const listClassTeachingEvents = (input: ClassProfileScopeInput) =>
   call<ClassTeachingEvent[]>("list_class_teaching_events", { input });

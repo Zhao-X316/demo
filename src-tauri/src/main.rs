@@ -109,6 +109,8 @@ fn main() {
             learning_commands::preview_class_profile,
             learning_commands::generate_class_profile,
             learning_commands::latest_class_profile,
+            learning_commands::create_class_profile_export_snapshot,
+            learning_commands::write_class_profile_export_snapshot,
             learning_commands::list_class_teaching_events,
             learning_commands::create_class_teaching_event,
             learning_commands::revise_class_teaching_event,
