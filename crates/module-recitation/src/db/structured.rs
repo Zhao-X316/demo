@@ -387,8 +387,7 @@ fn validate_point(point: &RubricPointDraftInput<'_>) -> CoreResult<Value> {
     }))
 }
 
-/// 创建不可变 rubric 草稿。相同答案版本 + 相同定义 hash 返回同一草稿。
-pub fn create_rubric_draft(
+pub(crate) fn create_rubric_draft_inner(
     conn: &Connection,
     input: &CreateRubricDraftInput<'_>,
 ) -> CoreResult<RecRubricVersion> {
@@ -437,8 +436,7 @@ pub fn create_rubric_draft(
         return Ok(existing);
     }
 
-    let transaction = conn.unchecked_transaction()?;
-    let (revision, supersedes): (i64, Option<i64>) = transaction.query_row(
+    let (revision, supersedes): (i64, Option<i64>) = conn.query_row(
         "SELECT COALESCE(MAX(revision),0)+1,
                 (SELECT id FROM rec_rubric_versions
                  WHERE answer_version_id=?1 ORDER BY revision DESC LIMIT 1)
@@ -448,7 +446,7 @@ pub fn create_rubric_draft(
     )?;
     let public_id = ids::new_public_id();
     let created_at = time::utc_now_rfc3339();
-    transaction.execute(
+    conn.execute(
         "INSERT INTO rec_rubric_versions
           (public_id,answer_version_id,revision,definition_hash,status,
            generated_by_ai_run_id,supersedes_rubric_version_id,created_by,created_at)
@@ -464,9 +462,9 @@ pub fn create_rubric_draft(
             created_at,
         ],
     )?;
-    let rubric_id = transaction.last_insert_rowid();
+    let rubric_id = conn.last_insert_rowid();
     for point in input.points {
-        transaction.execute(
+        conn.execute(
             "INSERT INTO rec_rubric_points
               (public_id,stable_key,rubric_version_id,canonical_text,
                required_entities_json,allowed_paraphrases_json,contradiction_rules_json,
@@ -512,7 +510,7 @@ pub fn create_rubric_draft(
     })
     .to_string();
     outbox::create_event(
-        &transaction,
+        conn,
         &NewOutboxEvent {
             idempotency_key: &format!("recitation:outbox:rubric-draft:{public_id}"),
             event_type: "recitation_rubric_draft_created",
@@ -525,7 +523,7 @@ pub fn create_rubric_draft(
         },
     )?;
     audit::append(
-        &transaction,
+        conn,
         &NewAuditEvent {
             idempotency_key: &format!("recitation:audit:rubric-draft:{public_id}"),
             actor_type: AuditActorType::Teacher,
@@ -539,12 +537,21 @@ pub fn create_rubric_draft(
             occurred_at: &created_at,
         },
     )?;
-    transaction.commit()?;
     get_rubric(conn, rubric_id)?.ok_or_else(|| CoreError::Db("rubric 草稿创建后无法读取".into()))
 }
 
-/// 老师确认 rubric；同答案版本旧 confirmed 自动退役，但旧行保持可追溯。
-pub fn confirm_rubric(
+/// 创建不可变 rubric 草稿。相同答案版本 + 相同定义 hash 返回同一草稿。
+pub fn create_rubric_draft(
+    conn: &Connection,
+    input: &CreateRubricDraftInput<'_>,
+) -> CoreResult<RecRubricVersion> {
+    let transaction = conn.unchecked_transaction()?;
+    let rubric = create_rubric_draft_inner(&transaction, input)?;
+    transaction.commit()?;
+    Ok(rubric)
+}
+
+pub(crate) fn confirm_rubric_inner(
     conn: &Connection,
     rubric_version_id: i64,
     confirmed_by: &str,
@@ -563,14 +570,13 @@ pub fn confirm_rubric(
         return Err(CoreError::Invalid("没有评分点的 rubric 不能确认".into()));
     }
 
-    let transaction = conn.unchecked_transaction()?;
     let confirmed_at = time::utc_now_rfc3339();
-    transaction.execute(
+    conn.execute(
         "UPDATE rec_rubric_versions SET status='retired'
          WHERE answer_version_id=?1 AND status='confirmed' AND id<>?2",
         params![rubric.answer_version_id, rubric_version_id],
     )?;
-    let changed = transaction.execute(
+    let changed = conn.execute(
         "UPDATE rec_rubric_versions
          SET status='confirmed',confirmed_by=?2,confirmed_at=?3
          WHERE id=?1 AND status='draft'",
@@ -590,7 +596,7 @@ pub fn confirm_rubric(
     })
     .to_string();
     outbox::create_event(
-        &transaction,
+        conn,
         &NewOutboxEvent {
             idempotency_key: &format!("recitation:outbox:rubric-confirmed:{}", rubric.public_id),
             event_type: "recitation_rubric_confirmed",
@@ -603,7 +609,7 @@ pub fn confirm_rubric(
         },
     )?;
     audit::append(
-        &transaction,
+        conn,
         &NewAuditEvent {
             idempotency_key: &format!("recitation:audit:rubric-confirmed:{}", rubric.public_id),
             actor_type: AuditActorType::Teacher,
@@ -617,9 +623,20 @@ pub fn confirm_rubric(
             occurred_at: &confirmed_at,
         },
     )?;
-    transaction.commit()?;
     get_rubric(conn, rubric_version_id)?
         .ok_or_else(|| CoreError::Db("rubric 确认后无法读取".into()))
+}
+
+/// 老师确认 rubric；同答案版本旧 confirmed 自动退役，但旧行保持可追溯。
+pub fn confirm_rubric(
+    conn: &Connection,
+    rubric_version_id: i64,
+    confirmed_by: &str,
+) -> CoreResult<RecRubricVersion> {
+    let transaction = conn.unchecked_transaction()?;
+    let rubric = confirm_rubric_inner(&transaction, rubric_version_id, confirmed_by)?;
+    transaction.commit()?;
+    Ok(rubric)
 }
 
 #[derive(Debug, Deserialize)]

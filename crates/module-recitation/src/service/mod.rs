@@ -3,6 +3,7 @@ pub mod ai_pipeline;
 pub mod import;
 pub mod matching;
 pub mod recognition;
+pub mod rubric_setup;
 pub mod scoring;
 pub mod structured_scoring;
 pub mod tasks;

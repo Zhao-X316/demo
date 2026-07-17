@@ -21,6 +21,44 @@ export interface RecContent {
 export const studentsList = () => call<Student[]>("students_list");
 export const contentsList = () => call<RecContent[]>("contents_list");
 
+export interface RubricSetupPoint {
+  canonical_text: string;
+  required: boolean;
+  order_index: number;
+}
+
+export interface RubricSetupView {
+  content_id: number;
+  content_no: string;
+  title: string;
+  answer_text: string;
+  answer_version: number;
+  source_kind: "generated_by_sentence" | "confirmed";
+  rubric_version_id: number | null;
+  rubric_revision: number | null;
+  rubric_status: string | null;
+  points: RubricSetupPoint[];
+}
+
+export interface RubricSetupPointInput {
+  canonical_text: string;
+  required: boolean;
+}
+
+export const rubricSetupPreview = (content_id: number) =>
+  call<RubricSetupView>("rubric_setup_preview", { contentId: content_id });
+
+export const rubricSetupConfirm = (
+  content_id: number,
+  expected_answer_version: number,
+  points: RubricSetupPointInput[],
+) =>
+  call<RubricSetupView>("rubric_setup_confirm", {
+    contentId: content_id,
+    expectedAnswerVersion: expected_answer_version,
+    points,
+  });
+
 export const studentsUpsert = (student_no: string, name: string, enabled: boolean) =>
   call<Student>("students_upsert", { studentNo: student_no, name, enabled });
 

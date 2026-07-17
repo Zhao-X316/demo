@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Class,
   RecContent,
+  RubricSetupView,
   Student,
   TaskGenerateResult,
   classesList,
@@ -9,6 +10,8 @@ import {
   contentsList,
   contentsSetEnabled,
   contentsUpsert,
+  rubricSetupConfirm,
+  rubricSetupPreview,
   studentsList,
 } from "../api/manage";
 import { Modal } from "../components/ui";
@@ -22,6 +25,7 @@ export default function Library() {
   const [picked, setPicked] = useState<number[]>([]);
   const [q, setQ] = useState("");
   const [modal, setModal] = useState<"syllabus" | "assign" | "settings" | null>(null);
+  const [rubricContent, setRubricContent] = useState<RecContent | null>(null);
   const [toast, setToast] = useState("");
   const [err, setErr] = useState("");
 
@@ -109,7 +113,23 @@ export default function Library() {
                   </span>
                   <span className="muted" style={{ fontSize: 12 }}>{open[c.id] ? "收起" : "展开"}</span>
                 </div>
-                {open[c.id] && <div className="cans">{c.answer_text}</div>}
+                {open[c.id] && (
+                  <div className="cans">
+                    <div>{c.answer_text}</div>
+                    <div className="rubric-entry">
+                      <span>评分点用于定位漏背、错背和事实矛盾。</span>
+                      <button
+                        className="sm"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setRubricContent(c);
+                        }}
+                      >
+                        设置评分点
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })}
@@ -148,7 +168,208 @@ export default function Library() {
           }}
         />
       )}
+      {rubricContent && (
+        <RubricSetupModal
+          content={rubricContent}
+          onClose={() => setRubricContent(null)}
+          onSaved={(view) => {
+            setRubricContent(null);
+            setToast(`“${view.title}”已启用 ${view.points.length} 个评分点`);
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+interface EditableRubricPoint {
+  canonical_text: string;
+  required: boolean;
+}
+
+function RubricSetupModal({
+  content,
+  onClose,
+  onSaved,
+}: {
+  content: RecContent;
+  onClose: () => void;
+  onSaved: (view: RubricSetupView) => void;
+}) {
+  const [view, setView] = useState<RubricSetupView | null>(null);
+  const [points, setPoints] = useState<EditableRubricPoint[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    rubricSetupPreview(content.id)
+      .then((next) => {
+        if (!active) return;
+        setView(next);
+        setPoints(
+          next.points.map((point) => ({
+            canonical_text: point.canonical_text,
+            required: point.required,
+          })),
+        );
+      })
+      .catch((error) => {
+        if (active) setErr(String(error));
+      });
+    return () => {
+      active = false;
+    };
+  }, [content.id]);
+
+  const updatePoint = (index: number, patch: Partial<EditableRubricPoint>) => {
+    setPoints((current) =>
+      current.map((point, pointIndex) =>
+        pointIndex === index ? { ...point, ...patch } : point,
+      ),
+    );
+  };
+  const movePoint = (index: number, offset: -1 | 1) => {
+    const nextIndex = index + offset;
+    if (nextIndex < 0 || nextIndex >= points.length) return;
+    setPoints((current) => {
+      const next = [...current];
+      [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+      return next;
+    });
+  };
+  const removePoint = (index: number) =>
+    setPoints((current) => current.filter((_, pointIndex) => pointIndex !== index));
+  const save = async () => {
+    if (!view) return;
+    const emptyIndex = points.findIndex((point) => !point.canonical_text.trim());
+    if (emptyIndex >= 0) {
+      setErr(`第 ${emptyIndex + 1} 个评分点不能为空`);
+      return;
+    }
+    if (points.length === 0) {
+      setErr("至少保留一个评分点");
+      return;
+    }
+    setBusy(true);
+    setErr("");
+    try {
+      const saved = await rubricSetupConfirm(
+        view.content_id,
+        view.answer_version,
+        points.map((point) => ({
+          canonical_text: point.canonical_text.trim(),
+          required: point.required,
+        })),
+      );
+      onSaved(saved);
+    } catch (error) {
+      setErr(String(error));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      title={`设置评分点 · ${content.title.replace(/^★\s*/, "")}`}
+      onClose={onClose}
+      footer={
+        <>
+          <span className="sub" style={{ margin: 0 }}>
+            {view?.source_kind === "confirmed"
+              ? `当前已启用 v${view.rubric_revision}`
+              : "确认前不会写入数据库"}
+          </span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={onClose} disabled={busy}>取消</button>
+            <button className="primary" onClick={save} disabled={busy || !view}>
+              {busy ? "保存中…" : "保存并启用"}
+            </button>
+          </div>
+        </>
+      }
+    >
+      {err && <div className="error">{err}</div>}
+      {!view && !err && <div className="loading">正在整理标准答案…</div>}
+      {view && (
+        <>
+          <div className="hint rubric-hint">
+            {view.source_kind === "confirmed"
+              ? "这是当前启用的评分点。修改后会保存为新版本，历史背诵记录仍使用原版本。"
+              : "系统已按句拆分标准答案。请只调整不合理的地方，然后一次确认启用。此步骤不调用云端 AI。"}
+          </div>
+          <div className="rubric-answer">
+            <b>标准答案 · v{view.answer_version}</b>
+            <div>{view.answer_text}</div>
+          </div>
+          <div className="rubric-list-head">
+            <b>评分点</b>
+            <span className="muted">共 {points.length} 个</span>
+          </div>
+          <div className="rubric-point-list">
+            {points.map((point, index) => (
+              <div className="rubric-point" key={index}>
+                <span className="rubric-index">{index + 1}</span>
+                <textarea
+                  rows={2}
+                  value={point.canonical_text}
+                  onChange={(event) =>
+                    updatePoint(index, { canonical_text: event.target.value })
+                  }
+                  aria-label={`评分点 ${index + 1}`}
+                />
+                <label className="rubric-required">
+                  <input
+                    type="checkbox"
+                    checked={point.required}
+                    onChange={(event) =>
+                      updatePoint(index, { required: event.target.checked })
+                    }
+                  />
+                  必背
+                </label>
+                <div className="rubric-actions">
+                  <button
+                    className="sm"
+                    aria-label={`上移评分点 ${index + 1}`}
+                    disabled={index === 0}
+                    onClick={() => movePoint(index, -1)}
+                  >
+                    ↑
+                  </button>
+                  <button
+                    className="sm"
+                    aria-label={`下移评分点 ${index + 1}`}
+                    disabled={index === points.length - 1}
+                    onClick={() => movePoint(index, 1)}
+                  >
+                    ↓
+                  </button>
+                  <button
+                    className="sm danger"
+                    aria-label={`删除评分点 ${index + 1}`}
+                    onClick={() => removePoint(index)}
+                  >
+                    删除
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <button
+            className="sm"
+            onClick={() =>
+              setPoints((current) => [
+                ...current,
+                { canonical_text: "", required: true },
+              ])
+            }
+          >
+            ＋ 添加评分点
+          </button>
+        </>
+      )}
+    </Modal>
   );
 }
 

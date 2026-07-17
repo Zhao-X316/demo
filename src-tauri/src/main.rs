@@ -56,6 +56,8 @@ fn main() {
             commands::verdict_human_decide,
             commands::students_list,
             commands::contents_list,
+            commands::rubric_setup_preview,
+            commands::rubric_setup_confirm,
             commands::seed_demo,
             commands::config_get,
             commands::config_set,

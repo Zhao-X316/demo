@@ -11,7 +11,8 @@ use module_recitation::db::contents::{self, ContentInput, RecContent};
 use module_recitation::db::point_reviews::{self, TeacherPointReviewInput};
 use module_recitation::db::structured;
 use module_recitation::service::{
-    ai_pipeline, import, matching, recognition, scoring, structured_scoring, tasks as task_svc,
+    ai_pipeline, import, matching, recognition, rubric_setup, scoring, structured_scoring,
+    tasks as task_svc,
 };
 use suite_core::db::repo::students::{self, StudentInput};
 use suite_core::db::repo::{classes, file_ledger, submissions, tasks, verdicts};
@@ -455,6 +456,35 @@ pub fn students_list(state: State<'_, AppState>) -> R<Vec<Student>> {
 pub fn contents_list(state: State<'_, AppState>) -> R<Vec<RecContent>> {
     let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     contents::list(&conn, false).map_err(e)
+}
+
+#[tauri::command]
+pub fn rubric_setup_preview(
+    state: State<'_, AppState>,
+    content_id: i64,
+) -> R<rubric_setup::RubricSetupView> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    rubric_setup::preview(&conn, content_id).map_err(e)
+}
+
+#[tauri::command]
+pub fn rubric_setup_confirm(
+    state: State<'_, AppState>,
+    content_id: i64,
+    expected_answer_version: i64,
+    points: Vec<rubric_setup::RubricSetupPointInput>,
+) -> R<rubric_setup::RubricSetupView> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    rubric_setup::confirm(
+        &conn,
+        &rubric_setup::ConfirmRubricSetupInput {
+            content_id,
+            expected_answer_version,
+            points,
+        },
+        "teacher",
+    )
+    .map_err(e)
 }
 
 /// 生成示例数据（无需 ASR/真实录音即可体验看板全流程）。
