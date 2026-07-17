@@ -716,38 +716,129 @@ struct EvidenceDecision {
     item_score: f64,
     link_set_id: i64,
     dictation_rubric_point_public_id: Option<String>,
+    question_type: String,
+    answer_key_version_id: i64,
+    rubric_version_id: i64,
+    subjective_source: bool,
+    short_answer_result_json: Option<String>,
 }
 
-impl EvidenceDecision {
-    fn source_type(&self) -> &'static str {
-        if self.dictation_rubric_point_public_id.is_some() {
-            "dictation_rubric_point"
-        } else {
-            "objective_question"
-        }
-    }
+#[derive(Debug)]
+struct EvidenceSource {
+    source_type: &'static str,
+    source_ref_type: &'static str,
+    source_ref_id: String,
+    link_source_type: &'static str,
+    link_source_public_id: String,
+    rule_version: &'static str,
+    value: f64,
+}
 
-    fn source_ref_type(&self) -> &'static str {
-        if self.dictation_rubric_point_public_id.is_some() {
-            "rubric_point"
-        } else {
-            "assessment_item"
+fn evidence_sources(
+    conn: &Connection,
+    decision: &EvidenceDecision,
+) -> CoreResult<Vec<EvidenceSource>> {
+    if let Some(point_public_id) = decision.dictation_rubric_point_public_id.as_ref() {
+        return Ok(vec![EvidenceSource {
+            source_type: "dictation_rubric_point",
+            source_ref_type: "rubric_point",
+            source_ref_id: point_public_id.clone(),
+            link_source_type: "rubric_point",
+            link_source_public_id: point_public_id.clone(),
+            rule_version: "dictation-grading-v1",
+            value: (decision.teacher_score / decision.item_score).clamp(0.0, 1.0),
+        }]);
+    }
+    if decision.subjective_source {
+        if decision.question_type == "fill_blank" {
+            let mut stmt = conn.prepare(
+                "SELECT public_id FROM k1_answer_slots
+                 WHERE answer_key_version_id=?1 ORDER BY order_index,id",
+            )?;
+            let slots = stmt
+                .query_map([decision.answer_key_version_id], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if slots.len() != 1 {
+                return Ok(Vec::new());
+            }
+            return Ok(vec![EvidenceSource {
+                source_type: "fill_blank_slot",
+                source_ref_type: "answer_slot",
+                source_ref_id: slots[0].clone(),
+                link_source_type: "answer_slot",
+                link_source_public_id: slots[0].clone(),
+                rule_version: "fill-blank-grading-v1",
+                value: (decision.teacher_score / decision.item_score).clamp(0.0, 1.0),
+            }]);
         }
-    }
-
-    fn source_ref_id(&self) -> &str {
-        self.dictation_rubric_point_public_id
-            .as_deref()
-            .unwrap_or(&self.item_public_id)
-    }
-
-    fn rule_version(&self) -> &'static str {
-        if self.dictation_rubric_point_public_id.is_some() {
-            "dictation-grading-v1"
-        } else {
-            "objective-grading-v1"
+        if decision.question_type == "short_answer"
+            && decision.confirmation_level == "teacher_accepted"
+        {
+            let Some(result_json) = decision.short_answer_result_json.as_deref() else {
+                return Ok(Vec::new());
+            };
+            let value: Value = serde_json::from_str(result_json)
+                .map_err(|error| CoreError::Parse(format!("简答题逐点评分结果损坏：{error}")))?;
+            let points = value
+                .get("point_results")
+                .and_then(Value::as_array)
+                .ok_or_else(|| CoreError::Invalid("简答题逐点评分结果缺少 point_results".into()))?;
+            let mut sources = Vec::with_capacity(points.len());
+            let mut seen = std::collections::BTreeSet::new();
+            for point in points {
+                let point_id = point
+                    .get("rubric_point_id")
+                    .and_then(Value::as_i64)
+                    .ok_or_else(|| {
+                        CoreError::Invalid("简答题评分点结果缺少 rubric_point_id".into())
+                    })?;
+                let suggested_score = point
+                    .get("suggested_score")
+                    .and_then(Value::as_f64)
+                    .ok_or_else(|| {
+                        CoreError::Invalid("简答题评分点结果缺少 suggested_score".into())
+                    })?;
+                if !seen.insert(point_id) {
+                    return Err(CoreError::Invalid("简答题评分点结果重复".into()));
+                }
+                let (public_id, max_score): (String, f64) = conn.query_row(
+                    "SELECT public_id,max_score FROM k1_rubric_points
+                     WHERE id=?1 AND rubric_version_id=?2",
+                    (point_id, decision.rubric_version_id),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                if !suggested_score.is_finite()
+                    || suggested_score < 0.0
+                    || suggested_score > max_score + 0.000_001
+                {
+                    return Err(CoreError::Invalid("简答题评分点得分越界".into()));
+                }
+                sources.push(EvidenceSource {
+                    source_type: "question_rubric_point",
+                    source_ref_type: "rubric_point",
+                    source_ref_id: public_id.clone(),
+                    link_source_type: "rubric_point",
+                    link_source_public_id: public_id,
+                    rule_version: "short-answer-rubric-grading-v1",
+                    value: (suggested_score / max_score).clamp(0.0, 1.0),
+                });
+            }
+            return Ok(sources);
         }
+        // 老师只改了简答题总分时没有逐点人工结论；宁可不产出逐点证据，也不猜。
+        return Ok(Vec::new());
     }
+    Ok(vec![EvidenceSource {
+        source_type: "objective_question",
+        source_ref_type: "assessment_item",
+        source_ref_id: decision.item_public_id.clone(),
+        link_source_type: "question",
+        link_source_public_id: String::new(),
+        rule_version: "objective-grading-v1",
+        value: (decision.teacher_score / decision.item_score).clamp(0.0, 1.0),
+    }])
 }
 
 fn evidence_context(value: &str) -> AssessmentContext {
@@ -776,6 +867,7 @@ struct EvidenceTarget<'a> {
     ability_dimension_id: Option<&'a str>,
     quality: f64,
     knowledge_map_version: &'a str,
+    source: &'a EvidenceSource,
 }
 
 struct EvidenceContext<'a> {
@@ -792,10 +884,23 @@ fn activate_evidence_target(
     target: &EvidenceTarget<'_>,
 ) -> CoreResult<()> {
     let decision = context.decision;
-    let idempotency_key = format!(
-        "exam:evidence:decision:{}:{}:{}",
-        decision.public_id, target.target_kind, target.target_public_id
-    );
+    let idempotency_key = if target.source.source_type == "objective_question"
+        || target.source.source_type == "dictation_rubric_point"
+    {
+        format!(
+            "exam:evidence:decision:{}:{}:{}",
+            decision.public_id, target.target_kind, target.target_public_id
+        )
+    } else {
+        format!(
+            "exam:evidence:decision:{}:{}:{}:{}:{}",
+            decision.public_id,
+            target.source.source_ref_type,
+            target.source.source_ref_id,
+            target.target_kind,
+            target.target_public_id
+        )
+    };
     let existed = learning_evidence::get_by_idempotency_key(conn, &idempotency_key)?.is_some();
     let evidence = learning_evidence::create_or_get(
         conn,
@@ -803,9 +908,9 @@ fn activate_evidence_target(
             idempotency_key: &idempotency_key,
             student_id: context.student_id,
             source_module: context.source_module,
-            source_type: decision.source_type(),
-            source_ref_type: decision.source_ref_type(),
-            source_ref_id: decision.source_ref_id(),
+            source_type: target.source.source_type,
+            source_ref_type: target.source.source_ref_type,
+            source_ref_id: &target.source.source_ref_id,
             source_revision: decision.revision,
             decision_ref_type: Some("grade_decision"),
             decision_ref_id: Some(&decision.public_id),
@@ -813,12 +918,12 @@ fn activate_evidence_target(
             knowledge_node_id: target.knowledge_node_id,
             ability_dimension_id: target.ability_dimension_id,
             evidence_kind: EvidenceKind::Accuracy,
-            value: (decision.teacher_score / decision.item_score).clamp(0.0, 1.0),
+            value: target.source.value,
             confirmation_level: evidence_confirmation(&decision.confirmation_level)?,
             evidence_quality: target.quality.clamp(0.0, 1.0),
             assessment_context: context.assessment_context,
             occurred_at: &decision.decided_at,
-            rule_version: decision.rule_version(),
+            rule_version: target.source.rule_version,
             knowledge_map_version: target.knowledge_map_version,
         },
     )?;
@@ -856,10 +961,11 @@ fn activate_evidence_target(
             object_type: "learning_evidence",
             object_id: &evidence.public_id,
             object_revision: Some(decision.revision),
-            note: Some(if decision.dictation_rubric_point_public_id.is_some() {
-                "老师显式发布后激活默写评分点正式学习证据"
-            } else {
-                "老师显式发布后激活客观题正式学习证据"
+            note: Some(match target.source.source_type {
+                "dictation_rubric_point" => "老师显式发布后激活默写评分点正式学习证据",
+                "fill_blank_slot" => "老师显式发布后激活单槽填空正式学习证据",
+                "question_rubric_point" => "老师接受逐点评分并发布后激活简答评分点正式学习证据",
+                _ => "老师显式发布后激活客观题正式学习证据",
             }),
             meta_json: None,
             occurred_at: &decision.decided_at,
@@ -911,14 +1017,24 @@ fn activate_publication_evidence(
     let assessment_context = evidence_context(&context_raw);
     let mut stmt = conn.prepare(
         "SELECT d.public_id,d.revision,d.teacher_score,d.confirmation_level,d.decided_at,
-                i.public_id,i.score,i.link_set_id,rp.public_id
+                i.public_id,i.score,i.link_set_id,rp.public_id,q.question_type,
+                i.answer_key_version_id,i.rubric_version_id,
+                CASE WHEN subjective.grade_decision_id IS NULL THEN 0 ELSE 1 END,
+                analysis.result_json
          FROM exam_grade_decisions_v2 d
          JOIN exam_assessment_items_v2 i ON i.id=d.assessment_item_id
+         JOIN k1_question_versions q ON q.id=i.question_version_id
          LEFT JOIN exam_grade_decision_dictation_sources_v2 ds
            ON ds.grade_decision_id=d.id
          LEFT JOIN exam_dictation_point_observations_v2 obs
            ON obs.id=ds.point_observation_id
          LEFT JOIN k1_rubric_points rp ON rp.id=obs.rubric_point_id
+         LEFT JOIN exam_grade_decision_subjective_sources_v2 subjective
+           ON subjective.grade_decision_id=d.id
+         LEFT JOIN exam_grade_decision_short_answer_sources_v2 short_source
+           ON short_source.grade_decision_id=d.id
+         LEFT JOIN exam_short_answer_grade_analyses_v2 analysis
+           ON analysis.id=short_source.analysis_id
          WHERE d.attempt_id=?1 AND d.state='active' AND i.state='active'
          ORDER BY i.order_index,d.id",
     )?;
@@ -933,6 +1049,11 @@ fn activate_publication_evidence(
             item_score: row.get(6)?,
             link_set_id: row.get(7)?,
             dictation_rubric_point_public_id: row.get(8)?,
+            question_type: row.get(9)?,
+            answer_key_version_id: row.get(10)?,
+            rubric_version_id: row.get(11)?,
+            subjective_source: row.get::<_, i64>(12)? != 0,
+            short_answer_result_json: row.get(13)?,
         })
     })?;
     let decisions = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -946,85 +1067,92 @@ fn activate_publication_evidence(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let knowledge_map_version = format!("{}:r{}", map.0, map.1);
-        let context = EvidenceContext {
-            student_id,
-            source_module,
-            assessment_context,
-            decision,
-            published_by: published_by.trim(),
-        };
-        let mut knowledge_stmt = conn.prepare(
-            "SELECT DISTINCT n.public_id
-             FROM k1_knowledge_links l
-             JOIN k1_knowledge_nodes n ON n.id=l.knowledge_node_id AND n.state='active'
-             WHERE l.link_set_id=?1
-               AND ((?2 IS NULL AND l.source_type='question'
-                     AND l.relation_type='direct_assessment')
-                 OR (?2 IS NOT NULL AND l.source_type='rubric_point'
-                     AND l.source_public_id=?2
-                     AND l.relation_type IN ('direct_assessment','rubric_basis')))
-               AND l.confirmation_level='teacher_confirmed'
-             ORDER BY n.public_id",
-        )?;
-        let knowledge_nodes = knowledge_stmt
-            .query_map(
-                (
-                    decision.link_set_id,
-                    decision.dictation_rubric_point_public_id.as_deref(),
-                ),
-                |row| row.get::<_, String>(0),
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        drop(knowledge_stmt);
-        for node in &knowledge_nodes {
-            activate_evidence_target(
-                conn,
-                &context,
-                &EvidenceTarget {
-                    target_kind: "knowledge",
-                    target_public_id: node,
-                    knowledge_node_id: Some(node),
-                    ability_dimension_id: None,
-                    quality: policy_weight,
-                    knowledge_map_version: &knowledge_map_version,
-                },
+        for source in evidence_sources(conn, decision)? {
+            let context = EvidenceContext {
+                student_id,
+                source_module,
+                assessment_context,
+                decision,
+                published_by: published_by.trim(),
+            };
+            let source_public_id = if source.link_source_type == "question" {
+                None
+            } else {
+                Some(source.link_source_public_id.as_str())
+            };
+            let mut knowledge_stmt = conn.prepare(
+                "SELECT DISTINCT n.public_id
+                 FROM k1_knowledge_links l
+                 JOIN k1_knowledge_nodes n ON n.id=l.knowledge_node_id AND n.state='active'
+                 WHERE l.link_set_id=?1 AND l.source_type=?2
+                   AND ((?3 IS NULL AND l.relation_type='direct_assessment')
+                     OR (?3 IS NOT NULL AND l.source_public_id=?3
+                         AND l.relation_type IN ('direct_assessment','answer_basis','rubric_basis')))
+                   AND l.confirmation_level='teacher_confirmed'
+                 ORDER BY n.public_id",
             )?;
-        }
-        let mut ability_stmt = conn.prepare(
-            "SELECT DISTINCT d.public_id,l.evidence_strength
-             FROM k1_ability_links l
-             JOIN k1_ability_dimensions d
-               ON d.id=l.ability_dimension_id AND d.state='active'
-             WHERE l.link_set_id=?1
-               AND ((?2 IS NULL AND l.source_type='question')
-                 OR (?2 IS NOT NULL AND l.source_type='rubric_point'
-                     AND l.source_public_id=?2))
-               AND l.confirmation_level='teacher_confirmed'
-             ORDER BY d.public_id",
-        )?;
-        let ability_nodes = ability_stmt
-            .query_map(
-                (
-                    decision.link_set_id,
-                    decision.dictation_rubric_point_public_id.as_deref(),
-                ),
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)),
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        drop(ability_stmt);
-        for (node, strength) in &ability_nodes {
-            activate_evidence_target(
-                conn,
-                &context,
-                &EvidenceTarget {
-                    target_kind: "ability",
-                    target_public_id: node,
-                    knowledge_node_id: None,
-                    ability_dimension_id: Some(node),
-                    quality: policy_weight * strength,
-                    knowledge_map_version: &knowledge_map_version,
-                },
+            let knowledge_nodes = knowledge_stmt
+                .query_map(
+                    (
+                        decision.link_set_id,
+                        source.link_source_type,
+                        source_public_id,
+                    ),
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(knowledge_stmt);
+            for node in &knowledge_nodes {
+                activate_evidence_target(
+                    conn,
+                    &context,
+                    &EvidenceTarget {
+                        target_kind: "knowledge",
+                        target_public_id: node,
+                        knowledge_node_id: Some(node),
+                        ability_dimension_id: None,
+                        quality: policy_weight,
+                        knowledge_map_version: &knowledge_map_version,
+                        source: &source,
+                    },
+                )?;
+            }
+            let mut ability_stmt = conn.prepare(
+                "SELECT DISTINCT d.public_id,l.evidence_strength
+                 FROM k1_ability_links l
+                 JOIN k1_ability_dimensions d
+                   ON d.id=l.ability_dimension_id AND d.state='active'
+                 WHERE l.link_set_id=?1 AND l.source_type=?2
+                   AND (?3 IS NULL OR l.source_public_id=?3)
+                   AND l.confirmation_level='teacher_confirmed'
+                 ORDER BY d.public_id",
             )?;
+            let ability_nodes = ability_stmt
+                .query_map(
+                    (
+                        decision.link_set_id,
+                        source.link_source_type,
+                        source_public_id,
+                    ),
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)),
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(ability_stmt);
+            for (node, strength) in &ability_nodes {
+                activate_evidence_target(
+                    conn,
+                    &context,
+                    &EvidenceTarget {
+                        target_kind: "ability",
+                        target_public_id: node,
+                        knowledge_node_id: None,
+                        ability_dimension_id: Some(node),
+                        quality: policy_weight * strength,
+                        knowledge_map_version: &knowledge_map_version,
+                        source: &source,
+                    },
+                )?;
+            }
         }
     }
     Ok(())
@@ -1184,8 +1312,8 @@ mod tests {
     use module_knowledge::db::content::{
         add_ability_link, add_knowledge_link, create_answer_key_version, create_link_set,
         create_question, create_question_version, create_rubric_version, promote_question_version,
-        NewAbilityLink, NewAnswerKeyVersion, NewKnowledgeLink, NewQuestion, NewQuestionVersion,
-        NewRubricPoint, NewRubricVersion,
+        NewAbilityLink, NewAnswerKeyVersion, NewAnswerSlot, NewKnowledgeLink, NewQuestion,
+        NewQuestionVersion, NewRubricPoint, NewRubricVersion,
     };
     use module_knowledge::db::taxonomy::{
         create_ability_dimension, create_curriculum_node, create_knowledge_map,
@@ -1434,6 +1562,169 @@ mod tests {
             item_id: item.id,
             attempt_id: attempt.id,
         }
+    }
+
+    fn create_subjective_k1(conn: &Connection, question_type: &str) -> (i64, i64, i64, String) {
+        let question = create_question(
+            conn,
+            &NewQuestion {
+                owner_scope: "personal",
+                owner_id: "teacher",
+                question_family_id: None,
+                rights_status: "unknown",
+                sharing_allowed: false,
+            },
+        )
+        .unwrap();
+        let question_version = create_question_version(
+            conn,
+            &NewQuestionVersion {
+                question_id: question.id,
+                revision: 1,
+                question_type,
+                stem: "主观题证据测试",
+                material_text: None,
+                max_score: 2.0,
+                source_artifact_id: None,
+                source_anchor_json: None,
+                supersedes_version_id: None,
+                quality_level: "L0",
+                state: "draft",
+                options: &[],
+            },
+        )
+        .unwrap();
+        let slots = if question_type == "fill_blank" {
+            vec![NewAnswerSlot {
+                stable_id: Some("slot-1"),
+                order_index: 0,
+                canonical_answers_json: r#"{"schema_version":1,"answers":["1842"]}"#,
+                normalization_rules_json: None,
+                max_score: 2.0,
+            }]
+        } else {
+            vec![]
+        };
+        let answer = create_answer_key_version(
+            conn,
+            &NewAnswerKeyVersion {
+                question_version_id: question_version.id,
+                revision: 1,
+                answer_json: r#"{"schema_version":1,"answer":"测试"}"#,
+                state: "confirmed",
+                confirmed_by: Some("teacher"),
+                supersedes_answer_key_id: None,
+                slots: &slots,
+            },
+        )
+        .unwrap();
+        let rubric = create_rubric_version(
+            conn,
+            &NewRubricVersion {
+                question_version_id: question_version.id,
+                revision: 1,
+                max_score: 2.0,
+                state: "confirmed",
+                confirmed_by: Some("teacher"),
+                supersedes_rubric_id: None,
+                points: &[NewRubricPoint {
+                    stable_id: Some("point-1"),
+                    order_index: 0,
+                    canonical_text: "评分点一",
+                    allowed_paraphrases_json: None,
+                    required_concepts_json: None,
+                    max_score: 2.0,
+                }],
+            },
+        )
+        .unwrap();
+        let point: (i64, String) = conn
+            .query_row(
+                "SELECT id,public_id FROM k1_rubric_points WHERE rubric_version_id=?1",
+                [rubric.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        (answer.id, rubric.id, point.0, point.1)
+    }
+
+    fn subjective_evidence_decision(
+        question_type: &str,
+        answer_key_version_id: i64,
+        rubric_version_id: i64,
+        confirmation_level: &str,
+        result_json: Option<String>,
+    ) -> EvidenceDecision {
+        EvidenceDecision {
+            public_id: "decision-test".into(),
+            revision: 1,
+            teacher_score: 1.0,
+            confirmation_level: confirmation_level.into(),
+            decided_at: "2026-07-16T00:00:00Z".into(),
+            item_public_id: "item-test".into(),
+            item_score: 2.0,
+            link_set_id: 1,
+            dictation_rubric_point_public_id: None,
+            question_type: question_type.into(),
+            answer_key_version_id,
+            rubric_version_id,
+            subjective_source: true,
+            short_answer_result_json: result_json,
+        }
+    }
+
+    #[test]
+    fn subjective_evidence_uses_only_safe_slot_or_point_granularity() {
+        let fixture = setup();
+        let (fill_answer, fill_rubric, _, _) = create_subjective_k1(&fixture.conn, "fill_blank");
+        let fill = subjective_evidence_decision(
+            "fill_blank",
+            fill_answer,
+            fill_rubric,
+            "teacher_corrected",
+            None,
+        );
+        let fill_sources = evidence_sources(&fixture.conn, &fill).unwrap();
+        assert_eq!(fill_sources.len(), 1);
+        assert_eq!(fill_sources[0].source_ref_type, "answer_slot");
+        assert!((fill_sources[0].value - 0.5).abs() < 0.000_001);
+
+        let (short_answer, short_rubric, point_id, point_public_id) =
+            create_subjective_k1(&fixture.conn, "short_answer");
+        let corrected = subjective_evidence_decision(
+            "short_answer",
+            short_answer,
+            short_rubric,
+            "teacher_corrected",
+            Some(
+                serde_json::json!({
+                    "schema_version": 1,
+                    "point_results": [{"rubric_point_id": point_id, "suggested_score": 1.5}]
+                })
+                .to_string(),
+            ),
+        );
+        assert!(evidence_sources(&fixture.conn, &corrected)
+            .unwrap()
+            .is_empty());
+
+        let accepted = subjective_evidence_decision(
+            "short_answer",
+            short_answer,
+            short_rubric,
+            "teacher_accepted",
+            Some(
+                serde_json::json!({
+                    "schema_version": 1,
+                    "point_results": [{"rubric_point_id": point_id, "suggested_score": 1.5}]
+                })
+                .to_string(),
+            ),
+        );
+        let short_sources = evidence_sources(&fixture.conn, &accepted).unwrap();
+        assert_eq!(short_sources.len(), 1);
+        assert_eq!(short_sources[0].source_ref_id, point_public_id);
+        assert!((short_sources[0].value - 0.75).abs() < 0.000_001);
     }
 
     fn decision<'a>(

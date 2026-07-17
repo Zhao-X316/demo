@@ -118,6 +118,94 @@ export interface AcceptedAnswerPromotionResult {
   current_publication_unchanged: boolean;
 }
 
+export interface SubjectiveKnowledgeOption {
+  id: number;
+  public_id: string;
+  code: string | null;
+  title: string;
+}
+
+export interface SubjectiveAbilityOption {
+  id: number;
+  public_id: string;
+  code: string;
+  title: string;
+}
+
+export interface SubjectiveKnowledgeLinkView {
+  knowledge_node_id: number;
+  knowledge_node_public_id: string;
+  knowledge_title: string;
+  relation_type: string;
+}
+
+export interface SubjectiveAbilityLinkView {
+  ability_dimension_id: number;
+  ability_dimension_public_id: string;
+  ability_title: string;
+  evidence_strength: number;
+  response_mode: string;
+}
+
+export interface SubjectiveLinkSourceView {
+  source_type: "answer_slot" | "rubric_point";
+  source_public_id: string;
+  stable_id: string;
+  order_index: number;
+  label: string;
+  max_score: number;
+  knowledge_links: SubjectiveKnowledgeLinkView[];
+  ability_links: SubjectiveAbilityLinkView[];
+}
+
+export interface SubjectiveLinkEditor {
+  source_assessment_item_id: number;
+  assessment_id: number;
+  base_assessment_version_id: number;
+  base_assessment_revision: number;
+  base_assessment_item_id: number;
+  question_version_id: number;
+  question_type: "fill_blank" | "short_answer";
+  question_no: string;
+  question_stem: string;
+  link_set_id: number;
+  link_set_revision: number;
+  sources: SubjectiveLinkSourceView[];
+  knowledge_options: SubjectiveKnowledgeOption[];
+  ability_options: SubjectiveAbilityOption[];
+}
+
+export interface SubjectiveKnowledgeLinkInput {
+  knowledge_node_id: number;
+  relation_type: string;
+}
+
+export interface SubjectiveAbilityLinkInput {
+  ability_dimension_id: number;
+  evidence_strength: number;
+  response_mode: string;
+}
+
+export interface SubjectiveSourceLinkInput {
+  source_type: "answer_slot" | "rubric_point";
+  source_public_id: string;
+  knowledge_links: SubjectiveKnowledgeLinkInput[];
+  ability_links: SubjectiveAbilityLinkInput[];
+}
+
+export interface SubjectiveLinkEditResult {
+  outcome: "created_new_version" | "already_saved" | "already_current";
+  edit_id: number | null;
+  adopted_assessment_version_id: number;
+  adopted_assessment_revision: number;
+  adopted_link_set_id: number;
+  adopted_link_set_revision: number;
+  knowledge_link_count: number;
+  ability_link_count: number;
+  current_attempts_unchanged: boolean;
+  current_publications_unchanged: boolean;
+}
+
 export interface ObjectiveAttemptSummary {
   assessment_id: number;
   assessment_version_id: number;
@@ -990,6 +1078,19 @@ export const examAnswerSheetPromoteAcceptedAnswer = (grade_decision_id: number) 
   call<AcceptedAnswerPromotionResult>("exam_answer_sheet_promote_accepted_answer", {
     gradeDecisionId: grade_decision_id,
   });
+
+export const examSubjectiveLinkEditor = (assessment_item_id: number) =>
+  call<SubjectiveLinkEditor>("exam_subjective_link_editor", {
+    assessmentItemId: assessment_item_id,
+  });
+
+export const examSubjectiveLinkSave = (
+  assessment_item_id: number,
+  sources: SubjectiveSourceLinkInput[],
+) => call<SubjectiveLinkEditResult>("exam_subjective_link_save", {
+  assessmentItemId: assessment_item_id,
+  sources,
+});
 
 export const examAnswerSheetSubjectivePublishAttempt = (attempt_id: number) =>
   call<GradePublication>("exam_answer_sheet_subjective_publish_attempt", {

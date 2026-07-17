@@ -241,19 +241,21 @@ fn artifact(
     Ok((item.id, sha256, bytes))
 }
 
-fn add_question_links(
+fn add_source_links(
     conn: &Connection,
     link_set_id: i64,
-    question_public_id: &str,
+    source_type: &str,
+    source_public_id: &str,
     knowledge_node_id: i64,
     ability_dimension_id: i64,
+    response_mode: &str,
 ) -> AppResult<()> {
     add_knowledge_link(
         conn,
         &NewKnowledgeLink {
             link_set_id,
-            source_type: "question",
-            source_public_id: question_public_id,
+            source_type,
+            source_public_id,
             knowledge_node_id,
             relation_type: "direct_assessment",
             confirmation_level: "teacher_confirmed",
@@ -264,11 +266,11 @@ fn add_question_links(
         conn,
         &NewAbilityLink {
             link_set_id,
-            source_type: "question",
-            source_public_id: question_public_id,
+            source_type,
+            source_public_id,
             ability_dimension_id,
             evidence_strength: 0.7,
-            response_mode: "structured_response",
+            response_mode,
             confirmation_level: "teacher_confirmed",
             verified_by: Some(TEACHER),
         },
@@ -399,12 +401,19 @@ fn seed_content(conn: &Connection, class_id: i64, subject_id: i64) -> AppResult<
         Some(TEACHER),
         None,
     )?;
-    add_question_links(
+    let fill_slot_public_id: String = conn.query_row(
+        "SELECT public_id FROM k1_answer_slots WHERE answer_key_version_id=?1",
+        [fill_answer.id],
+        |row| row.get(0),
+    )?;
+    add_source_links(
         conn,
         fill_links.id,
-        &fill_version.public_id,
+        "answer_slot",
+        &fill_slot_public_id,
         knowledge.id,
         ability.id,
+        "recall",
     )?;
     promote_question_version(conn, fill_version.id, "L3", TEACHER, Some("主观题隔离验收"))?;
 
@@ -502,13 +511,25 @@ fn seed_content(conn: &Connection, class_id: i64, subject_id: i64) -> AppResult<
         Some(TEACHER),
         None,
     )?;
-    add_question_links(
-        conn,
-        short_links.id,
-        &short_version.public_id,
-        knowledge.id,
-        ability.id,
+    let mut point_stmt = conn.prepare(
+        "SELECT public_id FROM k1_rubric_points
+         WHERE rubric_version_id=?1 ORDER BY order_index,id",
     )?;
+    let point_public_ids = point_stmt
+        .query_map([short_rubric.id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(point_stmt);
+    for point_public_id in &point_public_ids {
+        add_source_links(
+            conn,
+            short_links.id,
+            "rubric_point",
+            point_public_id,
+            knowledge.id,
+            ability.id,
+            "structured_response",
+        )?;
+    }
     promote_question_version(
         conn,
         short_version.id,

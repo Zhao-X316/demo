@@ -16,6 +16,7 @@ pub mod page_cycle;
 pub mod papers;
 pub mod question_ingest;
 pub mod subjective;
+pub mod subjective_links;
 
 #[cfg(test)]
 mod ordinary_structure_tests;

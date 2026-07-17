@@ -42,6 +42,9 @@ use module_exam::service::subjective::{
     AcceptedAnswerPromotionResult, ShortAnswerGradeAnalysis, SubjectiveTranscriptionRevision,
     SubjectiveWorkbench,
 };
+use module_exam::service::subjective_links::{
+    SubjectiveLinkEditResult, SubjectiveLinkEditor, SubjectiveSourceLinkInput,
+};
 use module_exam::short_answer_grading::{
     ShortAnswerGradeErrorCode, ShortAnswerGradeFailure, ShortAnswerGrader,
     SHORT_ANSWER_GRADE_SCHEMA_VERSION,
@@ -920,6 +923,33 @@ pub fn exam_answer_sheet_promote_accepted_answer(
     module_exam::service::subjective::promote_fill_accepted_answer(
         &mut conn,
         grade_decision_id,
+        LOCAL_TEACHER_ACTOR,
+    )
+    .map_err(e)
+}
+
+/// 读取本题最新确认版本的答案槽位/评分点链接及同教材知识点、同学科能力候选。
+#[tauri::command]
+pub fn exam_subjective_link_editor(
+    state: State<'_, AppState>,
+    assessment_item_id: i64,
+) -> R<SubjectiveLinkEditor> {
+    let conn = lock(&state)?;
+    module_exam::service::subjective_links::get_editor(&conn, assessment_item_id).map_err(e)
+}
+
+/// 老师确认主观题链接；另存 K1 link set 与未来作业版本，不改当前成绩和历史发布。
+#[tauri::command]
+pub fn exam_subjective_link_save(
+    state: State<'_, AppState>,
+    assessment_item_id: i64,
+    sources: Vec<SubjectiveSourceLinkInput>,
+) -> R<SubjectiveLinkEditResult> {
+    let mut conn = lock(&state)?;
+    module_exam::service::subjective_links::save_editor(
+        &mut conn,
+        assessment_item_id,
+        &sources,
         LOCAL_TEACHER_ACTOR,
     )
     .map_err(e)

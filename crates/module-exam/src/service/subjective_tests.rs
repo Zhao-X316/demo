@@ -8,7 +8,7 @@ use super::papers::{
     self, NewAnswerRegionRevision, NewIngestBatch, NewIngestPage, NewPageAlignmentRevision,
     NewPageMatchRevision, NewPageQualityRevision,
 };
-use super::subjective;
+use super::{assessment, subjective};
 use crate::dictation::DictationRecognitionState;
 use crate::dictation_recognition::{
     DictationOcrOutput, DictationOcrRequest, DictationRecognizerDescriptor,
@@ -528,6 +528,66 @@ fn exact_fill_suggestion_never_becomes_a_grade_until_teacher_accepts() {
         })
         .unwrap();
     assert_eq!((publication_count, evidence_count), (0, 0));
+}
+
+#[test]
+fn published_single_slot_fill_activates_teacher_confirmed_slot_evidence() {
+    let mut fixture = setup();
+    fixture
+        .conn
+        .execute_batch(
+            "INSERT INTO k1_knowledge_nodes
+           (public_id,stable_id,knowledge_map_id,code,title,order_index,state,created_at)
+         VALUES ('knowledge-fill','nanjing-treaty-year',1,'K1','南京条约签订时间',1,'active',
+                 '2026-07-16T09:00:00.000Z');
+         INSERT INTO k1_ability_dimensions
+           (public_id,stable_id,subject_id,revision,code,title,state,created_at)
+         VALUES ('ability-fill','fact-recall',1,1,'fact_recall','事实识记与提取','active',
+                 '2026-07-16T09:00:00.000Z');
+         INSERT INTO k1_knowledge_links
+           (public_id,link_set_id,source_type,source_public_id,knowledge_node_id,relation_type,
+            confirmation_level,verified_by,verified_at,created_at)
+         VALUES ('knowledge-link-fill',1,'answer_slot','answer-slot-s',1,'answer_basis',
+                 'teacher_confirmed','teacher','2026-07-16T09:00:00.000Z',
+                 '2026-07-16T09:00:00.000Z');
+         INSERT INTO k1_ability_links
+           (public_id,link_set_id,source_type,source_public_id,ability_dimension_id,
+            evidence_strength,response_mode,confirmation_level,verified_by,verified_at,created_at)
+         VALUES ('ability-link-fill',1,'answer_slot','answer-slot-s',1,0.6,'recall',
+                 'teacher_confirmed','teacher','2026-07-16T09:00:00.000Z',
+                 '2026-07-16T09:00:00.000Z');",
+        )
+        .unwrap();
+    let run_id = successful_run(&mut fixture, "subjective-ocr-publish-fill", "1842 年");
+    subjective::record_ocr_ai_run_transcription(&mut fixture.conn, run_id).unwrap();
+    let row = subjective::list_subjective_workbench(&fixture.conn, Some(1), 10)
+        .unwrap()
+        .rows
+        .pop()
+        .unwrap();
+    subjective::accept_subjective_suggestion(&fixture.conn, row.suggestion_id, "teacher").unwrap();
+    assessment::publish_attempt(&fixture.conn, 1, "teacher").unwrap();
+    let evidence: Vec<(String, String, String, f64)> = {
+        let mut stmt = fixture
+            .conn
+            .prepare(
+                "SELECT source_type,source_ref_type,source_ref_id,value
+             FROM learning_evidence ORDER BY id",
+            )
+            .unwrap();
+        stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+    };
+    assert_eq!(evidence.len(), 2);
+    assert!(evidence.iter().all(|row| row.0 == "fill_blank_slot"));
+    assert!(evidence
+        .iter()
+        .all(|row| row.1 == "answer_slot" && row.2 == "answer-slot-s"));
+    assert!(evidence.iter().all(|row| (row.3 - 1.0).abs() < 0.000_001));
 }
 
 #[test]
