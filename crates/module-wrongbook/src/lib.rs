@@ -1,15 +1,19 @@
 //! M3 错题事实与订正状态。
 //!
-//! 本模块不复制 M2 分数，也不把一次订正解释成“已掌握”。第一批只提供
-//! 基于当前有效发布快照的可重建只读模型；后续复习任务与 M6 掌握分析继续
-//! 使用独立的业务语义。
+//! 本模块不复制 M2 分数，也不把一次订正解释成“已掌握”。错题事实基于
+//! 当前有效发布快照重建；老师确认的错因以不可变修订独立保存。后续复习
+//! 任务与 M6 掌握分析继续使用独立的业务语义。
 
+pub mod error_cause;
 pub mod read_model;
 
 use suite_core::models::ModuleKey;
 use suite_core::ports::{Migration, Module};
 
-static MIGRATIONS: &[Migration] = &[];
+static MIGRATIONS: &[Migration] = &[Migration {
+    id: "wrongbook_0001",
+    sql: include_str!("../migrations/0001_error_cause_reviews.sql"),
+}];
 
 pub fn wrongbook_migrations() -> &'static [Migration] {
     MIGRATIONS

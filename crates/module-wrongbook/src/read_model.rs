@@ -11,8 +11,12 @@ use serde::{Deserialize, Serialize};
 use suite_core::domain::time;
 use suite_core::error::{CoreError, CoreResult};
 
-pub const CLASS_WRONGBOOK_SCHEMA_VERSION: i64 = 1;
-pub const CLASS_WRONGBOOK_RULE_VERSION: &str = "m3-published-wrong-facts-v1";
+use crate::error_cause::{
+    cause_options, load_review_for_decision_public_id, ErrorCauseOption, ErrorCauseReview,
+};
+
+pub const CLASS_WRONGBOOK_SCHEMA_VERSION: i64 = 2;
+pub const CLASS_WRONGBOOK_RULE_VERSION: &str = "m3-published-wrong-facts-v2";
 const FULL_SCORE_EPSILON: f64 = 0.000_001;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +62,10 @@ pub struct WrongbookQuestion {
     pub repeated_error: bool,
     pub latest_assessment_title: String,
     pub latest_assessment_context: String,
+    pub latest_error_grade_decision_public_id: String,
+    pub latest_error_publication_public_id: String,
+    pub cause_options: Vec<ErrorCauseOption>,
+    pub cause_review: Option<ErrorCauseReview>,
     pub knowledge_nodes: Vec<NamedReference>,
     pub ability_dimensions: Vec<NamedReference>,
 }
@@ -89,6 +97,8 @@ struct PublishedResponse {
     question_version_id: String,
     question_type: String,
     stem: String,
+    grade_decision_public_id: String,
+    publication_public_id: String,
     attempt_kind: String,
     teacher_score: f64,
     max_score: f64,
@@ -143,6 +153,7 @@ fn load_published_responses(
     let mut statement = conn.prepare(
         "SELECT s.id,s.student_no,s.name,
                 question.public_id,question.question_type,question.stem,
+                decision.public_id,publication.public_id,
                 attempt.attempt_kind,decision.teacher_score,item.score,
                 publication.published_at,assessment.title,assessment.assessment_context,
                 item.link_set_id
@@ -181,13 +192,15 @@ fn load_published_responses(
             question_version_id: row.get(3)?,
             question_type: row.get(4)?,
             stem: row.get(5)?,
-            attempt_kind: row.get(6)?,
-            teacher_score: row.get(7)?,
-            max_score: row.get(8)?,
-            published_at: row.get(9)?,
-            assessment_title: row.get(10)?,
-            assessment_context: row.get(11)?,
-            link_set_id: row.get(12)?,
+            grade_decision_public_id: row.get(6)?,
+            publication_public_id: row.get(7)?,
+            attempt_kind: row.get(8)?,
+            teacher_score: row.get(9)?,
+            max_score: row.get(10)?,
+            published_at: row.get(11)?,
+            assessment_title: row.get(12)?,
+            assessment_context: row.get(13)?,
+            link_set_id: row.get(14)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -302,6 +315,7 @@ pub fn class_wrongbook_dashboard(
             continue;
         }
         let latest = group.last().expect("non-empty published response group");
+        let latest_error = errors.last().expect("at least one error");
         let latest_is_error = latest.teacher_score + FULL_SCORE_EPSILON < latest.max_score;
         let status = if latest_is_error {
             "needs_correction"
@@ -352,6 +366,13 @@ pub fn class_wrongbook_dashboard(
             repeated_error: errors.len() > 1,
             latest_assessment_title: latest.assessment_title.clone(),
             latest_assessment_context: latest.assessment_context.clone(),
+            latest_error_grade_decision_public_id: latest_error.grade_decision_public_id.clone(),
+            latest_error_publication_public_id: latest_error.publication_public_id.clone(),
+            cause_options: cause_options(&latest_error.question_type),
+            cause_review: load_review_for_decision_public_id(
+                conn,
+                &latest_error.grade_decision_public_id,
+            )?,
             knowledge_nodes: map_labels(knowledge_labels),
             ability_dimensions: map_labels(ability_labels),
         });
@@ -424,6 +445,7 @@ mod tests {
             suite_core::db::run_migrations(&conn, module_knowledge::knowledge_migrations())
                 .unwrap();
             suite_core::db::run_migrations(&conn, module_exam::exam_migrations()).unwrap();
+            suite_core::db::run_migrations(&conn, crate::wrongbook_migrations()).unwrap();
             conn.execute("INSERT INTO subjects(name) VALUES ('历史')", [])
                 .unwrap();
             let subject_id = conn.last_insert_rowid();
@@ -605,7 +627,7 @@ mod tests {
             attempt_kind: &str,
             score: f64,
             published_at: &str,
-        ) {
+        ) -> (String, String) {
             let attempt_public_id = format!("attempt-{student_id}-{attempt_no}");
             self.conn
                 .execute(
@@ -684,6 +706,7 @@ mod tests {
                     (publication_id, attempt_id),
                 )
                 .unwrap();
+            (decision_public_id, publication_public_id)
         }
     }
 
@@ -880,5 +903,171 @@ mod tests {
             class_wrongbook_dashboard(&fixture.conn, 999),
             Err(CoreError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn teacher_confirmed_error_causes_are_versioned_and_same_input_is_noop() {
+        use crate::error_cause::{confirm_error_causes, ConfirmErrorCausesInput};
+
+        let mut fixture = Fixture::new();
+        let student_id = fixture.students[0];
+        let (decision_public_id, publication_public_id) =
+            fixture.publish_response(student_id, 1, "first", 0.0, "2026-07-01T08:00:00Z");
+        let causes = vec!["concept_confusion".to_string(), "fact_error".to_string()];
+        let input = ConfirmErrorCausesInput {
+            class_id: fixture.class_one,
+            student_id,
+            question_version_public_id: "question-version-1",
+            grade_decision_public_id: &decision_public_id,
+            publication_public_id: &publication_public_id,
+            cause_codes: &causes,
+            teacher_note: Some("把根本原因和直接原因混淆"),
+            confirmed_by: "teacher",
+        };
+        let first = confirm_error_causes(&mut fixture.conn, &input).unwrap();
+        let repeated = confirm_error_causes(&mut fixture.conn, &input).unwrap();
+        assert_eq!(first, repeated);
+        assert_eq!(first.revision, 1);
+        assert_eq!(
+            first.cause_codes,
+            vec!["fact_error".to_string(), "concept_confusion".to_string()]
+        );
+        assert_eq!(
+            fixture
+                .conn
+                .query_row("SELECT COUNT(*) FROM wb_error_cause_revisions", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
+
+        let changed_causes = vec!["fact_error".to_string()];
+        let changed = confirm_error_causes(
+            &mut fixture.conn,
+            &ConfirmErrorCausesInput {
+                cause_codes: &changed_causes,
+                teacher_note: None,
+                ..input
+            },
+        )
+        .unwrap();
+        assert_eq!(changed.revision, 2);
+        assert_eq!(
+            fixture
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM wb_error_cause_revisions WHERE state='active'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            fixture
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM wb_error_cause_revisions WHERE state='superseded'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        let dashboard = class_wrongbook_dashboard(&fixture.conn, fixture.class_one).unwrap();
+        assert_eq!(
+            dashboard.items[0]
+                .cause_review
+                .as_ref()
+                .unwrap()
+                .cause_codes,
+            vec!["fact_error"]
+        );
+        assert!(dashboard.items[0]
+            .cause_options
+            .iter()
+            .any(|option| option.code == "misread_prompt"));
+    }
+
+    #[test]
+    fn error_cause_confirmation_rejects_stale_scope_without_partial_rows() {
+        use crate::error_cause::{confirm_error_causes, ConfirmErrorCausesInput};
+
+        let mut fixture = Fixture::new();
+        let student_id = fixture.students[0];
+        let (old_decision, old_publication) =
+            fixture.publish_response(student_id, 1, "first", 0.0, "2026-07-01T08:00:00Z");
+        let (_latest_decision, _latest_publication) =
+            fixture.publish_response(student_id, 2, "correction", 0.0, "2026-07-02T08:00:00Z");
+        let causes = vec!["fact_error".to_string()];
+        let stale = confirm_error_causes(
+            &mut fixture.conn,
+            &ConfirmErrorCausesInput {
+                class_id: fixture.class_one,
+                student_id,
+                question_version_public_id: "question-version-1",
+                grade_decision_public_id: &old_decision,
+                publication_public_id: &old_publication,
+                cause_codes: &causes,
+                teacher_note: None,
+                confirmed_by: "teacher",
+            },
+        );
+        assert!(matches!(stale, Err(CoreError::Invalid(_))));
+        assert_eq!(
+            fixture
+                .conn
+                .query_row("SELECT COUNT(*) FROM wb_error_cause_revisions", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn other_error_cause_requires_note_and_revision_rows_are_immutable() {
+        use crate::error_cause::{confirm_error_causes, ConfirmErrorCausesInput};
+
+        let mut fixture = Fixture::new();
+        let student_id = fixture.students[0];
+        let (decision_public_id, publication_public_id) =
+            fixture.publish_response(student_id, 1, "first", 0.0, "2026-07-01T08:00:00Z");
+        let causes = vec!["other".to_string()];
+        let base = ConfirmErrorCausesInput {
+            class_id: fixture.class_one,
+            student_id,
+            question_version_public_id: "question-version-1",
+            grade_decision_public_id: &decision_public_id,
+            publication_public_id: &publication_public_id,
+            cause_codes: &causes,
+            teacher_note: None,
+            confirmed_by: "teacher",
+        };
+        assert!(matches!(
+            confirm_error_causes(&mut fixture.conn, &base),
+            Err(CoreError::Invalid(_))
+        ));
+        let saved = confirm_error_causes(
+            &mut fixture.conn,
+            &ConfirmErrorCausesInput {
+                teacher_note: Some("课堂用语理解偏差"),
+                ..base
+            },
+        )
+        .unwrap();
+        assert_eq!(saved.revision, 1);
+        assert!(fixture
+            .conn
+            .execute(
+                "UPDATE wb_error_cause_revisions SET teacher_note='覆盖原备注' WHERE state='active'",
+                [],
+            )
+            .is_err());
+        assert!(fixture
+            .conn
+            .execute("DELETE FROM wb_error_cause_items", [])
+            .is_err());
     }
 }

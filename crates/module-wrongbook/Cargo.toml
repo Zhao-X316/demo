@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "M3 错题事实与订正状态只读模型"
+description = "M3 错题事实、老师确认错因与订正状态"
 
 [dependencies]
 suite-core = { path = "../core" }

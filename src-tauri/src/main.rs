@@ -94,6 +94,7 @@ fn main() {
             commands::suggest_match,
             exam_commands::class_operations_dashboard,
             learning_commands::class_wrongbook_dashboard,
+            learning_commands::confirm_wrongbook_error_causes,
             exam_commands::kp_list,
             exam_commands::kp_create,
             exam_commands::kp_rename,

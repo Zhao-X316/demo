@@ -20,6 +20,23 @@ export interface NamedReference {
   title: string;
 }
 
+export interface ErrorCauseOption {
+  code: string;
+  label: string;
+  description: string;
+}
+
+export interface ErrorCauseReview {
+  public_id: string;
+  revision: number;
+  grade_decision_public_id: string;
+  publication_public_id: string;
+  cause_codes: string[];
+  teacher_note: string | null;
+  confirmed_by: string;
+  confirmed_at: string;
+}
+
 export type WrongbookStatus = "needs_correction" | "corrected_once" | "rechecked_correct";
 
 export interface WrongbookQuestion {
@@ -41,6 +58,10 @@ export interface WrongbookQuestion {
   repeated_error: boolean;
   latest_assessment_title: string;
   latest_assessment_context: string;
+  latest_error_grade_decision_public_id: string;
+  latest_error_publication_public_id: string;
+  cause_options: ErrorCauseOption[];
+  cause_review: ErrorCauseReview | null;
   knowledge_nodes: NamedReference[];
   ability_dimensions: NamedReference[];
 }
@@ -64,3 +85,16 @@ export interface ClassWrongbookDashboard {
 
 export const loadClassWrongbookDashboard = (classId: number) =>
   call<ClassWrongbookDashboard>("class_wrongbook_dashboard", { classId });
+
+export interface ConfirmWrongbookErrorCausesInput {
+  classId: number;
+  studentId: number;
+  questionVersionPublicId: string;
+  gradeDecisionPublicId: string;
+  publicationPublicId: string;
+  causeCodes: string[];
+  teacherNote?: string | null;
+}
+
+export const confirmWrongbookErrorCauses = (input: ConfirmWrongbookErrorCausesInput) =>
+  call<ErrorCauseReview>("confirm_wrongbook_error_causes", { input });

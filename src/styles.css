@@ -176,6 +176,22 @@ button.dashboard-action { display: grid; grid-template-columns: 34px minmax(0, 1
 .wrongbook-label.knowledge { background: var(--brand-weak); color: var(--brand); }
 .wrongbook-label.ability { background: #EEF7F3; color: #34745B; }
 .wrongbook-unlinked { color: var(--muted); font-size: 10.5px; }
+.wrongbook-causes { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; margin-top: 9px; }
+.wrongbook-cause-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.wrongbook-cause-summary b { color: var(--text-2); font-size: 10.5px; }
+.wrongbook-cause-summary span { padding: 3px 7px; border-radius: 5px; background: #FFF2DD; color: #94621A; font-size: 10.5px; }
+.wrongbook-cause-summary em { width: 100%; color: var(--muted); font-size: 10.5px; font-style: normal; }
+.wrongbook-cause-open { min-height: 28px; padding: 4px 9px; font-size: 10.5px; }
+.wrongbook-cause-editor { width: 100%; padding: 10px; border: 1px solid #E7D8BD; border-radius: 8px; background: #FFFBF4; }
+.wrongbook-cause-title { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.wrongbook-cause-title b { font-size: 11.5px; }
+.wrongbook-cause-title span { color: var(--muted); font-size: 10px; }
+.wrongbook-cause-options { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.wrongbook-cause-options label { display: flex; align-items: center; gap: 4px; padding: 4px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text-2); cursor: pointer; font-size: 10.5px; }
+.wrongbook-cause-options label.selected { border-color: #D5A960; background: #FFF0D5; color: #855A18; }
+.wrongbook-cause-options input { margin: 0; }
+.wrongbook-cause-editor textarea { width: 100%; min-height: 58px; resize: vertical; }
+.wrongbook-cause-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 7px; }
 .wrongbook-time { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 7px; color: var(--muted); font-size: 10.5px; }
 .wrongbook-time b { overflow: hidden; color: var(--text-2); font-size: 10.5px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .learning-rule-note { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; padding: 10px 12px; border-radius: 8px; background: var(--bg-sub); color: var(--text-2); font-size: 11px; line-height: 1.55; }

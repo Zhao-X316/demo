@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 
 import {
   ClassWrongbookDashboard,
+  confirmWrongbookErrorCauses,
+  ErrorCauseReview,
   loadClassWrongbookDashboard,
   WrongbookQuestion,
   WrongbookStatus,
@@ -51,7 +53,136 @@ function formatTime(value: string) {
   return new Date(value).toLocaleString();
 }
 
-function ItemCard({ item }: { item: WrongbookQuestion }) {
+interface CauseEditorProps {
+  classId: number;
+  item: WrongbookQuestion;
+  onSaved: (review: ErrorCauseReview) => void;
+}
+
+function CauseEditor({ classId, item, onSaved }: CauseEditorProps) {
+  const [open, setOpen] = useState(false);
+  const [selected, setSelected] = useState<string[]>(item.cause_review?.cause_codes ?? []);
+  const [note, setNote] = useState(item.cause_review?.teacher_note ?? "");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+
+  useEffect(() => {
+    setSelected(item.cause_review?.cause_codes ?? []);
+    setNote(item.cause_review?.teacher_note ?? "");
+  }, [item.cause_review]);
+
+  const toggleCause = (code: string) => {
+    setSelected((current) => {
+      if (current.includes(code)) return current.filter((value) => value !== code);
+      if (current.length >= 3) return current;
+      return [...current, code];
+    });
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setSaveError("");
+    try {
+      const review = await confirmWrongbookErrorCauses({
+        classId,
+        studentId: item.student_id,
+        questionVersionPublicId: item.question_version_id,
+        gradeDecisionPublicId: item.latest_error_grade_decision_public_id,
+        publicationPublicId: item.latest_error_publication_public_id,
+        causeCodes: selected,
+        teacherNote: note.trim() || null,
+      });
+      onSaved(review);
+      setOpen(false);
+    } catch (reason) {
+      setSaveError(String(reason));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const labelFor = (code: string) =>
+    item.cause_options.find((option) => option.code === code)?.label ?? code;
+
+  return (
+    <div className="wrongbook-causes">
+      {item.cause_review && (
+        <div className="wrongbook-cause-summary">
+          <b>老师确认错因</b>
+          {item.cause_review.cause_codes.map((code) => (
+            <span key={code}>{labelFor(code)}</span>
+          ))}
+          {item.cause_review.teacher_note && <em>{item.cause_review.teacher_note}</em>}
+        </div>
+      )}
+      {!open ? (
+        <button className="wrongbook-cause-open" onClick={() => setOpen(true)}>
+          {item.cause_review ? "修改错因" : "确认错因"}
+        </button>
+      ) : (
+        <div className="wrongbook-cause-editor">
+          <div className="wrongbook-cause-title">
+            <b>选择主要错因</b>
+            <span>最多 3 个；只有保存后才进入正式统计</span>
+          </div>
+          <div className="wrongbook-cause-options">
+            {item.cause_options.map((option) => {
+              const checked = selected.includes(option.code);
+              return (
+                <label
+                  className={checked ? "selected" : ""}
+                  title={option.description}
+                  key={option.code}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={!checked && selected.length >= 3}
+                    onChange={() => toggleCause(option.code)}
+                  />
+                  <span>{option.label}</span>
+                </label>
+              );
+            })}
+          </div>
+          <textarea
+            aria-label="错因备注"
+            value={note}
+            maxLength={500}
+            onChange={(event) => setNote(event.target.value)}
+            placeholder={selected.includes("other") ? "选择“其他”时请补充说明" : "补充说明（可选）"}
+          />
+          {saveError && <div className="error">{saveError}</div>}
+          <div className="wrongbook-cause-actions">
+            <button
+              onClick={() => {
+                setOpen(false);
+                setSelected(item.cause_review?.cause_codes ?? []);
+                setNote(item.cause_review?.teacher_note ?? "");
+                setSaveError("");
+              }}
+            >
+              取消
+            </button>
+            <button className="primary" disabled={selected.length === 0 || saving} onClick={save}>
+              {saving ? "保存中…" : "保存错因"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ItemCard({
+  classId,
+  item,
+  onCauseSaved,
+}: {
+  classId: number;
+  item: WrongbookQuestion;
+  onCauseSaved: (review: ErrorCauseReview) => void;
+}) {
   return (
     <article className={`wrongbook-item ${item.repeated_error ? "repeated" : ""}`}>
       <div className="wrongbook-student">
@@ -85,6 +216,7 @@ function ItemCard({ item }: { item: WrongbookQuestion }) {
             <span className="wrongbook-unlinked">尚未绑定已确认的知识点或能力，不影响错题事实</span>
           )}
         </div>
+        <CauseEditor classId={classId} item={item} onSaved={onCauseSaved} />
       </div>
       <div className="wrongbook-time">
         <span>最近错误</span>
@@ -282,7 +414,23 @@ export default function LearningInsights({ onOpenExam, onOpenStudents }: Props) 
             ) : (
               <div className="wrongbook-list">
                 {visibleItems.map((item) => (
-                  <ItemCard item={item} key={`${item.student_id}-${item.question_version_id}`} />
+                  <ItemCard
+                    classId={dashboard.class.id}
+                    item={item}
+                    key={`${item.student_id}-${item.question_version_id}`}
+                    onCauseSaved={(review) => {
+                      setDashboard((current) => current
+                        ? {
+                          ...current,
+                          items: current.items.map((candidate) =>
+                            candidate.student_id === item.student_id
+                            && candidate.question_version_id === item.question_version_id
+                              ? { ...candidate, cause_review: review }
+                              : candidate),
+                        }
+                        : current);
+                    }}
+                  />
                 ))}
               </div>
             )}

@@ -1,4 +1,4 @@
-"""M3-0 错题事实 / M6 掌握入口浏览器冒烟测试。"""
+"""M3 错题事实/老师确认错因与 M6 掌握入口浏览器冒烟测试。"""
 
 from playwright.sync_api import expect, sync_playwright
 
@@ -21,7 +21,7 @@ window.__TAURI_INTERNALS__ = {
       const classId = Number(args.classId);
       if (classId === 2) {
         return {
-          meta: { schema_version: 1, rule_version: "m3-published-wrong-facts-v1",
+          meta: { schema_version: 2, rule_version: "m3-published-wrong-facts-v2",
             calculated_at: "2026-07-16T12:00:00Z", exam_watermark: null },
           class: { id: 2, name: "八年级二班", term: "2026秋",
             textbook: "中国历史八上", enabled_student_count: 1 },
@@ -35,7 +35,7 @@ window.__TAURI_INTERNALS__ = {
         };
       }
       return {
-        meta: { schema_version: 1, rule_version: "m3-published-wrong-facts-v1",
+        meta: { schema_version: 2, rule_version: "m3-published-wrong-facts-v2",
           calculated_at: "2026-07-16T12:00:00Z", exam_watermark: "2026-07-16T11:40:00Z" },
         class: { id: 1, name: "八年级一班", term: "2026秋",
           textbook: "中国历史八上", enabled_student_count: 3 },
@@ -55,6 +55,16 @@ window.__TAURI_INTERNALS__ = {
             latest_score: 0, latest_max_score: 2, latest_score_ratio: 0,
             published_response_count: 2, error_response_count: 2, repeated_error: true,
             latest_assessment_title: "近代化单元测验", latest_assessment_context: "quiz",
+            latest_error_grade_decision_public_id: "decision-1",
+            latest_error_publication_public_id: "publication-1",
+            cause_options: [
+              { code: "missing_answer", label: "未作答", description: "学生没有写出答案" },
+              { code: "fact_error", label: "史实错误", description: "历史事实错误" },
+              { code: "concept_confusion", label: "概念混淆", description: "相近概念混淆" },
+              { code: "misread_prompt", label: "审题偏差", description: "回答方向偏差" },
+              { code: "other", label: "其他", description: "老师补充" }
+            ],
+            cause_review: null,
             knowledge_nodes: [{ public_id: "k-1", title: "洋务运动失败原因" }],
             ability_dimensions: [{ public_id: "a-1", title: "因果分析" }]
           },
@@ -67,6 +77,15 @@ window.__TAURI_INTERNALS__ = {
             latest_score: 1, latest_max_score: 1, latest_score_ratio: 1,
             published_response_count: 2, error_response_count: 1, repeated_error: false,
             latest_assessment_title: "第一单元作业", latest_assessment_context: "correction",
+            latest_error_grade_decision_public_id: "decision-2",
+            latest_error_publication_public_id: "publication-2",
+            cause_options: [
+              { code: "missing_answer", label: "未作答", description: "学生没有写出答案" },
+              { code: "fact_error", label: "史实错误", description: "历史事实错误" },
+              { code: "incomplete_expression", label: "表达不完整", description: "内容不完整" },
+              { code: "other", label: "其他", description: "老师补充" }
+            ],
+            cause_review: null,
             knowledge_nodes: [], ability_dimensions: []
           },
           {
@@ -78,10 +97,36 @@ window.__TAURI_INTERNALS__ = {
             latest_score: 1, latest_max_score: 1, latest_score_ratio: 1,
             published_response_count: 2, error_response_count: 1, repeated_error: false,
             latest_assessment_title: "期末复测", latest_assessment_context: "exam",
+            latest_error_grade_decision_public_id: "decision-3",
+            latest_error_publication_public_id: "publication-3",
+            cause_options: [
+              { code: "fact_error", label: "史实错误", description: "历史事实错误" },
+              { code: "concept_confusion", label: "概念混淆", description: "相近概念混淆" },
+              { code: "other", label: "其他", description: "老师补充" }
+            ],
+            cause_review: {
+              public_id: "cause-review-3", revision: 1,
+              grade_decision_public_id: "decision-3",
+              publication_public_id: "publication-3",
+              cause_codes: ["concept_confusion"], teacher_note: null,
+              confirmed_by: "local_teacher", confirmed_at: "2026-07-16T10:00:00Z"
+            },
             knowledge_nodes: [{ public_id: "k-2", title: "辛亥革命局限" }],
             ability_dimensions: []
           }
         ]
+      };
+    }
+    if (cmd === "confirm_wrongbook_error_causes") {
+      const input = args.input;
+      return {
+        public_id: "cause-review-new", revision: 1,
+        grade_decision_public_id: input.gradeDecisionPublicId,
+        publication_public_id: input.publicationPublicId,
+        cause_codes: input.causeCodes,
+        teacher_note: input.teacherNote ?? null,
+        confirmed_by: "local_teacher",
+        confirmed_at: "2026-07-16T12:10:00Z"
       };
     }
     if (cmd === "class_operations_dashboard") {
@@ -139,6 +184,22 @@ def test_learning_insights(base_url: str) -> None:
         expect(page.get_by_text("洋务运动失败的根本原因是？", exact=True)).to_be_visible()
         expect(page.locator(".wrongbook-item .bad-text", has_text="重复出错")).to_be_visible()
         expect(page.get_by_text("尚未绑定已确认的知识点或能力", exact=False)).to_be_visible()
+
+        first_item = page.locator(".wrongbook-item").first
+        first_item.get_by_role("button", name="确认错因").click()
+        first_item.get_by_text("史实错误", exact=True).click()
+        first_item.get_by_text("概念混淆", exact=True).click()
+        first_item.get_by_label("错因备注").fill("根本原因与直接原因混淆")
+        first_item.get_by_role("button", name="保存错因").click()
+        expect(first_item.get_by_text("老师确认错因", exact=True)).to_be_visible()
+        expect(first_item.get_by_text("根本原因与直接原因混淆", exact=True)).to_be_visible()
+        cause_calls = page.evaluate(
+            "() => window.__learningCalls.filter((item) => "
+            "item.cmd === 'confirm_wrongbook_error_causes')"
+        )
+        assert len(cause_calls) == 1
+        assert cause_calls[0]["args"]["input"]["causeCodes"] == ["fact_error", "concept_confusion"]
+        assert cause_calls[0]["args"]["input"]["gradeDecisionPublicId"] == "decision-1"
         page.screenshot(path="/tmp/jiaofu-learning-insights.png", full_page=True)
 
         page.get_by_label("筛选订正状态").select_option("needs_correction")
