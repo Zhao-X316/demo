@@ -17,10 +17,16 @@ use suite_core::ports::{Migration, Module};
 /// 模块入口，向平台外壳声明元数据与迁移。
 pub struct RecitationModule;
 
-static MIGRATIONS: &[Migration] = &[Migration {
-    id: "recitation_0001",
-    sql: include_str!("../migrations/0001_recitation.sql"),
-}];
+static MIGRATIONS: &[Migration] = &[
+    Migration {
+        id: "recitation_0001",
+        sql: include_str!("../migrations/0001_recitation.sql"),
+    },
+    Migration {
+        id: "recitation_0002",
+        sql: include_str!("../migrations/0002_structured_scoring.sql"),
+    },
+];
 
 /// 模块迁移（供外壳/测试在 core 迁移之后运行）。
 pub fn recitation_migrations() -> &'static [Migration] {

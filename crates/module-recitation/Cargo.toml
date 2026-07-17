@@ -16,3 +16,6 @@ async-trait.workspace = true
 rusqlite = "0.31"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 regex = "1"
+
+[dev-dependencies]
+module-knowledge = { path = "../module-knowledge" }
