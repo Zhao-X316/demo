@@ -17,6 +17,7 @@ use suite_core::ports::{GradeResult, Grader, RecognizedWord};
 use suite_core::services::review::{self, ReviewRef};
 
 use crate::db::contents;
+use crate::db::point_reviews::{self, TeacherPointReviewInput};
 use crate::domain::fluency::FluencyCfg;
 use crate::grader::{RecitationGradeInput, RecitationGrader};
 use crate::service::tasks as task_service;
@@ -67,6 +68,13 @@ pub struct ScoreOutcome {
     pub fluency: f64,
     pub quality: String,
     pub next: NextAction,
+}
+
+pub struct HumanDecisionRequest<'a> {
+    pub result: &'a str,
+    pub note: Option<&'a str>,
+    pub decided_by: Option<&'a str>,
+    pub point_review: Option<&'a TeacherPointReviewInput>,
 }
 
 fn quality_to_review(q: &str) -> ReviewQuality {
@@ -371,10 +379,15 @@ struct EffectApplication<'a, 'r> {
     cfg: &'a ScoreCfg,
 }
 
+struct AppliedEffect {
+    next: NextAction,
+    effect_id: i64,
+}
+
 fn apply_and_record_effect(
     conn: &Connection,
     application: &EffectApplication<'_, '_>,
-) -> CoreResult<NextAction> {
+) -> CoreResult<AppliedEffect> {
     let EffectApplication {
         verdict_id,
         review_ref,
@@ -437,7 +450,7 @@ fn apply_and_record_effect(
     let card_after_json = json_encode(&card_after, "卡片后态")?;
     let task_after_json = json_encode(&tasks_after, "任务后态")?;
     let created_makeup_task_ids_json = json_encode(&created_makeup_ids, "补背任务账本")?;
-    decision_effects::insert(
+    let effect_id = decision_effects::insert(
         conn,
         &decision_effects::NewDecisionEffect {
             verdict_id: *verdict_id,
@@ -454,7 +467,7 @@ fn apply_and_record_effect(
             created_makeup_task_ids_json: &created_makeup_task_ids_json,
         },
     )?;
-    Ok(next)
+    Ok(AppliedEffect { next, effect_id })
 }
 
 /// 人工最终判定（pass|fail|reopen）。所有多表副作用与效果账本在一个事务内提交。
@@ -467,9 +480,52 @@ pub fn human_decide(
     today: NaiveDate,
     cfg: &ScoreCfg,
 ) -> CoreResult<NextAction> {
+    human_decide_with_point_review(
+        conn,
+        submission_id,
+        &HumanDecisionRequest {
+            result,
+            note,
+            decided_by,
+            point_review: None,
+        },
+        today,
+        cfg,
+    )
+}
+
+/// 人工最终判定，可选地显式接受或修正本次结构化评分的全部评分点。
+///
+/// `point_review=None` 只表示老师确认总体 pass/fail，不会把机器逐点结果伪装成人工确认。
+pub fn human_decide_with_point_review(
+    conn: &Connection,
+    submission_id: i64,
+    request: &HumanDecisionRequest<'_>,
+    today: NaiveDate,
+    cfg: &ScoreCfg,
+) -> CoreResult<NextAction> {
+    let result = request.result;
+    let note = request.note;
+    let decided_by = request.decided_by;
+    let point_review = request.point_review;
     if !matches!(result, "pass" | "fail" | "reopen") {
         return Err(CoreError::Invalid(format!("未知人工结论: {result}")));
     }
+    if result == "reopen" && point_review.is_some() {
+        return Err(CoreError::Invalid(
+            "重开待重交不能同时确认结构化评分点".into(),
+        ));
+    }
+    let point_review_actor = if point_review.is_some() {
+        Some(
+            decided_by
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| CoreError::Invalid("逐点评审必须记录确认人".into()))?,
+        )
+    } else {
+        None
+    };
 
     let tx = conn.unchecked_transaction()?;
     let sub = submissions::get(&tx, submission_id)?
@@ -529,12 +585,21 @@ pub fn human_decide(
     let active_effect = decision_effects::active_for_verdict(&tx, verdict.id)?;
 
     if existing_result == Some(result) {
-        if active_effect.is_none() {
-            return Err(CoreError::Invalid(
-                "终审结果缺少效果账本，拒绝猜测历史状态；请先执行旧数据修复".into(),
-            ));
-        }
+        let active_effect = active_effect.ok_or_else(|| {
+            CoreError::Invalid("终审结果缺少效果账本，拒绝猜测历史状态；请先执行旧数据修复".into())
+        })?;
         verdicts::set_human_result(&tx, verdict.id, result, note, decided_by)?;
+        if let (Some(review), Some(actor)) = (point_review, point_review_actor) {
+            point_reviews::record_review_inner(
+                &tx,
+                submission_id,
+                verdict.id,
+                active_effect.id,
+                result,
+                actor,
+                review,
+            )?;
+        }
         submissions::set_status(&tx, submission_id, "confirmed")?;
         tx.commit()?;
         return Ok(NextAction::Unchanged);
@@ -573,6 +638,7 @@ pub fn human_decide(
             ));
         }
         restore_effect(&tx, &effect)?;
+        point_reviews::revert_for_effect_inner(&tx, effect.id)?;
         decision_effects::mark_reverted(&tx, effect.id)?;
     } else if existing_result.is_some() {
         return Err(CoreError::Invalid(
@@ -589,7 +655,7 @@ pub fn human_decide(
     }
 
     let quality = verdict.quality.clone().unwrap_or_else(|| "C".to_string());
-    let next = apply_and_record_effect(
+    let applied = apply_and_record_effect(
         &tx,
         &EffectApplication {
             verdict_id: verdict.id,
@@ -602,24 +668,48 @@ pub fn human_decide(
         },
     )?;
     verdicts::set_human_result(&tx, verdict.id, result, note, decided_by)?;
+    if let (Some(review), Some(actor)) = (point_review, point_review_actor) {
+        point_reviews::record_review_inner(
+            &tx,
+            submission_id,
+            verdict.id,
+            applied.effect_id,
+            result,
+            actor,
+            review,
+        )?;
+    }
     submissions::set_status(&tx, submission_id, "confirmed")?;
     tx.commit()?;
-    Ok(next)
+    Ok(applied.next)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::structured::{
+        confirm_rubric, create_rubric_draft, current_answer_version, CreateRubricDraftInput,
+        RubricPointDraftInput,
+    };
+    use crate::service::ai_pipeline::{
+        begin_asr_run, finish_asr_success, AsrRunDescriptor, BeginAsrRun, FinishAsrSuccessInput,
+    };
     use crate::service::import::{import_one, ImportItem, ImportOutcome};
+    use rusqlite::params;
     use suite_core::db::repo::memory_cards;
     use suite_core::db::repo::students::{upsert as upsert_student, StudentInput};
     use suite_core::db::repo::tasks::NewTask;
     use suite_core::db::{open_in_memory, run_migrations, CORE_MIGRATIONS};
+    use suite_core::domain::hashing;
     use suite_core::models::TaskKind;
+    use suite_core::ports::RecognizedWord;
+
+    const EMPTY_ITEMS: &str = r#"{"schema_version":1,"items":[]}"#;
 
     fn setup_imported(answer: &str) -> (Connection, i64, i64, i64) {
         let conn = open_in_memory().unwrap();
         run_migrations(&conn, CORE_MIGRATIONS).unwrap();
+        run_migrations(&conn, module_knowledge::knowledge_migrations()).unwrap();
         run_migrations(&conn, crate::recitation_migrations()).unwrap();
         let s = upsert_student(
             &conn,
@@ -675,6 +765,392 @@ mod tests {
             o => panic!("import failed: {o:?}"),
         };
         (conn, s.id, c.id, sub_id)
+    }
+
+    fn setup_structured_scored(answer: &str) -> (Connection, i64, i64, i64, i64, i64) {
+        let (conn, student_id, content_id, submission_id) = setup_imported(answer);
+        let answer_version = current_answer_version(&conn, content_id).unwrap().unwrap();
+        let points = [RubricPointDraftInput {
+            stable_key: "main-point",
+            canonical_text: answer,
+            required_entities_json: EMPTY_ITEMS,
+            allowed_paraphrases_json: EMPTY_ITEMS,
+            contradiction_rules_json: EMPTY_ITEMS,
+            required: true,
+            weight: 1.0,
+            order_index: 0,
+            knowledge_node_id: None,
+            knowledge_link_state: "none",
+            verified_by: None,
+            verified_at: None,
+        }];
+        let rubric = create_rubric_draft(
+            &conn,
+            &CreateRubricDraftInput {
+                answer_version_id: answer_version.id,
+                generated_by_ai_run_id: None,
+                created_by: "teacher",
+                points: &points,
+            },
+        )
+        .unwrap();
+        confirm_rubric(&conn, rubric.id, "teacher").unwrap();
+
+        let input_hash = hashing::sha256_hex(format!("audio:{submission_id}").as_bytes());
+        let descriptor = AsrRunDescriptor {
+            provider: "test",
+            model_name: "test-asr",
+            model_version: "1",
+            config_version: "1",
+            prompt_or_rule_version: "1",
+        };
+        let ai_run_id =
+            match begin_asr_run(&conn, submission_id, &input_hash, &descriptor, false).unwrap() {
+                BeginAsrRun::Execute { ai_run_id, .. } => ai_run_id,
+                BeginAsrRun::Cached { .. } => panic!("first test ASR must execute"),
+            };
+        let words = [RecognizedWord {
+            text: answer.to_string(),
+            start_ms: 100,
+            end_ms: 4_000,
+        }];
+        finish_asr_success(
+            &conn,
+            ai_run_id,
+            &FinishAsrSuccessInput {
+                submission_id,
+                raw_transcript: answer,
+                normalized_transcript: answer,
+                normalization_version: "test-v1",
+                words: &words,
+                duration_ms: 5_000,
+            },
+        )
+        .unwrap();
+        submissions::set_recognition(&conn, submission_id, Some(answer), "ok", None, Some(5_000))
+            .unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        score_submission(&conn, submission_id, &words, today, &ScoreCfg::default()).unwrap();
+        let score = crate::service::structured_scoring::record_score_if_ready(
+            &conn,
+            submission_id,
+            &ScoreCfg::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let point_result = point_reviews::list_point_results(&conn, score.id)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        (
+            conn,
+            student_id,
+            content_id,
+            submission_id,
+            score.id,
+            point_result.id,
+        )
+    }
+
+    fn accepted_review(score_run_id: i64, point_result_id: i64) -> TeacherPointReviewInput {
+        TeacherPointReviewInput {
+            score_run_id,
+            items: vec![point_reviews::TeacherPointReviewItemInput {
+                point_result_id,
+                confirmation_level: "accepted".into(),
+                corrected_state: None,
+                corrected_evidence_spans_json: None,
+                teacher_note: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn overall_confirmation_does_not_silently_confirm_machine_points() {
+        let (conn, _sid, _cid, submission_id, _score_id, _point_result_id) =
+            setup_structured_scored("床前明月光");
+        let today = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        human_decide(
+            &conn,
+            submission_id,
+            "pass",
+            Some("只确认总体"),
+            Some("teacher"),
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        assert!(
+            point_reviews::active_review_for_submission(&conn, submission_id)
+                .unwrap()
+                .is_none()
+        );
+        let review_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM rec_point_review_revisions WHERE submission_id=?1",
+                [submission_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(review_count, 0);
+    }
+
+    #[test]
+    fn database_refuses_to_seal_incomplete_point_review() {
+        let (conn, _sid, _cid, submission_id, score_id, _point_result_id) =
+            setup_structured_scored("床前明月光");
+        let today = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        human_decide(
+            &conn,
+            submission_id,
+            "pass",
+            Some("只确认总体"),
+            Some("teacher"),
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        let verdict = verdicts::get_by_submission(&conn, submission_id)
+            .unwrap()
+            .unwrap();
+        let effect = decision_effects::active_for_verdict(&conn, verdict.id)
+            .unwrap()
+            .unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        tx.execute(
+            "INSERT INTO rec_point_review_revisions
+              (public_id,submission_id,score_run_id,verdict_id,decision_effect_id,revision,
+               item_count,definition_hash,overall_result,created_by,created_at)
+             VALUES (?1,?2,?3,?4,?5,1,2,?6,'pass','teacher',?7)",
+            params![
+                "test-incomplete-point-review",
+                submission_id,
+                score_id,
+                verdict.id,
+                effect.id,
+                "a".repeat(64),
+                "2026-06-25T00:00:00Z",
+            ],
+        )
+        .unwrap();
+        let review_id = tx.last_insert_rowid();
+        let error = tx
+            .execute(
+                "UPDATE rec_point_review_revisions SET state='active' WHERE id=?1",
+                [review_id],
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("M1_POINT_REVIEW_ITEMS_INCOMPLETE"));
+        tx.rollback().unwrap();
+    }
+
+    #[test]
+    fn explicit_point_acceptance_is_idempotent_and_audited() {
+        let (conn, _sid, _cid, submission_id, score_id, point_result_id) =
+            setup_structured_scored("床前明月光");
+        let review = accepted_review(score_id, point_result_id);
+        let today = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        human_decide_with_point_review(
+            &conn,
+            submission_id,
+            &HumanDecisionRequest {
+                result: "pass",
+                note: Some("总体和逐点均确认"),
+                decided_by: Some("teacher"),
+                point_review: Some(&review),
+            },
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        let first = point_reviews::active_review_for_submission(&conn, submission_id)
+            .unwrap()
+            .unwrap();
+        let items = point_reviews::list_review_items(&conn, first.id).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].confirmation_level, "accepted");
+
+        human_decide_with_point_review(
+            &conn,
+            submission_id,
+            &HumanDecisionRequest {
+                result: "pass",
+                note: Some("重复提交"),
+                decided_by: Some("teacher"),
+                point_review: Some(&review),
+            },
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM rec_point_review_revisions WHERE submission_id=?1",
+                [submission_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        let audit_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM audit_events
+                 WHERE object_type='recitation_point_review' AND action='recitation.point_review.recorded'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit_count, 1);
+    }
+
+    #[test]
+    fn invalid_point_correction_rolls_back_overall_effects() {
+        let (conn, student_id, content_id, submission_id, score_id, point_result_id) =
+            setup_structured_scored("床前明月光");
+        let invalid = TeacherPointReviewInput {
+            score_run_id: score_id,
+            items: vec![point_reviews::TeacherPointReviewItemInput {
+                point_result_id,
+                confirmation_level: "corrected".into(),
+                corrected_state: Some("omitted".into()),
+                corrected_evidence_spans_json: Some("[]".into()),
+                teacher_note: None,
+            }],
+        };
+        let today = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        let error = human_decide_with_point_review(
+            &conn,
+            submission_id,
+            &HumanDecisionRequest {
+                result: "pass",
+                note: None,
+                decided_by: Some("teacher"),
+                point_review: Some(&invalid),
+            },
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("必须填写简短说明"));
+        assert!(
+            memory_cards::get(&conn, MODULE, student_id, REF_TYPE, content_id)
+                .unwrap()
+                .is_none()
+        );
+        let verdict = verdicts::get_by_submission(&conn, submission_id)
+            .unwrap()
+            .unwrap();
+        assert!(verdict.human_result.is_none());
+        assert!(decision_effects::active_for_verdict(&conn, verdict.id)
+            .unwrap()
+            .is_none());
+        assert!(
+            point_reviews::active_review_for_submission(&conn, submission_id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn returning_to_an_older_point_definition_creates_a_new_revision() {
+        let (conn, _sid, _cid, submission_id, score_id, point_result_id) =
+            setup_structured_scored("床前明月光");
+        let accepted = accepted_review(score_id, point_result_id);
+        let corrected = TeacherPointReviewInput {
+            score_run_id: score_id,
+            items: vec![point_reviews::TeacherPointReviewItemInput {
+                point_result_id,
+                confirmation_level: "corrected".into(),
+                corrected_state: Some("omitted".into()),
+                corrected_evidence_spans_json: Some("[]".into()),
+                teacher_note: Some("回听后确认未完整说出".into()),
+            }],
+        };
+        let today = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        for review in [&accepted, &corrected, &accepted] {
+            human_decide_with_point_review(
+                &conn,
+                submission_id,
+                &HumanDecisionRequest {
+                    result: "pass",
+                    note: None,
+                    decided_by: Some("teacher"),
+                    point_review: Some(review),
+                },
+                today,
+                &ScoreCfg::default(),
+            )
+            .unwrap();
+        }
+        let active = point_reviews::active_review_for_submission(&conn, submission_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.revision, 3);
+        let items = point_reviews::list_review_items(&conn, active.id).unwrap();
+        assert_eq!(items[0].confirmation_level, "accepted");
+        let superseded: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM rec_point_review_revisions
+                 WHERE submission_id=?1 AND state='superseded'",
+                [submission_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(superseded, 2);
+    }
+
+    #[test]
+    fn overall_change_reverts_prior_point_review_before_new_revision() {
+        let (conn, _sid, _cid, submission_id, score_id, point_result_id) =
+            setup_structured_scored("床前明月光");
+        let review = accepted_review(score_id, point_result_id);
+        let today = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        human_decide_with_point_review(
+            &conn,
+            submission_id,
+            &HumanDecisionRequest {
+                result: "pass",
+                note: None,
+                decided_by: Some("teacher"),
+                point_review: Some(&review),
+            },
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        let first = point_reviews::active_review_for_submission(&conn, submission_id)
+            .unwrap()
+            .unwrap();
+
+        human_decide_with_point_review(
+            &conn,
+            submission_id,
+            &HumanDecisionRequest {
+                result: "fail",
+                note: Some("改判并复核逐点"),
+                decided_by: Some("teacher"),
+                point_review: Some(&review),
+            },
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        let second = point_reviews::active_review_for_submission(&conn, submission_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.revision, 2);
+        assert_eq!(second.overall_result, "fail");
+        assert_ne!(second.decision_effect_id, first.decision_effect_id);
+        assert_eq!(
+            point_reviews::get_review(&conn, first.id)
+                .unwrap()
+                .unwrap()
+                .state,
+            "reverted"
+        );
     }
 
     #[test]

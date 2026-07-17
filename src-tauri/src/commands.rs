@@ -2,10 +2,14 @@
 
 use chrono::{Duration, NaiveDate, Utc};
 use serde::Serialize;
+use serde_json::Value;
+use std::collections::HashMap;
 use tauri::{AppHandle, State};
 
 use module_recitation::config::RecitationConfig;
 use module_recitation::db::contents::{self, ContentInput, RecContent};
+use module_recitation::db::point_reviews::{self, TeacherPointReviewInput};
+use module_recitation::db::structured;
 use module_recitation::service::{
     ai_pipeline, import, matching, recognition, scoring, structured_scoring, tasks as task_svc,
 };
@@ -70,6 +74,32 @@ fn playback_path(submission: &Submission) -> String {
 // ───────────────────────── DTO ─────────────────────────
 
 #[derive(Serialize)]
+pub struct StructuredPointCard {
+    point_result_id: i64,
+    rubric_point_id: i64,
+    stable_key: String,
+    canonical_text: String,
+    order_index: i64,
+    machine_state: String,
+    confidence: f64,
+    evidence_spans: Value,
+    reason: String,
+    teacher_confirmation_level: Option<String>,
+    teacher_state: Option<String>,
+    teacher_note: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct StructuredScoreCard {
+    score_run_id: i64,
+    rubric_version_id: i64,
+    overall_suggestion: String,
+    confidence: f64,
+    review_revision: Option<i64>,
+    points: Vec<StructuredPointCard>,
+}
+
+#[derive(Serialize)]
 pub struct SubmissionCard {
     submission_id: i64,
     status: String,
@@ -87,6 +117,7 @@ pub struct SubmissionCard {
     human_result: Option<String>,
     human_note: Option<String>,
     machine_note: Option<String>,
+    structured_score: Option<StructuredScoreCard>,
 }
 
 #[derive(Serialize)]
@@ -135,6 +166,63 @@ pub struct TodayView {
     overdue_review: Vec<TaskCard>,
 }
 
+fn structured_score_card(
+    conn: &rusqlite::Connection,
+    submission_id: i64,
+) -> R<Option<StructuredScoreCard>> {
+    let Some(score) = structured::active_score_for_submission(conn, submission_id).map_err(e)?
+    else {
+        return Ok(None);
+    };
+    let machine_points = point_reviews::list_point_results(conn, score.id).map_err(e)?;
+    let current_review =
+        point_reviews::active_review_for_submission(conn, submission_id).map_err(e)?;
+    let (review_revision, reviewed_items) = match current_review {
+        Some(review) if review.score_run_id == score.id => {
+            let items = point_reviews::list_review_items(conn, review.id).map_err(e)?;
+            (
+                Some(review.revision),
+                items
+                    .into_iter()
+                    .map(|item| (item.source_point_result_id, item))
+                    .collect::<HashMap<_, _>>(),
+            )
+        }
+        _ => (None, HashMap::new()),
+    };
+    let points = machine_points
+        .into_iter()
+        .map(|point| {
+            let review = reviewed_items.get(&point.id);
+            let evidence_spans: Value =
+                serde_json::from_str(&point.evidence_spans_json).map_err(e)?;
+            Ok(StructuredPointCard {
+                point_result_id: point.id,
+                rubric_point_id: point.rubric_point_id,
+                stable_key: point.stable_key,
+                canonical_text: point.canonical_text,
+                order_index: point.order_index,
+                machine_state: point.machine_state,
+                confidence: point.confidence,
+                evidence_spans,
+                reason: point.reason,
+                teacher_confirmation_level: review
+                    .map(|item| item.confirmation_level.clone()),
+                teacher_state: review.map(|item| item.confirmed_state.clone()),
+                teacher_note: review.and_then(|item| item.teacher_note.clone()),
+            })
+        })
+        .collect::<R<Vec<_>>>()?;
+    Ok(Some(StructuredScoreCard {
+        score_run_id: score.id,
+        rubric_version_id: score.rubric_version_id,
+        overall_suggestion: score.overall_suggestion,
+        confidence: score.confidence,
+        review_revision,
+        points,
+    }))
+}
+
 fn task_card(conn: &rusqlite::Connection, task: &suite_core::models::Task) -> R<TaskCard> {
     let student = students::get_by_id(conn, task.student_id).map_err(e)?;
     let content = contents::get_by_id(conn, task.ref_id).map_err(e)?;
@@ -143,6 +231,7 @@ fn task_card(conn: &rusqlite::Connection, task: &suite_core::models::Task) -> R<
         Some(submission) => {
             let verdict = verdicts::get_by_submission(conn, submission.id).map_err(e)?;
             let audio_path = playback_path(&submission);
+            let structured_score = structured_score_card(conn, submission.id)?;
             Some(SubmissionCard {
                 submission_id: submission.id,
                 status: submission.status,
@@ -160,6 +249,7 @@ fn task_card(conn: &rusqlite::Connection, task: &suite_core::models::Task) -> R<
                 human_result: verdict.as_ref().and_then(|value| value.human_result.clone()),
                 human_note: verdict.as_ref().and_then(|value| value.human_note.clone()),
                 machine_note: verdict.as_ref().and_then(|value| value.machine_note.clone()),
+                structured_score,
             })
         }
         None => None,
@@ -335,15 +425,19 @@ pub fn verdict_human_decide(
     submission_id: i64,
     result: String,
     note: Option<String>,
+    point_review: Option<TeacherPointReviewInput>,
 ) -> R<String> {
     let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     let cfg = RecitationConfig::load(&conn).map_err(e)?.to_score_cfg();
-    let next = scoring::human_decide(
+    let next = scoring::human_decide_with_point_review(
         &conn,
         submission_id,
-        &result,
-        note.as_deref(),
-        Some("teacher"),
+        &scoring::HumanDecisionRequest {
+            result: &result,
+            note: note.as_deref(),
+            decided_by: Some("teacher"),
+            point_review: point_review.as_ref(),
+        },
         today_naive(),
         &cfg,
     )

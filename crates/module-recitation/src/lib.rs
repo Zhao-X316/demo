@@ -26,6 +26,10 @@ static MIGRATIONS: &[Migration] = &[
         id: "recitation_0002",
         sql: include_str!("../migrations/0002_structured_scoring.sql"),
     },
+    Migration {
+        id: "recitation_0003",
+        sql: include_str!("../migrations/0003_point_review_revisions.sql"),
+    },
 ];
 
 /// 模块迁移（供外壳/测试在 core 迁移之后运行）。

@@ -762,6 +762,19 @@ pub fn get_score_by_ai_run(conn: &Connection, ai_run_id: i64) -> CoreResult<Opti
     Ok(conn.query_row(&sql, [ai_run_id], score_row).optional()?)
 }
 
+pub fn active_score_for_submission(
+    conn: &Connection,
+    submission_id: i64,
+) -> CoreResult<Option<RecScoreRun>> {
+    let sql = format!(
+        "SELECT {SCORE_COLS} FROM rec_score_runs
+         WHERE submission_id=?1 AND state='active'"
+    );
+    Ok(conn
+        .query_row(&sql, [submission_id], score_row)
+        .optional()?)
+}
+
 pub(crate) fn record_score_from_ai_run_inner(
     conn: &Connection,
     ai_run_id: i64,

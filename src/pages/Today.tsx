@@ -1,11 +1,53 @@
 import { useEffect, useState } from "react";
-import { TaskCard, TodayView, dashboardToday, dayRollover, humanDecide } from "../api/dashboard";
+import {
+  RecitationPointState,
+  StructuredPointCard,
+  TaskCard,
+  TeacherPointReviewInput,
+  TodayView,
+  dashboardToday,
+  dayRollover,
+  humanDecide,
+} from "../api/dashboard";
 import { Class, RecContent, Student, TaskGenerateResult, classesList, contentsList, studentsList } from "../api/manage";
 import { AudioPlayer } from "../components/AudioPlayer";
 import { Avatar } from "../components/ui";
 import { AssignModal } from "../components/modals";
 
 type Filter = "all" | "sub" | "pass" | "wait" | "makeup";
+type ReviewMode = "view" | "rejudge" | "points";
+type PointDraft = {
+  confirmation: "accepted" | "corrected";
+  state: RecitationPointState;
+  note: string;
+};
+
+const POINT_STATE_LABEL: Record<RecitationPointState, string> = {
+  covered: "已覆盖",
+  partial: "部分覆盖",
+  omitted: "遗漏",
+  contradiction: "存在矛盾",
+  uncertain: "无法确定",
+};
+
+function pointDraft(point: StructuredPointCard): PointDraft {
+  return {
+    confirmation: point.teacher_confirmation_level ?? "accepted",
+    state: point.teacher_state ?? point.machine_state,
+    note: point.teacher_note ?? "",
+  };
+}
+
+function timeSpanText(point: StructuredPointCard) {
+  if (!point.evidence_spans.length) return "未定位到对应片段";
+  return point.evidence_spans
+    .map((span) => {
+      const start = typeof span.start_ms === "number" ? `${(span.start_ms / 1000).toFixed(1)}s` : "—";
+      const end = typeof span.end_ms === "number" ? `${(span.end_ms / 1000).toFixed(1)}s` : "—";
+      return `${start}–${end}${span.text ? `「${span.text}」` : ""}`;
+    })
+    .join("；");
+}
 
 function taskResultText(r: TaskGenerateResult) {
   const parts = [`新建 ${r.created}`];
@@ -46,12 +88,17 @@ export default function Today() {
   }
 
   const s = view.summary;
-  const confirmOne = async (t: TaskCard, result: "pass" | "fail" | "reopen", note?: string) => {
+  const confirmOne = async (
+    t: TaskCard,
+    result: "pass" | "fail" | "reopen",
+    note?: string,
+    pointReview?: TeacherPointReviewInput,
+  ) => {
     if (!t.submission) return;
     setReviewBusy(true);
     setErr("");
     try {
-      await humanDecide(t.submission.submission_id, result, note);
+      await humanDecide(t.submission.submission_id, result, note, pointReview);
       setToast(result === "pass" ? "已确认通过" : result === "fail" ? "已确认不通过" : "已重开任务");
       await load();
     } catch (e) {
@@ -164,18 +211,116 @@ function TaskRow({
 }: {
   t: TaskCard;
   busy: boolean;
-  onDecide: (t: TaskCard, result: "pass" | "fail" | "reopen", note?: string) => void;
+  onDecide: (
+    t: TaskCard,
+    result: "pass" | "fail" | "reopen",
+    note?: string,
+    pointReview?: TeacherPointReviewInput,
+  ) => void;
 }) {
   const sub = t.submission;
   const [expanded, setExpanded] = useState(false);
   const [note, setNote] = useState(sub?.human_note ?? "");
   const [audioState, setAudioState] = useState<"idle" | "ready" | "error">("idle");
-  const [rejudging, setRejudging] = useState(false);
+  const [reviewMode, setReviewMode] = useState<ReviewMode>("view");
+  const [pointReviewEnabled, setPointReviewEnabled] = useState(false);
+  const [pointDrafts, setPointDrafts] = useState<Record<number, PointDraft>>({});
+  const [pointError, setPointError] = useState("");
   useEffect(() => {
     setNote(sub?.human_note ?? "");
     setAudioState("idle");
-    setRejudging(false);
-  }, [sub?.submission_id, sub?.file_path, sub?.human_note, sub?.human_result]);
+    setReviewMode("view");
+    setPointReviewEnabled(Boolean(sub?.structured_score?.review_revision));
+    setPointDrafts(
+      Object.fromEntries(
+        (sub?.structured_score?.points ?? []).map((point) => [point.point_result_id, pointDraft(point)]),
+      ),
+    );
+    setPointError("");
+  }, [
+    sub?.submission_id,
+    sub?.file_path,
+    sub?.human_note,
+    sub?.human_result,
+    sub?.structured_score?.score_run_id,
+    sub?.structured_score?.review_revision,
+  ]);
+
+  const togglePointReview = (enabled: boolean) => {
+    setPointReviewEnabled(enabled);
+    setPointError("");
+    if (enabled) {
+      setPointDrafts(
+        Object.fromEntries(
+          (sub?.structured_score?.points ?? []).map((point) => [
+            point.point_result_id,
+            pointDrafts[point.point_result_id] ?? pointDraft(point),
+          ]),
+        ),
+      );
+    }
+  };
+
+  const buildPointReview = (): TeacherPointReviewInput | undefined => {
+    const score = sub?.structured_score;
+    if (!pointReviewEnabled || !score) return undefined;
+    const items = score.points.map((point) => {
+      const draft = pointDrafts[point.point_result_id] ?? pointDraft(point);
+      if (draft.confirmation === "corrected" && !draft.note.trim()) {
+        throw new Error(`“${point.canonical_text}”已人工修正，请填写简短说明`);
+      }
+      return {
+        point_result_id: point.point_result_id,
+        confirmation_level: draft.confirmation,
+        corrected_state: draft.confirmation === "corrected" ? draft.state : null,
+        corrected_evidence_spans_json:
+          draft.confirmation === "corrected" ? JSON.stringify(point.evidence_spans) : null,
+        teacher_note: draft.note.trim() || null,
+      };
+    });
+    return { score_run_id: score.score_run_id, items };
+  };
+
+  const decide = (result: "pass" | "fail" | "reopen") => {
+    setPointError("");
+    try {
+      onDecide(t, result, note, result === "reopen" ? undefined : buildPointReview());
+    } catch (error) {
+      setPointError(String(error));
+    }
+  };
+
+  const beginRejudge = () => {
+    setReviewMode("rejudge");
+    setPointReviewEnabled(false);
+    setPointDrafts(
+      Object.fromEntries(
+        (sub?.structured_score?.points ?? []).map((point) => [
+          point.point_result_id,
+          {
+            confirmation: "accepted",
+            state: point.machine_state,
+            note: "",
+          } satisfies PointDraft,
+        ]),
+      ),
+    );
+    setPointError("");
+  };
+
+  const beginPointEdit = () => {
+    setReviewMode("points");
+    setPointReviewEnabled(true);
+    setPointDrafts(
+      Object.fromEntries(
+        (sub?.structured_score?.points ?? []).map((point) => [
+          point.point_result_id,
+          pointDraft(point),
+        ]),
+      ),
+    );
+    setPointError("");
+  };
 
   const dot =
     t.status === "passed" ? "" : t.status === "failed" ? "f" : sub ? "w" : "n";
@@ -301,24 +446,161 @@ function TaskRow({
               value={note}
               onChange={(event) => setNote(event.target.value)}
               placeholder="记录听辨依据、错漏位置或改判原因（可选）"
-              disabled={Boolean(sub.human_result) && !rejudging}
+              disabled={Boolean(sub.human_result) && reviewMode === "view"}
             />
           </label>
 
+          {sub.structured_score && (
+            <section className="point-review">
+              <div className="point-review-head">
+                <div>
+                  <h3>评分点证据</h3>
+                  <p>
+                    共 {sub.structured_score.points.length} 点 · 机器置信度{" "}
+                    {Math.round(sub.structured_score.confidence * 100)}%
+                    {sub.structured_score.review_revision
+                      ? ` · 已保存老师复核 v${sub.structured_score.review_revision}`
+                      : " · 尚未由老师逐点确认"}
+                  </p>
+                </div>
+                {(sub.human_result ? reviewMode !== "view" : true) && (
+                  <label className="point-review-toggle">
+                    <input
+                      type="checkbox"
+                      checked={pointReviewEnabled}
+                      onChange={(event) => togglePointReview(event.target.checked)}
+                    />
+                    同时确认逐评分点
+                  </label>
+                )}
+              </div>
+              {!pointReviewEnabled && (!sub.human_result || reviewMode !== "view") && (
+                <div className="evidence-hint">
+                  未开启时，本次只确认总体通过/不通过，机器逐点分析保持“未核实”。
+                </div>
+              )}
+              <div className="point-list">
+                {sub.structured_score.points.map((point) => {
+                  const draft = pointDrafts[point.point_result_id] ?? pointDraft(point);
+                  const editable = pointReviewEnabled && (!sub.human_result || reviewMode !== "view");
+                  const shownState =
+                    sub.human_result && reviewMode === "view" && point.teacher_state
+                      ? point.teacher_state
+                      : draft.state;
+                  return (
+                    <article className="point-item" key={point.point_result_id}>
+                      <div className="point-item-main">
+                        <span className={`point-state ${shownState}`}>
+                          {POINT_STATE_LABEL[shownState]}
+                        </span>
+                        <div>
+                          <b>{point.canonical_text}</b>
+                          <p>{point.reason}</p>
+                          <small>{timeSpanText(point)}</small>
+                        </div>
+                        <span className="point-confidence">
+                          {Math.round(point.confidence * 100)}%
+                        </span>
+                      </div>
+                      {editable && (
+                        <div className="point-edit">
+                          <select
+                            value={
+                              draft.confirmation === "accepted"
+                                ? "accepted"
+                                : `corrected:${draft.state}`
+                            }
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              setPointDrafts((current) => ({
+                                ...current,
+                                [point.point_result_id]:
+                                  value === "accepted"
+                                    ? {
+                                        confirmation: "accepted",
+                                        state: point.machine_state,
+                                        note: "",
+                                      }
+                                    : {
+                                        ...draft,
+                                        confirmation: "corrected",
+                                        state: value.replace(
+                                          "corrected:",
+                                          "",
+                                        ) as RecitationPointState,
+                                      },
+                              }));
+                            }}
+                          >
+                            <option value="accepted">
+                              接受机器判断：{POINT_STATE_LABEL[point.machine_state]}
+                            </option>
+                            {Object.entries(POINT_STATE_LABEL).map(([state, label]) => (
+                              <option key={state} value={`corrected:${state}`}>
+                                人工修正为：{label}
+                              </option>
+                            ))}
+                          </select>
+                          {draft.confirmation === "corrected" && (
+                            <input
+                              value={draft.note}
+                              onChange={(event) =>
+                                setPointDrafts((current) => ({
+                                  ...current,
+                                  [point.point_result_id]: {
+                                    ...draft,
+                                    note: event.target.value,
+                                  },
+                                }))
+                              }
+                              placeholder="修正原因（必填）"
+                            />
+                          )}
+                        </div>
+                      )}
+                      {!editable && point.teacher_confirmation_level && (
+                        <div className="point-reviewed-note">
+                          老师{point.teacher_confirmation_level === "accepted" ? "已接受" : "已修正"}
+                          {point.teacher_note ? ` · ${point.teacher_note}` : ""}
+                        </div>
+                      )}
+                    </article>
+                  );
+                })}
+              </div>
+              {pointError && <div className="evidence-error">{pointError}</div>}
+            </section>
+          )}
+
           {sub.human_result ? (
-            rejudging ? (
+            reviewMode === "rejudge" ? (
               <div className="evidence-actions">
                 <div className="evidence-hint">
                   改判会先回滚旧副作用，再应用新结论；状态已漂移时系统会拒绝自动覆盖。
                 </div>
                 <div className="spacer" />
-                <button disabled={busy} onClick={() => setRejudging(false)}>取消</button>
+                <button disabled={busy} onClick={() => setReviewMode("view")}>取消</button>
                 <button
                   className="primary"
                   disabled={busy || !canDecide}
-                  onClick={() => onDecide(t, sub.human_result === "pass" ? "fail" : "pass", note)}
+                  onClick={() => decide(sub.human_result === "pass" ? "fail" : "pass")}
                 >
                   确认改判为{sub.human_result === "pass" ? "不通过" : "通过"}
+                </button>
+              </div>
+            ) : reviewMode === "points" ? (
+              <div className="evidence-actions">
+                <div className="evidence-hint">
+                  保存后只补充或更新逐评分点复核，不会重复推进复习卡。
+                </div>
+                <div className="spacer" />
+                <button disabled={busy} onClick={() => setReviewMode("view")}>取消</button>
+                <button
+                  className="primary"
+                  disabled={busy || !canDecide || !pointReviewEnabled}
+                  onClick={() => decide(sub.human_result as "pass" | "fail")}
+                >
+                  保存逐点评审
                 </button>
               </div>
             ) : (
@@ -327,9 +609,16 @@ function TaskRow({
                   已终审：{sub.human_result === "pass" ? "通过" : sub.human_result === "fail" ? "不通过" : "重开"}
                   {sub.human_note ? ` · ${sub.human_note}` : ""}
                 </span>
-                {sub.human_result !== "reopen" && (
-                  <button disabled={busy} onClick={() => setRejudging(true)}>发起改判</button>
-                )}
+                <div className="reviewed-actions">
+                  {sub.human_result !== "reopen" && sub.structured_score && (
+                    <button disabled={busy} onClick={beginPointEdit}>
+                      {sub.structured_score.review_revision ? "更新逐点复核" : "补充逐点复核"}
+                    </button>
+                  )}
+                  {sub.human_result !== "reopen" && (
+                    <button disabled={busy} onClick={beginRejudge}>发起改判</button>
+                  )}
+                </div>
               </div>
             )
           ) : (
@@ -338,11 +627,11 @@ function TaskRow({
                 {canDecide ? "证据已就绪，可以终审。" : "需录音可读、ASR/答案非空且答案版本一致后才能确认。"}
               </div>
               <div className="spacer" />
-              <button disabled={busy} onClick={() => onDecide(t, "reopen", note)}>重开待重交</button>
-              <button disabled={busy || !canDecide} onClick={() => onDecide(t, sub.pass ? "fail" : "pass", note)}>
+              <button disabled={busy} onClick={() => decide("reopen")}>重开待重交</button>
+              <button disabled={busy || !canDecide} onClick={() => decide(sub.pass ? "fail" : "pass")}>
                 判为{sub.pass ? "不通过" : "通过"}
               </button>
-              <button className="primary" disabled={busy || !canDecide} onClick={() => onDecide(t, sub.pass ? "pass" : "fail", note)}>
+              <button className="primary" disabled={busy || !canDecide} onClick={() => decide(sub.pass ? "pass" : "fail")}>
                 确认系统建议
               </button>
             </div>

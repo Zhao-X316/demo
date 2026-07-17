@@ -501,12 +501,36 @@ button.dashboard-action { display: grid; grid-template-columns: 34px minmax(0, 1
 .evidence-note textarea { width: 100%; }
 .evidence-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
 .reviewed-result { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; padding: 9px 11px; color: var(--ok); background: var(--ok-bg); border-radius: 7px; font-size: 12px; }
+.reviewed-actions { display: flex; align-items: center; gap: 7px; }
+.point-review { margin-top: 12px; padding: 13px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+.point-review-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.point-review-head h3 { margin: 0; font-size: 13px; }
+.point-review-head p { margin-top: 4px; color: var(--muted); font-size: 11px; }
+.point-review-toggle { display: flex; align-items: center; gap: 7px; padding: 7px 9px; color: var(--text-2); background: var(--brand-weak); border-radius: 7px; font-size: 12px; white-space: nowrap; cursor: pointer; }
+.point-review-toggle input { accent-color: var(--brand); }
+.point-list { display: flex; flex-direction: column; gap: 7px; margin-top: 10px; }
+.point-item { padding: 10px 11px; background: var(--bg-sub); border: 1px solid var(--line); border-radius: 7px; }
+.point-item-main { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 9px; }
+.point-item-main b { display: block; font-size: 12.5px; line-height: 1.5; }
+.point-item-main p { margin-top: 3px; color: var(--text-2); font-size: 11px; line-height: 1.5; }
+.point-item-main small { display: block; margin-top: 3px; color: var(--muted); font-size: 10.5px; }
+.point-confidence { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.point-state { min-width: 54px; padding: 2px 6px; color: var(--muted); background: #F1F2F5; border-radius: 5px; font-size: 10.5px; text-align: center; white-space: nowrap; }
+.point-state.covered { color: var(--ok); background: var(--ok-bg); }
+.point-state.omitted, .point-state.contradiction { color: var(--bad); background: var(--bad-bg); }
+.point-state.partial, .point-state.uncertain { color: var(--warn); background: var(--warn-bg); }
+.point-edit { display: grid; grid-template-columns: minmax(190px, .8fr) minmax(220px, 1.2fr); gap: 8px; margin-top: 8px; padding-left: 63px; }
+.point-edit select, .point-edit input { width: 100%; min-height: 32px; padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--panel); color: var(--text); font-size: 11.5px; }
+.point-reviewed-note { margin: 7px 0 0 63px; color: var(--ok); font-size: 10.5px; }
 .evidence-panel .audioplayer { width: 100%; max-width: 100%; }
 
 @media (max-width: 820px) {
   .evidence-grid { grid-template-columns: 1fr; }
   .evidence-actions { align-items: stretch; flex-direction: column; }
   .evidence-actions .spacer { display: none; }
+  .point-review-head, .reviewed-result { align-items: stretch; flex-direction: column; }
+  .point-edit { grid-template-columns: 1fr; padding-left: 0; }
+  .point-reviewed-note { margin-left: 0; }
 }
 
 /* ───── 批改台 ───── */
