@@ -294,6 +294,12 @@ fn pair_observations(set: &TeacherShadowObservationSet) -> CoreResult<Vec<Observ
     Ok(pairs)
 }
 
+impl TeacherShadowObservationSet {
+    pub fn validate(&self) -> CoreResult<()> {
+        pair_observations(self).map(|_| ())
+    }
+}
+
 fn percentile(values: &[u64], percentile: u64) -> u64 {
     let mut sorted = values.to_vec();
     sorted.sort_unstable();

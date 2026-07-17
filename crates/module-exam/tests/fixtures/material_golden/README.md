@@ -8,6 +8,32 @@
 - 真实清单还必须冻结 `pilot_gate_id` 和对应闸门 JSON 的策略 hash；评估时同时提供 `--gate`、`--rights-evidence` 与 `--as-of`。闸门过期、撤销、内容漂移或四类导出/删除 dry-run 回执缺失时，评估器拒绝运行。
 - 三类材料共用报告结构，但分别统计：普通试卷的页面/题区，答题卡的格位/涂改，默写的行栏/评分点。
 
+## 一键创建仓库外真实试点工作区
+
+不要手工从零拼十余个目录和 JSON。先准备一个仓库外、尚不存在的新目录，再运行：
+
+```bash
+cargo run -p module-exam --example init_real_pilot_workspace -- \
+  --output-dir /受限目录/jiaofu-real-pilot-001 \
+  --starts-on 2026-07-16 \
+  --ends-on 2026-07-30 \
+  --purpose 三材料受限影子试点 \
+  --responsible-party-ref-sha256 "<责任人不透明引用的64位sha256>" \
+  --class-scope-sha256 "<班级范围不透明引用的64位sha256>"
+```
+
+生成器拒绝相对路径、仓库内目录和已有目录；目录权限设为 `0700`、文件设为 `0600`。它一次生成普通试卷、答题卡、默写的材料/预测草稿，以及 gate、rights dataset、老师观察、回执、结果和导出目录。全部初始状态都是 `draft`，没有授权、真实样本或生产准确率资格。
+
+随时运行只读就绪检查：
+
+```bash
+cargo run -p module-exam --example check_real_pilot_workspace -- \
+  --workspace /受限目录/jiaofu-real-pilot-001 \
+  --as-of 2026-07-16
+```
+
+草稿阶段会以退出码 3 和稳定 blocker code 明确列出缺失项；只有真实 gate、四类数据权利证据、三类真实标注和三类 provider 预测全部互相匹配，且数据集资产仍是受限目录内的 active 普通文件、大小与 SHA-256 未漂移时，才返回 `ready_for_provider_shadow=true`。该检查不解析图片正文、不调用 provider，也不写成绩。
+
 离线生成报告：
 
 ```bash
