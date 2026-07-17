@@ -466,6 +466,8 @@ pub fn replace_rejected_page(
     if activated_student {
         let attempt_no = next_attempt_no(&tx, batch_scope.0, group.student_id)?;
         let attempt_public_id = ids::new_public_id();
+        let attempt_kind =
+            super::assessment::attempt_kind_for_assessment_version(&tx, batch_scope.0, attempt_no)?;
         tx.execute(
             "INSERT INTO exam_attempts_v2
              (public_id,assessment_version_id,student_id,attempt_no,source_kind,
@@ -476,7 +478,7 @@ pub fn replace_rejected_page(
                 batch_scope.0,
                 group.student_id,
                 attempt_no,
-                if attempt_no == 1 { "first" } else { "retry" },
+                attempt_kind,
                 &now,
             ),
         )?;

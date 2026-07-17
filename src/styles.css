@@ -192,6 +192,17 @@ button.dashboard-action { display: grid; grid-template-columns: 34px minmax(0, 1
 .wrongbook-cause-options input { margin: 0; }
 .wrongbook-cause-editor textarea { width: 100%; min-height: 58px; resize: vertical; }
 .wrongbook-cause-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 7px; }
+.wrongbook-correction { width: 100%; margin-top: 9px; }
+.wrongbook-correction > button { min-height: 30px; }
+.wrongbook-correction-confirm { display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px solid var(--brand-line); border-radius: 8px; background: var(--brand-weak); }
+.wrongbook-correction-confirm > b { color: var(--text); font-size: 11.5px; }
+.wrongbook-correction-confirm > span { color: var(--text-2); font-size: 10.5px; line-height: 1.5; }
+.wrongbook-correction-confirm > div:last-child { display: flex; justify-content: flex-end; gap: 7px; }
+.wrongbook-correction-summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; margin-top: 9px; padding: 8px 9px; border: 1px solid #CFE3D9; border-radius: 8px; background: #F2F9F6; }
+.wrongbook-correction-summary > div { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.wrongbook-correction-summary span { color: #34745B; font-size: 10.5px; }
+.wrongbook-correction-summary b { overflow: hidden; color: var(--text-2); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+.wrongbook-correction-summary button { flex-shrink: 0; min-height: 28px; padding: 4px 8px; font-size: 10.5px; }
 .wrongbook-time { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 7px; color: var(--muted); font-size: 10.5px; }
 .wrongbook-time b { overflow: hidden; color: var(--text-2); font-size: 10.5px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .learning-rule-note { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; padding: 10px 12px; border-radius: 8px; background: var(--bg-sub); color: var(--text-2); font-size: 11px; line-height: 1.55; }

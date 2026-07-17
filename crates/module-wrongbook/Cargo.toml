@@ -8,9 +8,9 @@ description = "M3 错题事实、老师确认错因与订正状态"
 
 [dependencies]
 suite-core = { path = "../core" }
+module-exam = { path = "../module-exam" }
 serde.workspace = true
 rusqlite = "0.31"
 
 [dev-dependencies]
-module-exam = { path = "../module-exam" }
 module-knowledge = { path = "../module-knowledge" }

@@ -3,6 +3,9 @@ import { useEffect, useMemo, useState } from "react";
 import {
   ClassWrongbookDashboard,
   confirmWrongbookErrorCauses,
+  CorrectionAssignment,
+  CorrectionAssignmentStatus,
+  createWrongbookSingleCorrection,
   ErrorCauseReview,
   loadClassWrongbookDashboard,
   WrongbookQuestion,
@@ -37,6 +40,13 @@ const CONTEXT_LABELS: Record<string, string> = {
   open_book: "开卷",
   correction: "订正",
   demo: "演示",
+};
+
+const CORRECTION_STATUS_LABELS: Record<CorrectionAssignmentStatus, string> = {
+  waiting_upload: "订正已建立 · 等待上传",
+  in_progress: "订正处理中",
+  ready_to_publish: "订正待发布",
+  published: "订正已发布",
 };
 
 function statusClass(status: WrongbookStatus) {
@@ -174,14 +184,100 @@ function CauseEditor({ classId, item, onSaved }: CauseEditorProps) {
   );
 }
 
+function CorrectionAction({
+  classId,
+  item,
+  onCreated,
+  onOpenExam,
+}: {
+  classId: number;
+  item: WrongbookQuestion;
+  onCreated: (assignment: CorrectionAssignment) => void;
+  onOpenExam: () => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState("");
+
+  const create = async () => {
+    setCreating(true);
+    setCreateError("");
+    try {
+      const assignment = await createWrongbookSingleCorrection({
+        classId,
+        studentId: item.student_id,
+        questionVersionPublicId: item.question_version_id,
+        sourceGradeDecisionPublicId: item.latest_error_grade_decision_public_id,
+        sourcePublicationPublicId: item.latest_error_publication_public_id,
+      });
+      onCreated(assignment);
+      setConfirming(false);
+    } catch (reason) {
+      setCreateError(String(reason));
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  if (item.correction_assignment) {
+    return (
+      <div className="wrongbook-correction-summary">
+        <div>
+          <span>{CORRECTION_STATUS_LABELS[item.correction_assignment.status]}</span>
+          <b title={item.correction_assignment.assessment_title}>
+            {item.correction_assignment.assessment_title}
+          </b>
+        </div>
+        <button onClick={onOpenExam}>
+          {item.correction_assignment.status === "published" ? "查看批改" : "去上传批改"}
+        </button>
+      </div>
+    );
+  }
+
+  if (item.status !== "needs_correction") return null;
+
+  return (
+    <div className="wrongbook-correction">
+      {!confirming ? (
+        <button className="primary" onClick={() => setConfirming(true)}>建立订正</button>
+      ) : (
+        <div className="wrongbook-correction-confirm">
+          <b>为 {item.student_no} 号 {item.student_name} 建立这道订正？</b>
+          <span>只建立这一题并等待照片上传；不会修改原成绩、原错因或掌握结论。</span>
+          {createError && <div className="error">{createError}</div>}
+          <div>
+            <button
+              disabled={creating}
+              onClick={() => {
+                setConfirming(false);
+                setCreateError("");
+              }}
+            >
+              取消
+            </button>
+            <button className="primary" disabled={creating} onClick={create}>
+              {creating ? "建立中…" : "确认建立"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ItemCard({
   classId,
   item,
   onCauseSaved,
+  onCorrectionCreated,
+  onOpenExam,
 }: {
   classId: number;
   item: WrongbookQuestion;
   onCauseSaved: (review: ErrorCauseReview) => void;
+  onCorrectionCreated: (assignment: CorrectionAssignment) => void;
+  onOpenExam: () => void;
 }) {
   return (
     <article className={`wrongbook-item ${item.repeated_error ? "repeated" : ""}`}>
@@ -217,6 +313,12 @@ function ItemCard({
           )}
         </div>
         <CauseEditor classId={classId} item={item} onSaved={onCauseSaved} />
+        <CorrectionAction
+          classId={classId}
+          item={item}
+          onCreated={onCorrectionCreated}
+          onOpenExam={onOpenExam}
+        />
       </div>
       <div className="wrongbook-time">
         <span>最近错误</span>
@@ -430,6 +532,19 @@ export default function LearningInsights({ onOpenExam, onOpenStudents }: Props) 
                         }
                         : current);
                     }}
+                    onCorrectionCreated={(assignment) => {
+                      setDashboard((current) => current
+                        ? {
+                          ...current,
+                          items: current.items.map((candidate) =>
+                            candidate.student_id === item.student_id
+                            && candidate.question_version_id === item.question_version_id
+                              ? { ...candidate, correction_assignment: assignment }
+                              : candidate),
+                        }
+                        : current);
+                    }}
+                    onOpenExam={onOpenExam}
                   />
                 ))}
               </div>

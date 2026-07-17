@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use suite_core::domain::time;
 use suite_core::error::{CoreError, CoreResult};
 
-pub const CLASS_OPERATIONS_DASHBOARD_SCHEMA_VERSION: i64 = 1;
-pub const CLASS_OPERATIONS_DASHBOARD_RULE_VERSION: &str = "m6.1-operations-v1";
+pub const CLASS_OPERATIONS_DASHBOARD_SCHEMA_VERSION: i64 = 2;
+pub const CLASS_OPERATIONS_DASHBOARD_RULE_VERSION: &str = "m6.1-operations-v2";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DashboardClass {
@@ -231,23 +231,40 @@ fn recitation_operations(
     })
 }
 
-fn exam_operations(
-    conn: &Connection,
-    class_id: i64,
-    enabled_student_count: i64,
-) -> CoreResult<ExamOperations> {
-    let active_assessment_count: i64 = conn.query_row(
-        "SELECT COUNT(*)
-         FROM exam_assessments_v2 a
-         WHERE a.class_id=?1 AND a.state='active'
-           AND EXISTS(
-             SELECT 1 FROM exam_assessment_versions_v2 v
-             WHERE v.assessment_id=a.id AND v.state='confirmed'
-           )",
+fn exam_operations(conn: &Connection, class_id: i64) -> CoreResult<ExamOperations> {
+    let (active_assessment_count, expected_submission_count): (i64, i64) = conn.query_row(
+        "WITH active_assessments AS (
+           SELECT assessment.id,assessment.audience_kind
+           FROM exam_assessments_v2 assessment
+           WHERE assessment.class_id=?1 AND assessment.state='active'
+             AND EXISTS(
+               SELECT 1 FROM exam_assessment_versions_v2 version
+               WHERE version.assessment_id=assessment.id AND version.state='confirmed'
+             )
+         ),
+         expected_pairs AS (
+           SELECT assessment.id AS assessment_id,student.id AS student_id
+           FROM active_assessments assessment
+           JOIN students student ON student.class_id=?1 AND student.enabled=1
+           WHERE assessment.audience_kind='class'
+           UNION
+           SELECT assessment.id,target.student_id
+           FROM active_assessments assessment
+           JOIN exam_assessment_versions_v2 version
+             ON version.assessment_id=assessment.id AND version.state='confirmed'
+           JOIN exam_assessment_targets_v2 target
+             ON target.assessment_version_id=version.id
+           JOIN students student
+             ON student.id=target.student_id
+            AND student.class_id=?1 AND student.enabled=1
+           WHERE assessment.audience_kind='explicit'
+         )
+         SELECT
+           (SELECT COUNT(*) FROM active_assessments),
+           (SELECT COUNT(*) FROM expected_pairs)",
         [class_id],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    let expected_submission_count = active_assessment_count * enabled_student_count;
 
     let (
         submitted_submission_count,
@@ -256,16 +273,43 @@ fn exam_operations(
         ready_to_publish_attempt_count,
         published_submission_count,
     ): (i64, i64, i64, i64, i64) = conn.query_row(
-        "WITH active_attempts AS (
-           SELECT a.id AS assessment_id,at.id AS attempt_id,at.student_id,at.state
-           FROM exam_assessments_v2 a
-           JOIN exam_assessment_versions_v2 v
-             ON v.assessment_id=a.id AND v.state='confirmed'
-           JOIN exam_attempts_v2 at
-             ON at.assessment_version_id=v.id AND at.state<>'voided'
-           JOIN students s
-             ON s.id=at.student_id AND s.class_id=a.class_id AND s.enabled=1
-           WHERE a.class_id=?1 AND a.state='active'
+        "WITH active_assessments AS (
+           SELECT assessment.id,assessment.audience_kind
+           FROM exam_assessments_v2 assessment
+           WHERE assessment.class_id=?1 AND assessment.state='active'
+             AND EXISTS(
+               SELECT 1 FROM exam_assessment_versions_v2 version
+               WHERE version.assessment_id=assessment.id AND version.state='confirmed'
+             )
+         ),
+         expected_pairs AS (
+           SELECT assessment.id AS assessment_id,student.id AS student_id
+           FROM active_assessments assessment
+           JOIN students student ON student.class_id=?1 AND student.enabled=1
+           WHERE assessment.audience_kind='class'
+           UNION
+           SELECT assessment.id,target.student_id
+           FROM active_assessments assessment
+           JOIN exam_assessment_versions_v2 version
+             ON version.assessment_id=assessment.id AND version.state='confirmed'
+           JOIN exam_assessment_targets_v2 target
+             ON target.assessment_version_id=version.id
+           JOIN students student
+             ON student.id=target.student_id
+            AND student.class_id=?1 AND student.enabled=1
+           WHERE assessment.audience_kind='explicit'
+         ),
+         active_attempts AS (
+           SELECT assessment.id AS assessment_id,attempt.id AS attempt_id,
+                  attempt.student_id,attempt.state
+           FROM active_assessments assessment
+           JOIN exam_assessment_versions_v2 version
+             ON version.assessment_id=assessment.id AND version.state='confirmed'
+           JOIN exam_attempts_v2 attempt
+             ON attempt.assessment_version_id=version.id AND attempt.state<>'voided'
+           JOIN expected_pairs expected
+             ON expected.assessment_id=assessment.id
+            AND expected.student_id=attempt.student_id
          )
          SELECT
            (SELECT COUNT(*) FROM (
@@ -345,7 +389,7 @@ fn exam_operations(
         published_submission_count,
         open_pipeline_issue_count,
         denominator_note:
-            "分母为当前 active 作业数 × 班级启用学生数；M2 尚无截止日期，因此这里不称为“今日作业”。"
+            "普通作业分母为班级启用学生，定向订正只计被冻结的目标学生；M2 尚无截止日期，因此这里不称为“今日作业”。"
                 .into(),
     })
 }
@@ -406,6 +450,7 @@ fn recitation_student_facts(
 
 #[derive(Debug)]
 struct ExamStudentFacts {
+    expected_count: i64,
     submitted_count: i64,
     published_count: i64,
     ingesting_count: i64,
@@ -419,16 +464,40 @@ fn exam_student_facts(
     student_id: i64,
 ) -> CoreResult<ExamStudentFacts> {
     conn.query_row(
-        "WITH active_attempts AS (
-           SELECT a.id AS assessment_id,at.state
-           FROM exam_assessments_v2 a
-           JOIN exam_assessment_versions_v2 v
-             ON v.assessment_id=a.id AND v.state='confirmed'
-           JOIN exam_attempts_v2 at
-             ON at.assessment_version_id=v.id AND at.state<>'voided'
-           WHERE a.class_id=?1 AND a.state='active' AND at.student_id=?2
+        "WITH active_assessments AS (
+           SELECT assessment.id,assessment.audience_kind
+           FROM exam_assessments_v2 assessment
+           WHERE assessment.class_id=?1 AND assessment.state='active'
+             AND EXISTS(
+               SELECT 1 FROM exam_assessment_versions_v2 version
+               WHERE version.assessment_id=assessment.id AND version.state='confirmed'
+             )
+         ),
+         expected_assessments AS (
+           SELECT assessment.id
+           FROM active_assessments assessment
+           WHERE assessment.audience_kind='class'
+              OR EXISTS(
+                SELECT 1
+                FROM exam_assessment_versions_v2 version
+                JOIN exam_assessment_targets_v2 target
+                  ON target.assessment_version_id=version.id
+                 AND target.student_id=?2
+                WHERE version.assessment_id=assessment.id
+                  AND version.state='confirmed'
+              )
+         ),
+         active_attempts AS (
+           SELECT expected.id AS assessment_id,attempt.state
+           FROM expected_assessments expected
+           JOIN exam_assessment_versions_v2 version
+             ON version.assessment_id=expected.id AND version.state='confirmed'
+           JOIN exam_attempts_v2 attempt
+             ON attempt.assessment_version_id=version.id
+            AND attempt.student_id=?2 AND attempt.state<>'voided'
          )
          SELECT
+           (SELECT COUNT(*) FROM expected_assessments),
            (SELECT COUNT(*) FROM (
              SELECT assessment_id FROM active_attempts GROUP BY assessment_id
            )),
@@ -442,11 +511,12 @@ fn exam_student_facts(
         (class_id, student_id),
         |row| {
             Ok(ExamStudentFacts {
-                submitted_count: row.get(0)?,
-                published_count: row.get(1)?,
-                ingesting_count: row.get(2)?,
-                grading_count: row.get(3)?,
-                ready_count: row.get(4)?,
+                expected_count: row.get(0)?,
+                submitted_count: row.get(1)?,
+                published_count: row.get(2)?,
+                ingesting_count: row.get(3)?,
+                grading_count: row.get(4)?,
+                ready_count: row.get(5)?,
             })
         },
     )
@@ -457,7 +527,6 @@ fn student_rows(
     conn: &Connection,
     class_id: i64,
     as_of_date: &str,
-    active_assessment_count: i64,
 ) -> CoreResult<Vec<StudentOperationsRow>> {
     let mut stmt = conn.prepare(
         "SELECT id,student_no,name FROM students
@@ -496,7 +565,7 @@ fn student_rows(
             };
 
             let exam = exam_student_facts(conn, class_id, student_id)?;
-            let exam_status = if active_assessment_count == 0 {
+            let exam_status = if exam.expected_count == 0 {
                 "not_assigned"
             } else if exam.submitted_count == 0 {
                 "not_submitted"
@@ -506,7 +575,7 @@ fn student_rows(
                 "grading"
             } else if exam.ready_count > 0 {
                 "ready_to_publish"
-            } else if exam.published_count == active_assessment_count {
+            } else if exam.published_count == exam.expected_count {
                 "published"
             } else {
                 "partial"
@@ -520,7 +589,7 @@ fn student_rows(
                 recitation_due_task_count: rec.due_count,
                 recitation_confirmed_task_count: rec.confirmed_count,
                 exam_status: exam_status.into(),
-                exam_expected_submission_count: active_assessment_count,
+                exam_expected_submission_count: exam.expected_count,
                 exam_submitted_submission_count: exam.submitted_count,
                 exam_published_submission_count: exam.published_count,
             })
@@ -670,8 +739,8 @@ pub fn class_operations_dashboard(
     require_date(as_of_date)?;
     let class = load_class(conn, class_id)?;
     let recitation = recitation_operations(conn, class_id, as_of_date)?;
-    let exam = exam_operations(conn, class_id, class.enabled_student_count)?;
-    let students = student_rows(conn, class_id, as_of_date, exam.active_assessment_count)?;
+    let exam = exam_operations(conn, class_id)?;
+    let students = student_rows(conn, class_id, as_of_date)?;
     let (recitation_watermark, exam_watermark) = source_watermarks(conn, class_id)?;
     let actions = actions(&recitation, &exam);
     Ok(ClassOperationsDashboard {
@@ -829,6 +898,74 @@ mod tests {
             dashboard.meta.rule_version,
             CLASS_OPERATIONS_DASHBOARD_RULE_VERSION
         );
+    }
+
+    #[test]
+    fn explicit_assessment_counts_only_its_frozen_target_student() {
+        let conn = setup();
+        let hash = "d".repeat(64);
+        conn.execute(
+            "INSERT INTO exam_assessments_v2
+             (id,public_id,title,class_id,assessment_context,evidence_policy,state,
+              audience_kind,created_by,created_at,updated_at)
+             VALUES (4,'assessment-4','小林单题订正',1,'correction','progress_only','draft',
+                     'explicit','teacher','2026-07-16T11:00:00Z','2026-07-16T11:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO exam_assessment_versions_v2
+             (id,public_id,assessment_id,revision,item_set_hash,state,created_at,
+              confirmed_by,confirmed_at)
+             VALUES (4,'version-4',4,1,?1,'confirmed','2026-07-16T11:00:00Z',
+                     'teacher','2026-07-16T11:01:00Z')",
+            [&hash],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO exam_assessment_targets_v2
+             (public_id,assessment_version_id,student_id,created_by,created_at)
+             VALUES ('target-4',4,1,'teacher','2026-07-16T11:01:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE exam_assessments_v2 SET state='active' WHERE id=4",
+            [],
+        )
+        .unwrap();
+
+        let dashboard = class_operations_dashboard(&conn, 1, "2026-07-16").unwrap();
+        assert_eq!(dashboard.exam.active_assessment_count, 2);
+        assert_eq!(dashboard.exam.expected_submission_count, 3);
+        assert_eq!(dashboard.exam.submitted_submission_count, 1);
+        assert_eq!(dashboard.exam.missing_submission_count, 2);
+        assert_eq!(dashboard.students[0].exam_expected_submission_count, 2);
+        assert_eq!(dashboard.students[1].exam_expected_submission_count, 1);
+        assert!(dashboard.exam.denominator_note.contains("定向订正"));
+
+        assert!(conn
+            .execute(
+                "INSERT INTO exam_attempts_v2
+                 (public_id,assessment_version_id,student_id,attempt_no,source_kind,
+                  attempt_kind,state,created_at,updated_at)
+                 VALUES ('wrong-target',4,2,1,'image','correction','ingesting',
+                         '2026-07-16T11:02:00Z','2026-07-16T11:02:00Z')",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE exam_assessment_targets_v2 SET student_id=2 WHERE public_id='target-4'",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "DELETE FROM exam_assessment_targets_v2 WHERE public_id='target-4'",
+                [],
+            )
+            .is_err());
     }
 
     #[test]

@@ -26,7 +26,7 @@ window.__TAURI_INTERNALS__ = {
       if (classId === 2) {
         return {
           meta: {
-            schema_version: 1, rule_version: "m6.1-operations-v1",
+            schema_version: 2, rule_version: "m6.1-operations-v2",
             calculated_at: "2026-07-16T12:00:00Z", as_of_date: args.asOfDate,
             recitation_watermark: null, exam_watermark: null
           },
@@ -57,7 +57,7 @@ window.__TAURI_INTERNALS__ = {
       }
       return {
         meta: {
-          schema_version: 1, rule_version: "m6.1-operations-v1",
+          schema_version: 2, rule_version: "m6.1-operations-v2",
           calculated_at: "2026-07-16T12:00:00Z", as_of_date: args.asOfDate,
           recitation_watermark: "2026-07-16T11:30:00Z", exam_watermark: "2026-07-16T11:45:00Z"
         },

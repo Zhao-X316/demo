@@ -454,6 +454,11 @@ pub fn confirm_grouping_quality(
 
         let attempt_no = next_attempt_no(&tx, assessment_version_id, group.student_id)?;
         let attempt_public_id = ids::new_public_id();
+        let attempt_kind = super::assessment::attempt_kind_for_assessment_version(
+            &tx,
+            assessment_version_id,
+            attempt_no,
+        )?;
         tx.execute(
             "INSERT INTO exam_attempts_v2
              (public_id,assessment_version_id,student_id,attempt_no,source_kind,
@@ -464,7 +469,7 @@ pub fn confirm_grouping_quality(
                 assessment_version_id,
                 group.student_id,
                 attempt_no,
-                if attempt_no == 1 { "first" } else { "retry" },
+                attempt_kind,
                 &now,
             ),
         )?;

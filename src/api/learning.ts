@@ -37,6 +37,30 @@ export interface ErrorCauseReview {
   confirmed_at: string;
 }
 
+export type CorrectionAssignmentStatus =
+  | "waiting_upload"
+  | "in_progress"
+  | "ready_to_publish"
+  | "published";
+
+export interface CorrectionAssignment {
+  public_id: string;
+  class_id: number;
+  student_id: number;
+  student_no: string;
+  student_name: string;
+  question_version_public_id: string;
+  source_grade_decision_public_id: string;
+  source_publication_public_id: string;
+  assessment_public_id: string;
+  assessment_version_public_id: string;
+  assessment_title: string;
+  status: CorrectionAssignmentStatus;
+  latest_attempt_public_id: string | null;
+  created_by: string;
+  created_at: string;
+}
+
 export type WrongbookStatus = "needs_correction" | "corrected_once" | "rechecked_correct";
 
 export interface WrongbookQuestion {
@@ -62,6 +86,7 @@ export interface WrongbookQuestion {
   latest_error_publication_public_id: string;
   cause_options: ErrorCauseOption[];
   cause_review: ErrorCauseReview | null;
+  correction_assignment: CorrectionAssignment | null;
   knowledge_nodes: NamedReference[];
   ability_dimensions: NamedReference[];
 }
@@ -98,3 +123,14 @@ export interface ConfirmWrongbookErrorCausesInput {
 
 export const confirmWrongbookErrorCauses = (input: ConfirmWrongbookErrorCausesInput) =>
   call<ErrorCauseReview>("confirm_wrongbook_error_causes", { input });
+
+export interface CreateWrongbookCorrectionInput {
+  classId: number;
+  studentId: number;
+  questionVersionPublicId: string;
+  sourceGradeDecisionPublicId: string;
+  sourcePublicationPublicId: string;
+}
+
+export const createWrongbookSingleCorrection = (input: CreateWrongbookCorrectionInput) =>
+  call<CorrectionAssignment>("create_wrongbook_single_correction", { input });

@@ -21,7 +21,7 @@ window.__TAURI_INTERNALS__ = {
       const classId = Number(args.classId);
       if (classId === 2) {
         return {
-          meta: { schema_version: 2, rule_version: "m3-published-wrong-facts-v2",
+          meta: { schema_version: 3, rule_version: "m3-published-wrong-facts-v3",
             calculated_at: "2026-07-16T12:00:00Z", exam_watermark: null },
           class: { id: 2, name: "八年级二班", term: "2026秋",
             textbook: "中国历史八上", enabled_student_count: 1 },
@@ -35,7 +35,7 @@ window.__TAURI_INTERNALS__ = {
         };
       }
       return {
-        meta: { schema_version: 2, rule_version: "m3-published-wrong-facts-v2",
+        meta: { schema_version: 3, rule_version: "m3-published-wrong-facts-v3",
           calculated_at: "2026-07-16T12:00:00Z", exam_watermark: "2026-07-16T11:40:00Z" },
         class: { id: 1, name: "八年级一班", term: "2026秋",
           textbook: "中国历史八上", enabled_student_count: 3 },
@@ -65,6 +65,7 @@ window.__TAURI_INTERNALS__ = {
               { code: "other", label: "其他", description: "老师补充" }
             ],
             cause_review: null,
+            correction_assignment: null,
             knowledge_nodes: [{ public_id: "k-1", title: "洋务运动失败原因" }],
             ability_dimensions: [{ public_id: "a-1", title: "因果分析" }]
           },
@@ -86,6 +87,18 @@ window.__TAURI_INTERNALS__ = {
               { code: "other", label: "其他", description: "老师补充" }
             ],
             cause_review: null,
+            correction_assignment: {
+              public_id: "correction-2", class_id: 1, student_id: 2,
+              student_no: "02", student_name: "小周",
+              question_version_public_id: "qv-2",
+              source_grade_decision_public_id: "decision-2",
+              source_publication_public_id: "publication-2",
+              assessment_public_id: "assessment-correction-2",
+              assessment_version_public_id: "assessment-version-correction-2",
+              assessment_title: "02号 小周 · 《南京条约》签订于____年。 · 订正",
+              status: "published", latest_attempt_public_id: "attempt-correction-2",
+              created_by: "local_teacher", created_at: "2026-07-14T10:00:00Z"
+            },
             knowledge_nodes: [], ability_dimensions: []
           },
           {
@@ -111,6 +124,7 @@ window.__TAURI_INTERNALS__ = {
               cause_codes: ["concept_confusion"], teacher_note: null,
               confirmed_by: "local_teacher", confirmed_at: "2026-07-16T10:00:00Z"
             },
+            correction_assignment: null,
             knowledge_nodes: [{ public_id: "k-2", title: "辛亥革命局限" }],
             ability_dimensions: []
           }
@@ -129,9 +143,24 @@ window.__TAURI_INTERNALS__ = {
         confirmed_at: "2026-07-16T12:10:00Z"
       };
     }
+    if (cmd === "create_wrongbook_single_correction") {
+      const input = args.input;
+      return {
+        public_id: "correction-new", class_id: input.classId, student_id: input.studentId,
+        student_no: "01", student_name: "小林",
+        question_version_public_id: input.questionVersionPublicId,
+        source_grade_decision_public_id: input.sourceGradeDecisionPublicId,
+        source_publication_public_id: input.sourcePublicationPublicId,
+        assessment_public_id: "assessment-correction-new",
+        assessment_version_public_id: "assessment-version-correction-new",
+        assessment_title: "01号 小林 · 洋务运动失败的根本原因是？ · 订正",
+        status: "waiting_upload", latest_attempt_public_id: null,
+        created_by: "local_teacher", created_at: "2026-07-16T12:11:00Z"
+      };
+    }
     if (cmd === "class_operations_dashboard") {
       return {
-        meta: { schema_version: 1, rule_version: "m6.1-operations-v1",
+        meta: { schema_version: 2, rule_version: "m6.1-operations-v2",
           calculated_at: "2026-07-16T12:00:00Z", as_of_date: args.asOfDate,
           recitation_watermark: null, exam_watermark: null },
         class: { id: 1, name: "八年级一班", term: "2026秋",
@@ -200,6 +229,23 @@ def test_learning_insights(base_url: str) -> None:
         assert len(cause_calls) == 1
         assert cause_calls[0]["args"]["input"]["causeCodes"] == ["fact_error", "concept_confusion"]
         assert cause_calls[0]["args"]["input"]["gradeDecisionPublicId"] == "decision-1"
+
+        first_item.get_by_role("button", name="建立订正").click()
+        expect(first_item.get_by_text("不会修改原成绩", exact=False)).to_be_visible()
+        first_item.get_by_role("button", name="确认建立").click()
+        expect(first_item.get_by_text("订正已建立 · 等待上传", exact=True)).to_be_visible()
+        expect(first_item.get_by_role("button", name="去上传批改")).to_be_visible()
+        correction_calls = page.evaluate(
+            "() => window.__learningCalls.filter((item) => "
+            "item.cmd === 'create_wrongbook_single_correction')"
+        )
+        assert len(correction_calls) == 1
+        correction_input = correction_calls[0]["args"]["input"]
+        assert correction_input["classId"] == 1
+        assert correction_input["studentId"] == 1
+        assert correction_input["questionVersionPublicId"] == "qv-1"
+        assert correction_input["sourceGradeDecisionPublicId"] == "decision-1"
+        assert correction_input["sourcePublicationPublicId"] == "publication-1"
         page.screenshot(path="/tmp/jiaofu-learning-insights.png", full_page=True)
 
         page.get_by_label("筛选订正状态").select_option("needs_correction")

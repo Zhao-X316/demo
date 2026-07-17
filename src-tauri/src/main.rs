@@ -95,6 +95,7 @@ fn main() {
             exam_commands::class_operations_dashboard,
             learning_commands::class_wrongbook_dashboard,
             learning_commands::confirm_wrongbook_error_causes,
+            learning_commands::create_wrongbook_single_correction,
             exam_commands::kp_list,
             exam_commands::kp_create,
             exam_commands::kp_rename,

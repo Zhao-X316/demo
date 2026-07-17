@@ -57,6 +57,20 @@ pub struct NewAssessmentItem<'a> {
     pub presentation_snapshot_json: &'a str,
 }
 
+pub struct NewSingleItemCorrectionAssessment<'a> {
+    pub title: &'a str,
+    pub class_id: i64,
+    pub target_student_id: i64,
+    pub created_by: &'a str,
+    pub question_version_id: i64,
+    pub answer_key_version_id: i64,
+    pub rubric_version_id: i64,
+    pub link_set_id: i64,
+    pub score: f64,
+    pub option_order_json: Option<&'a str>,
+    pub presentation_snapshot_json: &'a str,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attempt {
     pub id: i64,
@@ -188,7 +202,6 @@ pub fn create_assessment_draft(
     if !class_exists {
         return Err(CoreError::NotFound(format!("class#{}", input.class_id)));
     }
-
     let assessment_public_id = ids::new_public_id();
     let assessment_version_public_id = ids::new_public_id();
     let now = time::utc_now_rfc3339();
@@ -256,27 +269,14 @@ fn get_item(conn: &Connection, id: i64) -> CoreResult<Option<AssessmentItem>> {
         .optional()?)
 }
 
-pub fn add_assessment_item(
+fn validate_assessment_item_refs(
     conn: &Connection,
-    assessment_version_id: i64,
-    input: &NewAssessmentItem<'_>,
-) -> CoreResult<AssessmentItem> {
-    validate_schema_object(input.presentation_snapshot_json, "题目呈现快照")?;
-    if let Some(json) = input.option_order_json {
-        validate_schema_object(json, "选项顺序")?;
-    }
-    if input.order_index < 0 || !input.score.is_finite() || input.score <= 0.0 {
-        return Err(CoreError::Invalid("题目顺序/分值非法".into()));
-    }
-    let draft_exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM exam_assessment_versions_v2
-         WHERE id=?1 AND state='draft')",
-        [assessment_version_id],
-        |row| row.get(0),
-    )?;
-    if !draft_exists {
-        return Err(CoreError::Invalid("只能向 draft 作业版本添加题目".into()));
-    }
+    question_version_id: i64,
+    answer_key_version_id: i64,
+    rubric_version_id: i64,
+    link_set_id: i64,
+    score: f64,
+) -> CoreResult<()> {
     let refs: Option<(String, String, f64, String, f64, String)> = conn
         .query_row(
             "SELECT q.quality_level, q.state, q.max_score,
@@ -287,10 +287,10 @@ pub fn add_assessment_item(
              JOIN k1_link_sets l ON l.id=?4 AND l.question_version_id=q.id
              WHERE q.id=?1",
             (
-                input.question_version_id,
-                input.answer_key_version_id,
-                input.rubric_version_id,
-                input.link_set_id,
+                question_version_id,
+                answer_key_version_id,
+                rubric_version_id,
+                link_set_id,
             ),
             |row| {
                 Ok((
@@ -318,13 +318,43 @@ pub fn add_assessment_item(
             "自动批改作业只能引用已发布 L2+ 题目及已确认答案/rubric".into(),
         ));
     }
-    if (input.score - question_score).abs() > 0.000_001
-        || (input.score - rubric_score).abs() > 0.000_001
-    {
+    if (score - question_score).abs() > 0.000_001 || (score - rubric_score).abs() > 0.000_001 {
         return Err(CoreError::Invalid(
             "B0 暂不做分值缩放，作业分值必须等于题目/rubric 总分".into(),
         ));
     }
+    Ok(())
+}
+
+pub fn add_assessment_item(
+    conn: &Connection,
+    assessment_version_id: i64,
+    input: &NewAssessmentItem<'_>,
+) -> CoreResult<AssessmentItem> {
+    validate_schema_object(input.presentation_snapshot_json, "题目呈现快照")?;
+    if let Some(json) = input.option_order_json {
+        validate_schema_object(json, "选项顺序")?;
+    }
+    if input.order_index < 0 || !input.score.is_finite() || input.score <= 0.0 {
+        return Err(CoreError::Invalid("题目顺序/分值非法".into()));
+    }
+    let draft_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM exam_assessment_versions_v2
+         WHERE id=?1 AND state='draft')",
+        [assessment_version_id],
+        |row| row.get(0),
+    )?;
+    if !draft_exists {
+        return Err(CoreError::Invalid("只能向 draft 作业版本添加题目".into()));
+    }
+    validate_assessment_item_refs(
+        conn,
+        input.question_version_id,
+        input.answer_key_version_id,
+        input.rubric_version_id,
+        input.link_set_id,
+        input.score,
+    )?;
 
     let public_id = ids::new_public_id();
     let now = time::utc_now_rfc3339();
@@ -436,6 +466,137 @@ pub fn confirm_assessment_version(
     Ok(hash)
 }
 
+/// 在调用方已经持有的事务中创建一个固定版本的单题订正作业。
+///
+/// M3 负责确认“哪位学生需要订正哪次错误”；M2 仍负责校验并写入
+/// assessment/version/item。此函数不自行开启事务，避免跨模块编排留下半套状态。
+pub fn create_confirmed_single_item_correction_in_transaction(
+    conn: &Connection,
+    input: &NewSingleItemCorrectionAssessment<'_>,
+) -> CoreResult<AssessmentDraft> {
+    required(input.title, "订正作业名称")?;
+    required(input.created_by, "创建人")?;
+    validate_schema_object(input.presentation_snapshot_json, "题目呈现快照")?;
+    if let Some(json) = input.option_order_json {
+        validate_schema_object(json, "选项顺序")?;
+    }
+    if !input.score.is_finite() || input.score <= 0.0 {
+        return Err(CoreError::Invalid("订正题目分值非法".into()));
+    }
+    let class_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM classes WHERE id=?1)",
+        [input.class_id],
+        |row| row.get(0),
+    )?;
+    if !class_exists {
+        return Err(CoreError::NotFound(format!("class#{}", input.class_id)));
+    }
+    let target_exists: bool = conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM students
+           WHERE id=?1 AND class_id=?2 AND enabled=1
+         )",
+        (input.target_student_id, input.class_id),
+        |row| row.get(0),
+    )?;
+    if !target_exists {
+        return Err(CoreError::Invalid("订正目标必须是该班启用学生".into()));
+    }
+    validate_assessment_item_refs(
+        conn,
+        input.question_version_id,
+        input.answer_key_version_id,
+        input.rubric_version_id,
+        input.link_set_id,
+        input.score,
+    )?;
+
+    let now = time::utc_now_rfc3339();
+    let assessment_public_id = ids::new_public_id();
+    conn.execute(
+        "INSERT INTO exam_assessments_v2
+         (public_id,title,class_id,assessment_context,evidence_policy,state,audience_kind,
+          created_by,created_at,updated_at)
+         VALUES (?1,?2,?3,'correction','progress_only','draft','explicit',?4,?5,?5)",
+        (
+            &assessment_public_id,
+            input.title.trim(),
+            input.class_id,
+            input.created_by.trim(),
+            &now,
+        ),
+    )?;
+    let assessment_id = conn.last_insert_rowid();
+    let assessment_version_public_id = ids::new_public_id();
+    conn.execute(
+        "INSERT INTO exam_assessment_versions_v2
+         (public_id,assessment_id,revision,template_version,state,created_at)
+         VALUES (?1,?2,1,'m3-single-correction-v1','draft',?3)",
+        (&assessment_version_public_id, assessment_id, &now),
+    )?;
+    let assessment_version_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO exam_assessment_targets_v2
+         (public_id,assessment_version_id,student_id,created_by,created_at)
+         VALUES (?1,?2,?3,?4,?5)",
+        (
+            ids::new_public_id(),
+            assessment_version_id,
+            input.target_student_id,
+            input.created_by.trim(),
+            &now,
+        ),
+    )?;
+    let item = add_assessment_item(
+        conn,
+        assessment_version_id,
+        &NewAssessmentItem {
+            question_version_id: input.question_version_id,
+            answer_key_version_id: input.answer_key_version_id,
+            rubric_version_id: input.rubric_version_id,
+            link_set_id: input.link_set_id,
+            order_index: 0,
+            score: input.score,
+            option_order_json: input.option_order_json,
+            presentation_snapshot_json: input.presentation_snapshot_json,
+        },
+    )?;
+    let hash_input = vec![ItemHashInput {
+        item_id: item.id,
+        question_version_id: item.question_version_id,
+        answer_key_version_id: item.answer_key_version_id,
+        rubric_version_id: item.rubric_version_id,
+        link_set_id: item.link_set_id,
+        order_index: item.order_index,
+        score_millis: (item.score * 1000.0).round() as i64,
+    }];
+    let bytes = serde_json::to_vec(&hash_input)
+        .map_err(|error| CoreError::Parse(format!("item set hash 序列化失败：{error}")))?;
+    let item_set_hash = hashing::sha256_hex(&bytes);
+    conn.execute(
+        "UPDATE exam_assessment_versions_v2
+         SET item_set_hash=?1,state='confirmed',confirmed_by=?2,confirmed_at=?3
+         WHERE id=?4 AND state='draft'",
+        (
+            &item_set_hash,
+            input.created_by.trim(),
+            &now,
+            assessment_version_id,
+        ),
+    )?;
+    conn.execute(
+        "UPDATE exam_assessments_v2 SET state='active',updated_at=?1
+         WHERE id=?2 AND state='draft'",
+        (&now, assessment_id),
+    )?;
+    Ok(AssessmentDraft {
+        assessment_id,
+        assessment_public_id,
+        assessment_version_id,
+        assessment_version_public_id,
+    })
+}
+
 fn get_attempt(conn: &Connection, id: i64) -> CoreResult<Option<Attempt>> {
     Ok(conn
         .query_row(
@@ -458,6 +619,28 @@ fn get_attempt(conn: &Connection, id: i64) -> CoreResult<Option<Attempt>> {
             },
         )
         .optional()?)
+}
+
+pub(crate) fn attempt_kind_for_assessment_version(
+    conn: &Connection,
+    assessment_version_id: i64,
+    attempt_no: i64,
+) -> CoreResult<&'static str> {
+    let context: String = conn.query_row(
+        "SELECT assessment.assessment_context
+         FROM exam_assessment_versions_v2 version
+         JOIN exam_assessments_v2 assessment ON assessment.id=version.assessment_id
+         WHERE version.id=?1",
+        [assessment_version_id],
+        |row| row.get(0),
+    )?;
+    if context == "correction" {
+        Ok("correction")
+    } else if attempt_no == 1 {
+        Ok("first")
+    } else {
+        Ok("retry")
+    }
 }
 
 pub fn create_attempt(
@@ -1660,6 +1843,68 @@ mod tests {
             item_id: item.id,
             attempt_id: attempt.id,
         }
+    }
+
+    #[test]
+    fn correction_context_forces_correction_attempt_kind() {
+        let fixture = setup();
+        assert_eq!(
+            attempt_kind_for_assessment_version(&fixture.conn, fixture.version_id, 1).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            attempt_kind_for_assessment_version(&fixture.conn, fixture.version_id, 2).unwrap(),
+            "retry"
+        );
+        let refs: (i64, i64, i64, i64, f64, Option<String>, String) = fixture
+            .conn
+            .query_row(
+                "SELECT question_version_id,answer_key_version_id,rubric_version_id,
+                        link_set_id,score,option_order_json,presentation_snapshot_json
+                 FROM exam_assessment_items_v2 WHERE id=?1",
+                [fixture.item_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let transaction = fixture.conn.unchecked_transaction().unwrap();
+        let correction = create_confirmed_single_item_correction_in_transaction(
+            &transaction,
+            &NewSingleItemCorrectionAssessment {
+                title: "小林 · 单题订正",
+                class_id: 1,
+                target_student_id: 1,
+                created_by: "teacher",
+                question_version_id: refs.0,
+                answer_key_version_id: refs.1,
+                rubric_version_id: refs.2,
+                link_set_id: refs.3,
+                score: refs.4,
+                option_order_json: refs.5.as_deref(),
+                presentation_snapshot_json: &refs.6,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            attempt_kind_for_assessment_version(&transaction, correction.assessment_version_id, 1)
+                .unwrap(),
+            "correction"
+        );
+        assert_eq!(
+            attempt_kind_for_assessment_version(&transaction, correction.assessment_version_id, 2)
+                .unwrap(),
+            "correction"
+        );
+        transaction.rollback().unwrap();
     }
 
     fn create_subjective_k1(conn: &Connection, question_type: &str) -> (i64, i64, i64, String) {

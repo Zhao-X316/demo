@@ -11,12 +11,13 @@ use serde::{Deserialize, Serialize};
 use suite_core::domain::time;
 use suite_core::error::{CoreError, CoreResult};
 
+use crate::correction::{load_for_source_decision, CorrectionAssignment};
 use crate::error_cause::{
     cause_options, load_review_for_decision_public_id, ErrorCauseOption, ErrorCauseReview,
 };
 
-pub const CLASS_WRONGBOOK_SCHEMA_VERSION: i64 = 2;
-pub const CLASS_WRONGBOOK_RULE_VERSION: &str = "m3-published-wrong-facts-v2";
+pub const CLASS_WRONGBOOK_SCHEMA_VERSION: i64 = 3;
+pub const CLASS_WRONGBOOK_RULE_VERSION: &str = "m3-published-wrong-facts-v3";
 const FULL_SCORE_EPSILON: f64 = 0.000_001;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +67,7 @@ pub struct WrongbookQuestion {
     pub latest_error_publication_public_id: String,
     pub cause_options: Vec<ErrorCauseOption>,
     pub cause_review: Option<ErrorCauseReview>,
+    pub correction_assignment: Option<CorrectionAssignment>,
     pub knowledge_nodes: Vec<NamedReference>,
     pub ability_dimensions: Vec<NamedReference>,
 }
@@ -370,6 +372,10 @@ pub fn class_wrongbook_dashboard(
             latest_error_publication_public_id: latest_error.publication_public_id.clone(),
             cause_options: cause_options(&latest_error.question_type),
             cause_review: load_review_for_decision_public_id(
+                conn,
+                &latest_error.grade_decision_public_id,
+            )?,
+            correction_assignment: load_for_source_decision(
                 conn,
                 &latest_error.grade_decision_public_id,
             )?,
@@ -1069,5 +1075,285 @@ mod tests {
             .conn
             .execute("DELETE FROM wb_error_cause_items", [])
             .is_err());
+    }
+
+    #[test]
+    fn single_correction_is_atomic_idempotent_and_does_not_precreate_attempt() {
+        use crate::correction::{create_single_correction, CreateCorrectionInput};
+
+        let mut fixture = Fixture::new();
+        let student_id = fixture.students[0];
+        let (decision_public_id, publication_public_id) =
+            fixture.publish_response(student_id, 1, "first", 0.0, "2026-07-01T08:00:00Z");
+        let source_attempt_count: i64 = fixture
+            .conn
+            .query_row("SELECT COUNT(*) FROM exam_attempts_v2", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let input = CreateCorrectionInput {
+            class_id: fixture.class_one,
+            student_id,
+            question_version_public_id: "question-version-1",
+            source_grade_decision_public_id: &decision_public_id,
+            source_publication_public_id: &publication_public_id,
+            created_by: "teacher",
+        };
+
+        let created = create_single_correction(&mut fixture.conn, &input).unwrap();
+        let repeated = create_single_correction(&mut fixture.conn, &input).unwrap();
+        assert_eq!(created, repeated);
+        assert_eq!(created.status, "waiting_upload");
+        assert_eq!(created.latest_attempt_public_id, None);
+        assert_eq!(
+            fixture
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM wb_correction_assignments",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            fixture
+                .conn
+                .query_row(
+                    "SELECT COUNT(*)
+                     FROM exam_assessment_targets_v2 target
+                     JOIN exam_assessment_versions_v2 version
+                       ON version.id=target.assessment_version_id
+                     WHERE version.public_id=?1 AND target.student_id=?2",
+                    (&created.assessment_version_public_id, student_id),
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            fixture
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM exam_assessments_v2
+                     WHERE assessment_context='correction'
+                       AND evidence_policy='progress_only' AND state='active'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            fixture
+                .conn
+                .query_row(
+                    "SELECT COUNT(*)
+                     FROM exam_assessment_versions_v2 version
+                     JOIN exam_assessment_items_v2 item
+                       ON item.assessment_version_id=version.id AND item.state='active'
+                     JOIN k1_question_versions question
+                       ON question.id=item.question_version_id
+                     WHERE version.public_id=?1 AND version.state='confirmed'
+                       AND question.public_id='question-version-1'",
+                    [&created.assessment_version_public_id],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            fixture
+                .conn
+                .query_row("SELECT COUNT(*) FROM exam_attempts_v2", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            source_attempt_count
+        );
+        assert!(fixture
+            .conn
+            .execute(
+                "UPDATE wb_correction_assignments SET created_by='other' WHERE public_id=?1",
+                [&created.public_id],
+            )
+            .is_err());
+        assert!(fixture
+            .conn
+            .execute(
+                "DELETE FROM wb_correction_assignments WHERE public_id=?1",
+                [&created.public_id],
+            )
+            .is_err());
+
+        let dashboard = class_wrongbook_dashboard(&fixture.conn, fixture.class_one).unwrap();
+        assert_eq!(
+            dashboard.items[0].correction_assignment.as_ref().unwrap(),
+            &created
+        );
+
+        let mismatched = CreateCorrectionInput {
+            student_id: fixture.students[1],
+            ..input
+        };
+        assert!(matches!(
+            create_single_correction(&mut fixture.conn, &mismatched),
+            Err(CoreError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn correction_assignment_failure_rolls_back_m2_assessment_and_target() {
+        use crate::correction::{create_single_correction, CreateCorrectionInput};
+
+        let mut fixture = Fixture::new();
+        let student_id = fixture.students[0];
+        let (decision_public_id, publication_public_id) =
+            fixture.publish_response(student_id, 1, "first", 0.0, "2026-07-01T08:00:00Z");
+        fixture
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER fail_correction_assignment
+                 BEFORE INSERT ON wb_correction_assignments
+                 BEGIN SELECT RAISE(ABORT,'injected correction assignment failure'); END;",
+            )
+            .unwrap();
+        let result = create_single_correction(
+            &mut fixture.conn,
+            &CreateCorrectionInput {
+                class_id: fixture.class_one,
+                student_id,
+                question_version_public_id: "question-version-1",
+                source_grade_decision_public_id: &decision_public_id,
+                source_publication_public_id: &publication_public_id,
+                created_by: "teacher",
+            },
+        );
+        assert!(result.is_err());
+        let counts: (i64, i64, i64) = fixture
+            .conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM exam_assessments_v2
+                    WHERE assessment_context='correction'),
+                   (SELECT COUNT(*) FROM exam_assessment_targets_v2),
+                   (SELECT COUNT(*) FROM wb_correction_assignments)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (0, 0, 0));
+    }
+
+    #[test]
+    fn stale_correction_source_rolls_back_assessment_and_assignment() {
+        use crate::correction::{create_single_correction, CreateCorrectionInput};
+
+        let mut fixture = Fixture::new();
+        let student_id = fixture.students[0];
+        let (old_decision, old_publication) =
+            fixture.publish_response(student_id, 1, "first", 0.0, "2026-07-01T08:00:00Z");
+        fixture.publish_response(student_id, 2, "correction", 2.0, "2026-07-02T08:00:00Z");
+        let result = create_single_correction(
+            &mut fixture.conn,
+            &CreateCorrectionInput {
+                class_id: fixture.class_one,
+                student_id,
+                question_version_public_id: "question-version-1",
+                source_grade_decision_public_id: &old_decision,
+                source_publication_public_id: &old_publication,
+                created_by: "teacher",
+            },
+        );
+        assert!(matches!(result, Err(CoreError::Invalid(_))));
+        assert_eq!(
+            fixture
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM wb_correction_assignments",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            fixture
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM exam_assessments_v2
+                     WHERE assessment_context='correction'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn correction_attempt_guard_accepts_only_target_student_and_kind() {
+        use crate::correction::{
+            create_single_correction, load_for_source_decision, CreateCorrectionInput,
+        };
+
+        let mut fixture = Fixture::new();
+        let student_id = fixture.students[0];
+        let (decision_public_id, publication_public_id) =
+            fixture.publish_response(student_id, 1, "first", 0.0, "2026-07-01T08:00:00Z");
+        let created = create_single_correction(
+            &mut fixture.conn,
+            &CreateCorrectionInput {
+                class_id: fixture.class_one,
+                student_id,
+                question_version_public_id: "question-version-1",
+                source_grade_decision_public_id: &decision_public_id,
+                source_publication_public_id: &publication_public_id,
+                created_by: "teacher",
+            },
+        )
+        .unwrap();
+        let version_id: i64 = fixture
+            .conn
+            .query_row(
+                "SELECT id FROM exam_assessment_versions_v2 WHERE public_id=?1",
+                [&created.assessment_version_public_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let insert_attempt =
+            |conn: &Connection, public_id: &str, target_student_id: i64, attempt_kind: &str| {
+                conn.execute(
+                    "INSERT INTO exam_attempts_v2
+                 (public_id,assessment_version_id,student_id,attempt_no,source_kind,
+                  attempt_kind,state,created_at,updated_at)
+                 VALUES (?1,?2,?3,1,'image',?4,'ingesting',?5,?5)",
+                    (public_id, version_id, target_student_id, attempt_kind, NOW),
+                )
+            };
+
+        assert!(insert_attempt(
+            &fixture.conn,
+            "wrong-student-attempt",
+            fixture.students[1],
+            "correction"
+        )
+        .is_err());
+        assert!(insert_attempt(&fixture.conn, "wrong-kind-attempt", student_id, "retry").is_err());
+        insert_attempt(
+            &fixture.conn,
+            "target-correction-attempt",
+            student_id,
+            "correction",
+        )
+        .unwrap();
+
+        let loaded = load_for_source_decision(&fixture.conn, &decision_public_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.status, "in_progress");
+        assert_eq!(
+            loaded.latest_attempt_public_id.as_deref(),
+            Some("target-correction-attempt")
+        );
     }
 }
