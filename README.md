@@ -92,11 +92,22 @@ cargo test --manifest-path src-tauri/Cargo.toml --example t6_objective_fixture
 # 答题卡主观题独立验收包（填空 + 简答；独立 bundle id）
 npm run acceptance:subjective:build
 cargo test --manifest-path src-tauri/Cargo.toml --example t6_subjective_fixture
+
+# M1.1 结构化背诵独立验收包（真实可播放 WAV + 风险队列；独立 bundle id）
+npm run acceptance:recitation:build
+cargo test --manifest-path src-tauri/Cargo.toml --example m1_structured_fixture
 ```
 
 当前主观题夹具 schema v2 覆盖 2 名学生 × 3 题（单槽填空、多槽填空、双评分点简答），
 可由服务级生命周期测试验证逐项终审、成绩发布和学习证据落账。真 `.app` 验收仍需在隔离
 `HOME` 下完成界面操作与重启回读，不能用上述命令通过替代 GUI 验收。
+
+M1.1 夹具只允许写入 `jiaofu-recitation-fixture-*` 隔离根下、末级为
+`com.jiaofu.suite.recitationfixture` 的全新目录。它准备“事实矛盾 → 评分点遗漏 →
+机器通过”三条待终审记录，以及一篇尚未设置评分点的内容；录音是归档目录中的有效
+16 kHz 单声道 WAV。夹具测试和 `seeded` 校验只证明数据、音频与状态合同成立，仍须
+在隔离 `HOME` 下用真 `.app` 回归评分点设置、区间跳播、逐点评审、快捷键、自动下一条
+和重启持久化。
 
 ## 安全红线
 

@@ -1,0 +1,16 @@
+{
+  "productName": "JiaofuSuiteRecitationFixture",
+  "identifier": "com.jiaofu.suite.recitationfixture",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "教辅系统 · M1.1 背诵隔离验收",
+        "width": 1280,
+        "height": 860,
+        "minWidth": 980,
+        "minHeight": 680
+      }
+    ]
+  }
+}
