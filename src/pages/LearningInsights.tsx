@@ -2,12 +2,20 @@ import { useEffect, useMemo, useState } from "react";
 
 import {
   ClassWrongbookDashboard,
+  confirmWrongbookReinforcement,
   confirmWrongbookErrorCauses,
   CorrectionAssignment,
   CorrectionAssignmentStatus,
   createWrongbookSingleCorrection,
   ErrorCauseReview,
   loadClassWrongbookDashboard,
+  loadWrongbookSchedulePolicy,
+  previewWrongbookReinforcement,
+  ReinforcementAssignment,
+  ReinforcementAssignmentStatus,
+  ReinforcementSuggestion,
+  SchedulePolicy,
+  updateWrongbookSchedulePolicy,
   WrongbookQuestion,
   WrongbookStatus,
 } from "../api/learning";
@@ -47,6 +55,13 @@ const CORRECTION_STATUS_LABELS: Record<CorrectionAssignmentStatus, string> = {
   in_progress: "订正处理中",
   ready_to_publish: "订正待发布",
   published: "订正已发布",
+};
+
+const REINFORCEMENT_STATUS_LABELS: Record<ReinforcementAssignmentStatus, string> = {
+  scheduled: "巩固已安排",
+  in_progress: "巩固处理中",
+  ready_to_publish: "巩固待发布",
+  published: "巩固已发布",
 };
 
 function statusClass(status: WrongbookStatus) {
@@ -266,17 +281,248 @@ function CorrectionAction({
   );
 }
 
+function ReinforcementAction({
+  classId,
+  item,
+  onCreated,
+  onOpenExam,
+}: {
+  classId: number;
+  item: WrongbookQuestion;
+  onCreated: (assignment: ReinforcementAssignment) => void;
+  onOpenExam: () => void;
+}) {
+  const [preview, setPreview] = useState<ReinforcementSuggestion | null>(null);
+  const [loadingPreview, setLoadingPreview] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [actionError, setActionError] = useState("");
+
+  if (item.reinforcement_assignment) {
+    const assignment = item.reinforcement_assignment;
+    return (
+      <div className="wrongbook-reinforcement-summary">
+        <div>
+          <span>{REINFORCEMENT_STATUS_LABELS[assignment.status]} · {assignment.due_date}</span>
+          <b>{assignment.priority === "high" ? "重复出错，已按高优先级安排" : "跨日期再次作答"}</b>
+        </div>
+        <button onClick={onOpenExam}>
+          {assignment.status === "published" ? "查看批改" : "去上传批改"}
+        </button>
+      </div>
+    );
+  }
+  if (item.status !== "corrected_once") return null;
+
+  const scope = {
+    classId,
+    studentId: item.student_id,
+    questionVersionPublicId: item.question_version_id,
+    sourceGradeDecisionPublicId: item.latest_error_grade_decision_public_id,
+    sourcePublicationPublicId: item.latest_error_publication_public_id,
+  };
+  const loadPreview = async () => {
+    setLoadingPreview(true);
+    setActionError("");
+    try {
+      setPreview(await previewWrongbookReinforcement(scope));
+    } catch (reason) {
+      setActionError(String(reason));
+    } finally {
+      setLoadingPreview(false);
+    }
+  };
+  const confirm = async () => {
+    if (!preview) return;
+    setCreating(true);
+    setActionError("");
+    try {
+      const assignment = await confirmWrongbookReinforcement({
+        ...scope,
+        expectedPolicyPublicId: preview.policy_public_id,
+        expectedDueDate: preview.suggested_due_date,
+        previewedAsOfDate: preview.previewed_as_of_date,
+      });
+      onCreated(assignment);
+      setPreview(null);
+    } catch (reason) {
+      setActionError(String(reason));
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  return (
+    <div className="wrongbook-reinforcement">
+      {!preview ? (
+        <>
+          <button className="primary" disabled={loadingPreview} onClick={loadPreview}>
+            {loadingPreview ? "计算中…" : "安排巩固"}
+          </button>
+          {actionError && <div className="error">{actionError}</div>}
+        </>
+      ) : (
+        <div className="wrongbook-reinforcement-confirm">
+          <div>
+            <b>建议 {preview.suggested_due_date} 再做一次</b>
+            <span>{preview.reason}</span>
+            <small>
+              当天已有 {preview.existing_task_count} / {preview.daily_limit_per_student} 项；
+              规则第 {preview.policy_revision} 版
+            </small>
+          </div>
+          {actionError && <div className="error">{actionError}</div>}
+          <div className="wrongbook-reinforcement-actions">
+            <button
+              disabled={creating}
+              onClick={() => {
+                setPreview(null);
+                setActionError("");
+              }}
+            >
+              取消
+            </button>
+            <button className="primary" disabled={creating} onClick={confirm}>
+              {creating ? "安排中…" : "确认安排"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SchedulePolicyPanel({
+  policy,
+  onSaved,
+}: {
+  policy: SchedulePolicy;
+  onSaved: (policy: SchedulePolicy) => void;
+}) {
+  const [delay, setDelay] = useState(policy.default_delay_days);
+  const [dailyLimit, setDailyLimit] = useState(policy.daily_limit_per_student);
+  const [skipWeekend, setSkipWeekend] = useState(policy.weekend_policy === "next_workday");
+  const [skipHoliday, setSkipHoliday] = useState(policy.holiday_policy === "next_workday");
+  const [holidays, setHolidays] = useState(policy.holidays);
+  const [newHolidayDate, setNewHolidayDate] = useState("");
+  const [newHolidayLabel, setNewHolidayLabel] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+
+  useEffect(() => {
+    setDelay(policy.default_delay_days);
+    setDailyLimit(policy.daily_limit_per_student);
+    setSkipWeekend(policy.weekend_policy === "next_workday");
+    setSkipHoliday(policy.holiday_policy === "next_workday");
+    setHolidays(policy.holidays);
+  }, [policy]);
+
+  const addHoliday = () => {
+    if (!newHolidayDate || !newHolidayLabel.trim()) return;
+    setHolidays((current) => [
+      ...current.filter((item) => item.calendar_date !== newHolidayDate),
+      { calendar_date: newHolidayDate, label: newHolidayLabel.trim() },
+    ].sort((left, right) => left.calendar_date.localeCompare(right.calendar_date)));
+    setNewHolidayDate("");
+    setNewHolidayLabel("");
+  };
+  const save = async () => {
+    setSaving(true);
+    setSaveError("");
+    try {
+      const saved = await updateWrongbookSchedulePolicy({
+        defaultDelayDays: delay,
+        dailyLimitPerStudent: dailyLimit,
+        weekendPolicy: skipWeekend ? "next_workday" : "allow",
+        holidayPolicy: skipHoliday ? "next_workday" : "allow",
+        maxShiftDays: policy.max_shift_days,
+        holidays,
+      });
+      onSaved(saved);
+    } catch (reason) {
+      setSaveError(String(reason));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="schedule-policy-panel">
+      <div className="schedule-policy-title">
+        <div>
+          <b>巩固规则</b>
+          <span>默认自动计算日期，但只有老师确认后才会建立任务。</span>
+        </div>
+        <span>当前第 {policy.revision} 版</span>
+      </div>
+      <div className="schedule-policy-main">
+        <label>
+          <span>订正后间隔</span>
+          <div><input type="number" min={1} max={60} value={delay}
+            onChange={(event) => setDelay(Number(event.target.value))} /> 天</div>
+        </label>
+        <label>
+          <span>每名学生每天最多</span>
+          <div><input type="number" min={1} max={20} value={dailyLimit}
+            onChange={(event) => setDailyLimit(Number(event.target.value))} /> 项</div>
+        </label>
+        <label className="schedule-policy-check">
+          <input type="checkbox" checked={skipWeekend}
+            onChange={(event) => setSkipWeekend(event.target.checked)} />
+          周末顺延
+        </label>
+        <label className="schedule-policy-check">
+          <input type="checkbox" checked={skipHoliday}
+            onChange={(event) => setSkipHoliday(event.target.checked)} />
+          登记假期顺延
+        </label>
+      </div>
+      <details className="schedule-holidays">
+        <summary>校历假期（{holidays.length} 天）</summary>
+        <div className="schedule-holiday-add">
+          <input aria-label="假期日期" type="date" value={newHolidayDate}
+            onChange={(event) => setNewHolidayDate(event.target.value)} />
+          <input aria-label="假期名称" value={newHolidayLabel} maxLength={40}
+            placeholder="如：校运动会" onChange={(event) => setNewHolidayLabel(event.target.value)} />
+          <button disabled={!newHolidayDate || !newHolidayLabel.trim()} onClick={addHoliday}>
+            添加
+          </button>
+        </div>
+        <div className="schedule-holiday-list">
+          {holidays.map((holiday) => (
+            <span key={holiday.calendar_date}>
+              {holiday.calendar_date} · {holiday.label}
+              <button aria-label={`删除 ${holiday.label}`}
+                onClick={() => setHolidays((current) =>
+                  current.filter((item) => item.calendar_date !== holiday.calendar_date))}>×</button>
+            </span>
+          ))}
+          {holidays.length === 0 && <em>暂未登记假期</em>}
+        </div>
+      </details>
+      {saveError && <div className="error">{saveError}</div>}
+      <div className="schedule-policy-actions">
+        <span>修改后生成新版本，已经安排的任务日期不会被静默改动。</span>
+        <button className="primary" disabled={saving} onClick={save}>
+          {saving ? "保存中…" : "保存规则"}
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function ItemCard({
   classId,
   item,
   onCauseSaved,
   onCorrectionCreated,
+  onReinforcementCreated,
   onOpenExam,
 }: {
   classId: number;
   item: WrongbookQuestion;
   onCauseSaved: (review: ErrorCauseReview) => void;
   onCorrectionCreated: (assignment: CorrectionAssignment) => void;
+  onReinforcementCreated: (assignment: ReinforcementAssignment) => void;
   onOpenExam: () => void;
 }) {
   return (
@@ -319,6 +565,12 @@ function ItemCard({
           onCreated={onCorrectionCreated}
           onOpenExam={onOpenExam}
         />
+        <ReinforcementAction
+          classId={classId}
+          item={item}
+          onCreated={onReinforcementCreated}
+          onOpenExam={onOpenExam}
+        />
       </div>
       <div className="wrongbook-time">
         <span>最近错误</span>
@@ -339,6 +591,9 @@ export default function LearningInsights({ onOpenExam, onOpenStudents }: Props) 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [refreshTick, setRefreshTick] = useState(0);
+  const [policy, setPolicy] = useState<SchedulePolicy | null>(null);
+  const [policyOpen, setPolicyOpen] = useState(false);
+  const [policyError, setPolicyError] = useState("");
 
   useEffect(() => {
     classesList()
@@ -351,6 +606,12 @@ export default function LearningInsights({ onOpenExam, onOpenStudents }: Props) 
         setError(String(reason));
         setLoading(false);
       });
+  }, []);
+
+  useEffect(() => {
+    loadWrongbookSchedulePolicy()
+      .then(setPolicy)
+      .catch((reason) => setPolicyError(String(reason)));
   }, []);
 
   useEffect(() => {
@@ -430,9 +691,15 @@ export default function LearningInsights({ onOpenExam, onOpenStudents }: Props) 
               {classes.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
             </select>
           </label>
+          <button disabled={!policy} onClick={() => setPolicyOpen((current) => !current)}>
+            {policyOpen ? "收起规则" : "巩固规则"}
+          </button>
           <button onClick={() => setRefreshTick((value) => value + 1)}>刷新</button>
         </div>
       </div>
+
+      {policyError && <div className="error">{policyError}</div>}
+      {policyOpen && policy && <SchedulePolicyPanel policy={policy} onSaved={setPolicy} />}
 
       <div className="tabs learning-tabs">
         <button className="tab active">错题事实</button>
@@ -540,6 +807,18 @@ export default function LearningInsights({ onOpenExam, onOpenStudents }: Props) 
                             candidate.student_id === item.student_id
                             && candidate.question_version_id === item.question_version_id
                               ? { ...candidate, correction_assignment: assignment }
+                              : candidate),
+                        }
+                        : current);
+                    }}
+                    onReinforcementCreated={(assignment) => {
+                      setDashboard((current) => current
+                        ? {
+                          ...current,
+                          items: current.items.map((candidate) =>
+                            candidate.student_id === item.student_id
+                            && candidate.question_version_id === item.question_version_id
+                              ? { ...candidate, reinforcement_assignment: assignment }
                               : candidate),
                         }
                         : current);

@@ -41,6 +41,10 @@ pub static CORE_MIGRATIONS: &[Migration] = &[
         id: "core_0007",
         sql: include_str!("schema/0007_evidence_outbox_audit.sql"),
     },
+    Migration {
+        id: "core_0008",
+        sql: include_str!("schema/0008_schedule_policies.sql"),
+    },
 ];
 
 /// 打开磁盘数据库并开启外键。
@@ -96,7 +100,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT count(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 7);
+        assert_eq!(n, 8);
         // 关键表存在
         let t: i64 = conn
             .query_row(
@@ -142,6 +146,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(evidence_event_tables, 4);
+        let scheduling_tables: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master
+                 WHERE type='table' AND name IN (
+                     'schedule_policy_versions', 'schedule_policy_holidays'
+                 )",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(scheduling_tables, 2);
     }
 
     #[test]

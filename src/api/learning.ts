@@ -61,6 +61,89 @@ export interface CorrectionAssignment {
   created_at: string;
 }
 
+export interface ScheduleHoliday {
+  calendar_date: string;
+  label: string;
+}
+
+export interface SchedulePolicy {
+  id: number;
+  public_id: string;
+  policy_key: string;
+  revision: number;
+  timezone: string;
+  default_delay_days: number;
+  daily_limit_per_student: number;
+  weekend_policy: "allow" | "next_workday";
+  holiday_policy: "allow" | "next_workday";
+  max_shift_days: number;
+  state: string;
+  created_by: string;
+  created_at: string;
+  holidays: ScheduleHoliday[];
+}
+
+export interface UpdateSchedulePolicyInput {
+  defaultDelayDays: number;
+  dailyLimitPerStudent: number;
+  weekendPolicy: "allow" | "next_workday";
+  holidayPolicy: "allow" | "next_workday";
+  maxShiftDays: number;
+  holidays: ScheduleHoliday[];
+}
+
+export interface ReinforcementSuggestion {
+  class_id: number;
+  student_id: number;
+  student_no: string;
+  student_name: string;
+  question_version_public_id: string;
+  source_grade_decision_public_id: string;
+  source_publication_public_id: string;
+  strategy: "same_question_recheck";
+  priority: "normal" | "high";
+  reason: string;
+  policy_public_id: string;
+  policy_revision: number;
+  previewed_as_of_date: string;
+  corrected_on: string;
+  earliest_due_date: string;
+  suggested_due_date: string;
+  shifted_days: number;
+  existing_task_count: number;
+  daily_limit_per_student: number;
+}
+
+export type ReinforcementAssignmentStatus =
+  | "scheduled"
+  | "in_progress"
+  | "ready_to_publish"
+  | "published";
+
+export interface ReinforcementAssignment {
+  public_id: string;
+  class_id: number;
+  student_id: number;
+  student_no: string;
+  student_name: string;
+  question_version_public_id: string;
+  source_grade_decision_public_id: string;
+  source_publication_public_id: string;
+  strategy: "same_question_recheck";
+  priority: "normal" | "high";
+  policy_public_id: string;
+  policy_revision: number;
+  due_date: string;
+  assessment_public_id: string;
+  assessment_version_public_id: string;
+  assessment_title: string;
+  task_id: number;
+  status: ReinforcementAssignmentStatus;
+  latest_attempt_public_id: string | null;
+  created_by: string;
+  created_at: string;
+}
+
 export type WrongbookStatus = "needs_correction" | "corrected_once" | "rechecked_correct";
 
 export interface WrongbookQuestion {
@@ -87,6 +170,7 @@ export interface WrongbookQuestion {
   cause_options: ErrorCauseOption[];
   cause_review: ErrorCauseReview | null;
   correction_assignment: CorrectionAssignment | null;
+  reinforcement_assignment: ReinforcementAssignment | null;
   knowledge_nodes: NamedReference[];
   ability_dimensions: NamedReference[];
 }
@@ -134,3 +218,31 @@ export interface CreateWrongbookCorrectionInput {
 
 export const createWrongbookSingleCorrection = (input: CreateWrongbookCorrectionInput) =>
   call<CorrectionAssignment>("create_wrongbook_single_correction", { input });
+
+export const loadWrongbookSchedulePolicy = () =>
+  call<SchedulePolicy>("wrongbook_schedule_policy");
+
+export const updateWrongbookSchedulePolicy = (input: UpdateSchedulePolicyInput) =>
+  call<SchedulePolicy>("update_wrongbook_schedule_policy", { input });
+
+export interface WrongbookReinforcementScopeInput {
+  classId: number;
+  studentId: number;
+  questionVersionPublicId: string;
+  sourceGradeDecisionPublicId: string;
+  sourcePublicationPublicId: string;
+}
+
+export const previewWrongbookReinforcement = (input: WrongbookReinforcementScopeInput) =>
+  call<ReinforcementSuggestion>("preview_wrongbook_reinforcement", { input });
+
+export interface ConfirmWrongbookReinforcementInput
+  extends WrongbookReinforcementScopeInput {
+  expectedPolicyPublicId: string;
+  expectedDueDate: string;
+  previewedAsOfDate: string;
+}
+
+export const confirmWrongbookReinforcement = (
+  input: ConfirmWrongbookReinforcementInput,
+) => call<ReinforcementAssignment>("confirm_wrongbook_reinforcement", { input });

@@ -15,9 +15,12 @@ use crate::correction::{load_for_source_decision, CorrectionAssignment};
 use crate::error_cause::{
     cause_options, load_review_for_decision_public_id, ErrorCauseOption, ErrorCauseReview,
 };
+use crate::reinforcement::{
+    load_for_source_decision as load_reinforcement, ReinforcementAssignment,
+};
 
-pub const CLASS_WRONGBOOK_SCHEMA_VERSION: i64 = 3;
-pub const CLASS_WRONGBOOK_RULE_VERSION: &str = "m3-published-wrong-facts-v3";
+pub const CLASS_WRONGBOOK_SCHEMA_VERSION: i64 = 4;
+pub const CLASS_WRONGBOOK_RULE_VERSION: &str = "m3-published-wrong-facts-v4";
 const FULL_SCORE_EPSILON: f64 = 0.000_001;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +71,7 @@ pub struct WrongbookQuestion {
     pub cause_options: Vec<ErrorCauseOption>,
     pub cause_review: Option<ErrorCauseReview>,
     pub correction_assignment: Option<CorrectionAssignment>,
+    pub reinforcement_assignment: Option<ReinforcementAssignment>,
     pub knowledge_nodes: Vec<NamedReference>,
     pub ability_dimensions: Vec<NamedReference>,
 }
@@ -376,6 +380,10 @@ pub fn class_wrongbook_dashboard(
                 &latest_error.grade_decision_public_id,
             )?,
             correction_assignment: load_for_source_decision(
+                conn,
+                &latest_error.grade_decision_public_id,
+            )?,
+            reinforcement_assignment: load_reinforcement(
                 conn,
                 &latest_error.grade_decision_public_id,
             )?,
@@ -1354,6 +1362,278 @@ mod tests {
         assert_eq!(
             loaded.latest_attempt_public_id.as_deref(),
             Some("target-correction-attempt")
+        );
+    }
+
+    #[test]
+    fn reinforcement_preview_is_read_only_and_teacher_confirmation_is_idempotent() {
+        use chrono::NaiveDate;
+
+        use crate::reinforcement::{
+            confirm_reinforcement_at, preview_reinforcement_at, ConfirmReinforcementInput,
+            ReinforcementScopeInput,
+        };
+
+        let mut fixture = Fixture::new();
+        let student_id = fixture.students[0];
+        let (decision_public_id, publication_public_id) =
+            fixture.publish_response(student_id, 1, "first", 0.0, "2026-07-01T08:00:00Z");
+        fixture.publish_response(student_id, 2, "correction", 2.0, "2026-07-02T08:00:00Z");
+        let scope = ReinforcementScopeInput {
+            class_id: fixture.class_one,
+            student_id,
+            question_version_public_id: "question-version-1",
+            source_grade_decision_public_id: &decision_public_id,
+            source_publication_public_id: &publication_public_id,
+        };
+        let today = NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
+        let preview = preview_reinforcement_at(&fixture.conn, &scope, today).unwrap();
+        assert_eq!(preview.priority, "normal");
+        assert_eq!(preview.suggested_due_date, "2026-07-16");
+        assert_eq!(
+            fixture
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM wb_reinforcement_assignments",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+
+        let input = ConfirmReinforcementInput {
+            scope,
+            expected_policy_public_id: &preview.policy_public_id,
+            expected_due_date: &preview.suggested_due_date,
+            previewed_as_of_date: &preview.previewed_as_of_date,
+            created_by: "teacher",
+        };
+        let created = confirm_reinforcement_at(&mut fixture.conn, &input, today).unwrap();
+        let repeated = confirm_reinforcement_at(&mut fixture.conn, &input, today).unwrap();
+        assert_eq!(created, repeated);
+        assert_eq!(created.status, "scheduled");
+        assert_eq!(created.due_date, "2026-07-16");
+        assert_eq!(
+            fixture
+                .conn
+                .query_row(
+                    "SELECT status FROM tasks WHERE id=?1",
+                    [created.task_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "open"
+        );
+        assert_eq!(
+            fixture
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM exam_attempts_v2
+                     WHERE assessment_version_id=(
+                       SELECT id FROM exam_assessment_versions_v2 WHERE public_id=?1
+                     )",
+                    [&created.assessment_version_public_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        let dashboard = class_wrongbook_dashboard(&fixture.conn, fixture.class_one).unwrap();
+        assert_eq!(
+            dashboard.items[0]
+                .reinforcement_assignment
+                .as_ref()
+                .unwrap(),
+            &created
+        );
+    }
+
+    #[test]
+    fn repeated_error_only_raises_reinforcement_priority_without_creating_work() {
+        use chrono::NaiveDate;
+
+        use crate::reinforcement::{preview_reinforcement_at, ReinforcementScopeInput};
+
+        let mut fixture = Fixture::new();
+        let student_id = fixture.students[0];
+        fixture.publish_response(student_id, 1, "first", 0.0, "2026-07-01T08:00:00Z");
+        let (latest_error, latest_error_publication) =
+            fixture.publish_response(student_id, 2, "retry", 1.0, "2026-07-02T08:00:00Z");
+        fixture.publish_response(student_id, 3, "correction", 2.0, "2026-07-03T08:00:00Z");
+        let preview = preview_reinforcement_at(
+            &fixture.conn,
+            &ReinforcementScopeInput {
+                class_id: fixture.class_one,
+                student_id,
+                question_version_public_id: "question-version-1",
+                source_grade_decision_public_id: &latest_error,
+                source_publication_public_id: &latest_error_publication,
+            },
+            NaiveDate::from_ymd_opt(2026, 7, 16).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(preview.priority, "high");
+        assert!(preview.reason.contains("2 次非满分"));
+        let counts: (i64, i64) = fixture
+            .conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM wb_reinforcement_assignments),
+                   (SELECT COUNT(*) FROM tasks WHERE module='wrongbook')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (0, 0));
+    }
+
+    #[test]
+    fn stale_reinforcement_preview_is_rejected_without_partial_writes() {
+        use chrono::NaiveDate;
+        use suite_core::services::scheduling::{SchedulePolicyUpdate, LEARNING_POLICY_KEY};
+
+        use crate::reinforcement::{
+            confirm_reinforcement_at, preview_reinforcement_at, ConfirmReinforcementInput,
+            ReinforcementScopeInput,
+        };
+
+        let mut fixture = Fixture::new();
+        let student_id = fixture.students[0];
+        let (decision_public_id, publication_public_id) =
+            fixture.publish_response(student_id, 1, "first", 0.0, "2026-07-01T08:00:00Z");
+        fixture.publish_response(student_id, 2, "correction", 2.0, "2026-07-02T08:00:00Z");
+        let scope = ReinforcementScopeInput {
+            class_id: fixture.class_one,
+            student_id,
+            question_version_public_id: "question-version-1",
+            source_grade_decision_public_id: &decision_public_id,
+            source_publication_public_id: &publication_public_id,
+        };
+        let today = NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
+        let preview = preview_reinforcement_at(&fixture.conn, &scope, today).unwrap();
+        suite_core::services::scheduling::replace_active_policy(
+            &mut fixture.conn,
+            LEARNING_POLICY_KEY,
+            &SchedulePolicyUpdate {
+                default_delay_days: 8,
+                daily_limit_per_student: 3,
+                weekend_policy: "next_workday".into(),
+                holiday_policy: "next_workday".into(),
+                max_shift_days: 60,
+                holidays: Vec::new(),
+            },
+            "teacher",
+        )
+        .unwrap();
+        let result = confirm_reinforcement_at(
+            &mut fixture.conn,
+            &ConfirmReinforcementInput {
+                scope,
+                expected_policy_public_id: &preview.policy_public_id,
+                expected_due_date: &preview.suggested_due_date,
+                previewed_as_of_date: &preview.previewed_as_of_date,
+                created_by: "teacher",
+            },
+            today,
+        );
+        assert!(matches!(result, Err(CoreError::Invalid(_))));
+        let counts: (i64, i64, i64) = fixture
+            .conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM wb_reinforcement_assignments),
+                   (SELECT COUNT(*) FROM tasks WHERE module='wrongbook'),
+                   (SELECT COUNT(*) FROM exam_assessments_v2
+                    WHERE assessment_context='homework' AND evidence_policy='include_low_weight')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (0, 0, 0));
+    }
+
+    #[test]
+    fn reinforcement_attempt_updates_shared_task_lifecycle() {
+        use chrono::NaiveDate;
+
+        use crate::reinforcement::{
+            confirm_reinforcement_at, preview_reinforcement_at, ConfirmReinforcementInput,
+            ReinforcementScopeInput,
+        };
+
+        let mut fixture = Fixture::new();
+        let student_id = fixture.students[0];
+        let (decision_public_id, publication_public_id) =
+            fixture.publish_response(student_id, 1, "first", 0.0, "2026-07-01T08:00:00Z");
+        fixture.publish_response(student_id, 2, "correction", 2.0, "2026-07-02T08:00:00Z");
+        let scope = ReinforcementScopeInput {
+            class_id: fixture.class_one,
+            student_id,
+            question_version_public_id: "question-version-1",
+            source_grade_decision_public_id: &decision_public_id,
+            source_publication_public_id: &publication_public_id,
+        };
+        let today = NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
+        let preview = preview_reinforcement_at(&fixture.conn, &scope, today).unwrap();
+        let created = confirm_reinforcement_at(
+            &mut fixture.conn,
+            &ConfirmReinforcementInput {
+                scope,
+                expected_policy_public_id: &preview.policy_public_id,
+                expected_due_date: &preview.suggested_due_date,
+                previewed_as_of_date: &preview.previewed_as_of_date,
+                created_by: "teacher",
+            },
+            today,
+        )
+        .unwrap();
+        let version_id: i64 = fixture
+            .conn
+            .query_row(
+                "SELECT id FROM exam_assessment_versions_v2 WHERE public_id=?1",
+                [&created.assessment_version_public_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        fixture
+            .conn
+            .execute(
+                "INSERT INTO exam_attempts_v2
+                 (public_id,assessment_version_id,student_id,attempt_no,source_kind,
+                  attempt_kind,state,created_at,updated_at)
+                 VALUES ('reinforcement-attempt-1',?1,?2,1,'image','first','ingesting',?3,?3)",
+                (version_id, student_id, NOW),
+            )
+            .unwrap();
+        assert_eq!(
+            fixture
+                .conn
+                .query_row(
+                    "SELECT status FROM tasks WHERE id=?1",
+                    [created.task_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "submitted"
+        );
+        fixture
+            .conn
+            .execute(
+                "UPDATE exam_attempts_v2 SET state='published' WHERE public_id='reinforcement-attempt-1'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            fixture
+                .conn
+                .query_row(
+                    "SELECT status FROM tasks WHERE id=?1",
+                    [created.task_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "closed"
         );
     }
 }

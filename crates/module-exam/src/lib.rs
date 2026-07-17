@@ -144,6 +144,10 @@ static MIGRATIONS: &[Migration] = &[
         id: "exam_0029",
         sql: include_str!("../migrations/0029_assessment_targets.sql"),
     },
+    Migration {
+        id: "exam_0030",
+        sql: include_str!("../migrations/0030_assessment_schedule.sql"),
+    },
 ];
 
 /// 模块迁移（供外壳/测试在 core 迁移之后运行）。

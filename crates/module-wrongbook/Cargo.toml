@@ -11,6 +11,7 @@ suite-core = { path = "../core" }
 module-exam = { path = "../module-exam" }
 serde.workspace = true
 rusqlite = "0.31"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 
 [dev-dependencies]
 module-knowledge = { path = "../module-knowledge" }

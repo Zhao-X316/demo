@@ -71,6 +71,25 @@ pub struct NewSingleItemCorrectionAssessment<'a> {
     pub presentation_snapshot_json: &'a str,
 }
 
+pub struct NewSingleItemTargetedAssessment<'a> {
+    pub title: &'a str,
+    pub class_id: i64,
+    pub target_student_id: i64,
+    pub assessment_context: &'a str,
+    pub evidence_policy: &'a str,
+    pub template_version: &'a str,
+    pub due_date: Option<&'a str>,
+    pub schedule_policy_version_id: Option<i64>,
+    pub created_by: &'a str,
+    pub question_version_id: i64,
+    pub answer_key_version_id: i64,
+    pub rubric_version_id: i64,
+    pub link_set_id: i64,
+    pub score: f64,
+    pub option_order_json: Option<&'a str>,
+    pub presentation_snapshot_json: &'a str,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attempt {
     pub id: i64,
@@ -474,14 +493,80 @@ pub fn create_confirmed_single_item_correction_in_transaction(
     conn: &Connection,
     input: &NewSingleItemCorrectionAssessment<'_>,
 ) -> CoreResult<AssessmentDraft> {
-    required(input.title, "订正作业名称")?;
+    create_confirmed_single_item_targeted_in_transaction(
+        conn,
+        &NewSingleItemTargetedAssessment {
+            title: input.title,
+            class_id: input.class_id,
+            target_student_id: input.target_student_id,
+            assessment_context: "correction",
+            evidence_policy: "progress_only",
+            template_version: "m3-single-correction-v1",
+            due_date: None,
+            schedule_policy_version_id: None,
+            created_by: input.created_by,
+            question_version_id: input.question_version_id,
+            answer_key_version_id: input.answer_key_version_id,
+            rubric_version_id: input.rubric_version_id,
+            link_set_id: input.link_set_id,
+            score: input.score,
+            option_order_json: input.option_order_json,
+            presentation_snapshot_json: input.presentation_snapshot_json,
+        },
+    )
+}
+
+/// 在调用方已经持有的事务中创建一个固定版本、显式目标学生的单题作业。
+///
+/// `due_date` 与 `schedule_policy_version_id` 必须同时为空或同时提供；提供后
+/// 作为 assessment version 身份的一部分冻结，历史作业不会从创建时间猜日期。
+pub fn create_confirmed_single_item_targeted_in_transaction(
+    conn: &Connection,
+    input: &NewSingleItemTargetedAssessment<'_>,
+) -> CoreResult<AssessmentDraft> {
+    required(input.title, "作业名称")?;
     required(input.created_by, "创建人")?;
+    required(input.template_version, "作业模板版本")?;
+    if !matches!(
+        input.assessment_context,
+        "classwork" | "homework" | "quiz" | "exam" | "open_book" | "correction" | "demo"
+    ) {
+        return Err(CoreError::Invalid("作业场景非法".into()));
+    }
+    if !matches!(
+        input.evidence_policy,
+        "include" | "exclude" | "include_low_weight" | "progress_only"
+    ) {
+        return Err(CoreError::Invalid("证据策略非法".into()));
+    }
+    match (input.due_date, input.schedule_policy_version_id) {
+        (Some(value), Some(policy_id)) => {
+            chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                .map_err(|_| CoreError::Invalid("到期日必须是有效的 YYYY-MM-DD 日期".into()))?;
+            let policy_exists: bool = conn.query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM schedule_policy_versions WHERE id=?1
+                 )",
+                [policy_id],
+                |row| row.get(0),
+            )?;
+            if !policy_exists {
+                return Err(CoreError::Invalid("排程策略版本不存在".into()));
+            }
+        }
+        (None, None) => {}
+        _ => {
+            return Err(CoreError::Invalid(
+                "到期日与排程策略版本必须同时提供".into(),
+            ));
+        }
+    }
     validate_schema_object(input.presentation_snapshot_json, "题目呈现快照")?;
     if let Some(json) = input.option_order_json {
         validate_schema_object(json, "选项顺序")?;
     }
     if !input.score.is_finite() || input.score <= 0.0 {
-        return Err(CoreError::Invalid("订正题目分值非法".into()));
+        return Err(CoreError::Invalid("作业题目分值非法".into()));
     }
     let class_exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM classes WHERE id=?1)",
@@ -500,7 +585,7 @@ pub fn create_confirmed_single_item_correction_in_transaction(
         |row| row.get(0),
     )?;
     if !target_exists {
-        return Err(CoreError::Invalid("订正目标必须是该班启用学生".into()));
+        return Err(CoreError::Invalid("作业目标必须是该班启用学生".into()));
     }
     validate_assessment_item_refs(
         conn,
@@ -517,11 +602,13 @@ pub fn create_confirmed_single_item_correction_in_transaction(
         "INSERT INTO exam_assessments_v2
          (public_id,title,class_id,assessment_context,evidence_policy,state,audience_kind,
           created_by,created_at,updated_at)
-         VALUES (?1,?2,?3,'correction','progress_only','draft','explicit',?4,?5,?5)",
+         VALUES (?1,?2,?3,?4,?5,'draft','explicit',?6,?7,?7)",
         (
             &assessment_public_id,
             input.title.trim(),
             input.class_id,
+            input.assessment_context,
+            input.evidence_policy,
             input.created_by.trim(),
             &now,
         ),
@@ -530,9 +617,17 @@ pub fn create_confirmed_single_item_correction_in_transaction(
     let assessment_version_public_id = ids::new_public_id();
     conn.execute(
         "INSERT INTO exam_assessment_versions_v2
-         (public_id,assessment_id,revision,template_version,state,created_at)
-         VALUES (?1,?2,1,'m3-single-correction-v1','draft',?3)",
-        (&assessment_version_public_id, assessment_id, &now),
+         (public_id,assessment_id,revision,template_version,state,due_date,
+          schedule_policy_version_id,created_at)
+         VALUES (?1,?2,1,?3,'draft',?4,?5,?6)",
+        (
+            &assessment_version_public_id,
+            assessment_id,
+            input.template_version,
+            input.due_date,
+            input.schedule_policy_version_id,
+            &now,
+        ),
     )?;
     let assessment_version_id = conn.last_insert_rowid();
     conn.execute(

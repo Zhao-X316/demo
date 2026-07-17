@@ -203,10 +203,42 @@ button.dashboard-action { display: grid; grid-template-columns: 34px minmax(0, 1
 .wrongbook-correction-summary span { color: #34745B; font-size: 10.5px; }
 .wrongbook-correction-summary b { overflow: hidden; color: var(--text-2); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
 .wrongbook-correction-summary button { flex-shrink: 0; min-height: 28px; padding: 4px 8px; font-size: 10.5px; }
+.wrongbook-reinforcement { width: 100%; margin-top: 9px; }
+.wrongbook-reinforcement > button { min-height: 30px; }
+.wrongbook-reinforcement-confirm { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid #D8CFEA; border-radius: 8px; background: #F8F5FC; }
+.wrongbook-reinforcement-confirm > div:first-child { display: flex; flex-direction: column; gap: 3px; }
+.wrongbook-reinforcement-confirm b { color: var(--text); font-size: 11.5px; }
+.wrongbook-reinforcement-confirm span, .wrongbook-reinforcement-confirm small { color: var(--text-2); font-size: 10.5px; line-height: 1.5; }
+.wrongbook-reinforcement-confirm small { color: var(--muted); }
+.wrongbook-reinforcement-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.wrongbook-reinforcement-summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; margin-top: 9px; padding: 8px 9px; border: 1px solid #D8CFEA; border-radius: 8px; background: #F8F5FC; }
+.wrongbook-reinforcement-summary > div { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.wrongbook-reinforcement-summary span { color: #70509A; font-size: 10.5px; }
+.wrongbook-reinforcement-summary b { overflow: hidden; color: var(--text-2); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+.wrongbook-reinforcement-summary button { flex-shrink: 0; min-height: 28px; padding: 4px 8px; font-size: 10.5px; }
 .wrongbook-time { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 7px; color: var(--muted); font-size: 10.5px; }
 .wrongbook-time b { overflow: hidden; color: var(--text-2); font-size: 10.5px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .learning-rule-note { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; padding: 10px 12px; border-radius: 8px; background: var(--bg-sub); color: var(--text-2); font-size: 11px; line-height: 1.55; }
 .learning-rule-note span { color: var(--muted); }
+.schedule-policy-panel { margin: 12px 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.schedule-policy-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.schedule-policy-title > div { display: flex; flex-direction: column; gap: 3px; }
+.schedule-policy-title b { font-size: 13px; }
+.schedule-policy-title span { color: var(--muted); font-size: 10.5px; line-height: 1.5; }
+.schedule-policy-main { display: flex; flex-wrap: wrap; align-items: end; gap: 12px 18px; margin-top: 12px; }
+.schedule-policy-main > label:not(.schedule-policy-check) { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 10.5px; }
+.schedule-policy-main label > div { color: var(--text-2); font-size: 11px; }
+.schedule-policy-main input[type="number"] { width: 68px; }
+.schedule-policy-check { display: flex; align-items: center; gap: 5px; color: var(--text-2); font-size: 11px; }
+.schedule-holidays { margin-top: 12px; }
+.schedule-holidays summary { color: var(--text-2); cursor: pointer; font-size: 11px; }
+.schedule-holiday-add { display: flex; gap: 7px; margin: 8px 0; }
+.schedule-holiday-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.schedule-holiday-list > span { display: flex; align-items: center; gap: 5px; padding: 3px 6px 3px 8px; border-radius: 6px; background: var(--bg-sub); color: var(--text-2); font-size: 10.5px; }
+.schedule-holiday-list button { min-height: 20px; padding: 0 4px; border: 0; background: transparent; }
+.schedule-holiday-list em { color: var(--muted); font-size: 10.5px; font-style: normal; }
+.schedule-policy-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; }
+.schedule-policy-actions span { color: var(--muted); font-size: 10.5px; }
 
 /* ───── section + rows ───── */
 .sech { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; margin: 20px 0 9px; display: flex; align-items: center; gap: 8px; }

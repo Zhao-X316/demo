@@ -17,11 +17,32 @@ window.__TAURI_INTERNALS__ = {
         { id: 2, name: "八年级二班", term: "2026秋", textbook: "中国历史八上" }
       ];
     }
+    if (cmd === "wrongbook_schedule_policy") {
+      return {
+        id: 1, public_id: "policy-1", policy_key: "learning_default", revision: 1,
+        timezone: "Asia/Shanghai", default_delay_days: 7, daily_limit_per_student: 3,
+        weekend_policy: "next_workday", holiday_policy: "next_workday", max_shift_days: 60,
+        state: "active", created_by: "system", created_at: "2026-07-16T07:00:00Z",
+        holidays: []
+      };
+    }
+    if (cmd === "update_wrongbook_schedule_policy") {
+      const input = args.input;
+      return {
+        id: 2, public_id: "policy-2", policy_key: "learning_default", revision: 2,
+        timezone: "Asia/Shanghai", default_delay_days: input.defaultDelayDays,
+        daily_limit_per_student: input.dailyLimitPerStudent,
+        weekend_policy: input.weekendPolicy, holiday_policy: input.holidayPolicy,
+        max_shift_days: input.maxShiftDays, state: "active",
+        created_by: "local_teacher", created_at: "2026-07-16T12:02:00Z",
+        holidays: input.holidays
+      };
+    }
     if (cmd === "class_wrongbook_dashboard") {
       const classId = Number(args.classId);
       if (classId === 2) {
         return {
-          meta: { schema_version: 3, rule_version: "m3-published-wrong-facts-v3",
+          meta: { schema_version: 4, rule_version: "m3-published-wrong-facts-v4",
             calculated_at: "2026-07-16T12:00:00Z", exam_watermark: null },
           class: { id: 2, name: "八年级二班", term: "2026秋",
             textbook: "中国历史八上", enabled_student_count: 1 },
@@ -35,7 +56,7 @@ window.__TAURI_INTERNALS__ = {
         };
       }
       return {
-        meta: { schema_version: 3, rule_version: "m3-published-wrong-facts-v3",
+        meta: { schema_version: 4, rule_version: "m3-published-wrong-facts-v4",
           calculated_at: "2026-07-16T12:00:00Z", exam_watermark: "2026-07-16T11:40:00Z" },
         class: { id: 1, name: "八年级一班", term: "2026秋",
           textbook: "中国历史八上", enabled_student_count: 3 },
@@ -66,6 +87,7 @@ window.__TAURI_INTERNALS__ = {
             ],
             cause_review: null,
             correction_assignment: null,
+            reinforcement_assignment: null,
             knowledge_nodes: [{ public_id: "k-1", title: "洋务运动失败原因" }],
             ability_dimensions: [{ public_id: "a-1", title: "因果分析" }]
           },
@@ -99,6 +121,7 @@ window.__TAURI_INTERNALS__ = {
               status: "published", latest_attempt_public_id: "attempt-correction-2",
               created_by: "local_teacher", created_at: "2026-07-14T10:00:00Z"
             },
+            reinforcement_assignment: null,
             knowledge_nodes: [], ability_dimensions: []
           },
           {
@@ -125,6 +148,7 @@ window.__TAURI_INTERNALS__ = {
               confirmed_by: "local_teacher", confirmed_at: "2026-07-16T10:00:00Z"
             },
             correction_assignment: null,
+            reinforcement_assignment: null,
             knowledge_nodes: [{ public_id: "k-2", title: "辛亥革命局限" }],
             ability_dimensions: []
           }
@@ -156,6 +180,40 @@ window.__TAURI_INTERNALS__ = {
         assessment_title: "01号 小林 · 洋务运动失败的根本原因是？ · 订正",
         status: "waiting_upload", latest_attempt_public_id: null,
         created_by: "local_teacher", created_at: "2026-07-16T12:11:00Z"
+      };
+    }
+    if (cmd === "preview_wrongbook_reinforcement") {
+      const input = args.input;
+      return {
+        class_id: input.classId, student_id: input.studentId,
+        student_no: "02", student_name: "小周",
+        question_version_public_id: input.questionVersionPublicId,
+        source_grade_decision_public_id: input.sourceGradeDecisionPublicId,
+        source_publication_public_id: input.sourcePublicationPublicId,
+        strategy: "same_question_recheck", priority: "normal",
+        reason: "已完成一次订正；建议跨日期再次作答，验证是否保持。",
+        policy_public_id: "policy-2", policy_revision: 2,
+        previewed_as_of_date: "2026-07-16", corrected_on: "2026-07-15",
+        earliest_due_date: "2026-07-22", suggested_due_date: "2026-07-22",
+        shifted_days: 0, existing_task_count: 1, daily_limit_per_student: 4
+      };
+    }
+    if (cmd === "confirm_wrongbook_reinforcement") {
+      const input = args.input;
+      return {
+        public_id: "reinforcement-new", class_id: input.classId, student_id: input.studentId,
+        student_no: "02", student_name: "小周",
+        question_version_public_id: input.questionVersionPublicId,
+        source_grade_decision_public_id: input.sourceGradeDecisionPublicId,
+        source_publication_public_id: input.sourcePublicationPublicId,
+        strategy: "same_question_recheck", priority: "normal",
+        policy_public_id: input.expectedPolicyPublicId, policy_revision: 2,
+        due_date: input.expectedDueDate,
+        assessment_public_id: "assessment-reinforcement-new",
+        assessment_version_public_id: "assessment-version-reinforcement-new",
+        assessment_title: "02号 小周 · 《南京条约》签订于____年。 · 巩固复测",
+        task_id: 19, status: "scheduled", latest_attempt_public_id: null,
+        created_by: "local_teacher", created_at: "2026-07-16T12:12:00Z"
       };
     }
     if (cmd === "class_operations_dashboard") {
@@ -214,6 +272,20 @@ def test_learning_insights(base_url: str) -> None:
         expect(page.locator(".wrongbook-item .bad-text", has_text="重复出错")).to_be_visible()
         expect(page.get_by_text("尚未绑定已确认的知识点或能力", exact=False)).to_be_visible()
 
+        page.get_by_role("button", name="巩固规则").click()
+        expect(page.get_by_text("只有老师确认后才会建立任务", exact=False)).to_be_visible()
+        limit_input = page.locator(".schedule-policy-main input[type=number]").nth(1)
+        limit_input.fill("4")
+        page.get_by_role("button", name="保存规则").click()
+        expect(page.get_by_text("当前第 2 版", exact=True)).to_be_visible()
+        policy_calls = page.evaluate(
+            "() => window.__learningCalls.filter((item) => "
+            "item.cmd === 'update_wrongbook_schedule_policy')"
+        )
+        assert len(policy_calls) == 1
+        assert policy_calls[0]["args"]["input"]["dailyLimitPerStudent"] == 4
+        page.get_by_role("button", name="收起规则").click()
+
         first_item = page.locator(".wrongbook-item").first
         first_item.get_by_role("button", name="确认错因").click()
         first_item.get_by_text("史实错误", exact=True).click()
@@ -246,6 +318,26 @@ def test_learning_insights(base_url: str) -> None:
         assert correction_input["questionVersionPublicId"] == "qv-1"
         assert correction_input["sourceGradeDecisionPublicId"] == "decision-1"
         assert correction_input["sourcePublicationPublicId"] == "publication-1"
+
+        corrected_item = page.locator(".wrongbook-item", has_text="《南京条约》签订于____年。")
+        corrected_item.get_by_role("button", name="安排巩固").click()
+        expect(corrected_item.get_by_text("建议 2026-07-22 再做一次", exact=True)).to_be_visible()
+        before_confirm = page.evaluate(
+            "() => window.__learningCalls.filter((item) => "
+            "item.cmd === 'confirm_wrongbook_reinforcement').length"
+        )
+        assert before_confirm == 0
+        corrected_item.get_by_role("button", name="确认安排").click()
+        expect(corrected_item.get_by_text("巩固已安排 · 2026-07-22", exact=True)).to_be_visible()
+        reinforcement_calls = page.evaluate(
+            "() => window.__learningCalls.filter((item) => "
+            "item.cmd === 'confirm_wrongbook_reinforcement')"
+        )
+        assert len(reinforcement_calls) == 1
+        reinforcement_input = reinforcement_calls[0]["args"]["input"]
+        assert reinforcement_input["expectedPolicyPublicId"] == "policy-2"
+        assert reinforcement_input["expectedDueDate"] == "2026-07-22"
+        assert reinforcement_input["previewedAsOfDate"] == "2026-07-16"
         page.screenshot(path="/tmp/jiaofu-learning-insights.png", full_page=True)
 
         page.get_by_label("筛选订正状态").select_option("needs_correction")
