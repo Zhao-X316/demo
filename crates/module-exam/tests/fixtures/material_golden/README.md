@@ -116,3 +116,24 @@ cargo run -p module-exam --example evaluate_teacher_shadow -- \
 ```
 
 报告给出每 100 份材料的人工/辅助主动耗时 P50、P80、P95，以及异常复核、机器结论修正和老师必要操作计数。人工与辅助若不是同一老师、同一材料、同一样本 hash 和同一工作量，或缺任一材料/配对，报告会拒绝生成。报告采用一次写入语义，且 `release_authorized` 永远为 `false`；它只能说明试点减负表现，不能替代老师终审或发布闸门。
+
+老师报告当前是 `schema_version=2`：除耗时与计数外，还会逐类冻结实际 `dataset_ids` 与 `sample_scope_sha256s`，用于证明老师观察和机器影子结果确实来自同一批材料。此前生成的 v1 报告不能用于真实总验收包，需要用原始 v1 观察文件重新执行上述命令生成 v2 报告；观察文件自身仍保持 `schema_version=1`。
+
+## 真实试点总验收包
+
+完成真实三材料机器影子会话和老师并行观察后，把四类上游证据绑定成一个只含 hash 与聚合计数的总验收包：
+
+```bash
+mkdir -p /受限目录/pilot-evidence
+cargo run -p module-exam --example assemble_pilot_evidence_bundle -- \
+  --gate /受限目录/pilot_data_gate_v1.json \
+  --rights-evidence /受限目录/pilot_data_rights_evidence_v1.json \
+  --shadow-result /受限目录/shadow_result.json \
+  --teacher-report /受限目录/teacher_shadow_report_v2.json \
+  --assembled-at 2026-07-16T09:10:00Z \
+  --output /受限目录/pilot-evidence/bundle_v1.json
+```
+
+该命令要求数据闸门、权利证据、机器影子结果和老师报告全部有效，并严格核对 gate/rights/shadow/report hash、会话、三类数据集、老师抽样范围以及时间顺序。任一跨批次混用或内容漂移都会拒绝；输出采用一次写入语义，相同内容可幂等复用，不同内容禁止覆盖。
+
+`threshold_review_ready=true` 只表示证据可以交给老师和工程人员讨论真实阈值。出现机器安全发现、老师修正机器结论或老师需要外部帮助时，会明确写入 `review_reason_codes`；无论结果如何，`release_authorized` 永远为 `false`，总验收包不能代替异模型审查、真机放行、合并或发布批准。

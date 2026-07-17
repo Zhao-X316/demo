@@ -17,6 +17,7 @@ use suite_core::error::{CoreError, CoreResult};
 use crate::material_golden::MaterialGoldenKind;
 
 pub const TEACHER_SHADOW_SCHEMA_VERSION: i64 = 1;
+pub const TEACHER_SHADOW_REPORT_SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -90,6 +91,10 @@ pub struct TeacherShadowMetrics {
 #[serde(deny_unknown_fields)]
 pub struct TeacherShadowMaterialResult {
     pub material_kind: MaterialGoldenKind,
+    /// 本材料老师观察实际引用的数据集；排序后写入，便于与机器影子结果逐类核对。
+    pub dataset_ids: Vec<String>,
+    /// 本材料实际抽样范围的不可逆引用；不保存学生、题目或答案正文。
+    pub sample_scope_sha256s: Vec<String>,
     pub metrics: TeacherShadowMetrics,
 }
 
@@ -404,7 +409,7 @@ fn payload_sha256(payload: &TeacherShadowReportPayload) -> CoreResult<String> {
 
 impl TeacherShadowReport {
     pub fn validate(&self) -> CoreResult<()> {
-        if self.payload.schema_version != TEACHER_SHADOW_SCHEMA_VERSION {
+        if self.payload.schema_version != TEACHER_SHADOW_REPORT_SCHEMA_VERSION {
             return Err(CoreError::Invalid("老师影子报告 schema 版本不支持".into()));
         }
         required_opaque_id(&self.payload.session_id, "session_id")?;
@@ -425,16 +430,47 @@ impl TeacherShadowReport {
             .iter()
             .map(|result| result.material_kind)
             .collect::<BTreeSet<_>>();
-        if kinds
-            != BTreeSet::from([
-                MaterialGoldenKind::OrdinaryPaper,
-                MaterialGoldenKind::AnswerSheet,
-                MaterialGoldenKind::Dictation,
-            ])
+        if self.payload.material_results.len() != 3
+            || kinds
+                != BTreeSet::from([
+                    MaterialGoldenKind::OrdinaryPaper,
+                    MaterialGoldenKind::AnswerSheet,
+                    MaterialGoldenKind::Dictation,
+                ])
         {
             return Err(CoreError::Invalid(
                 "老师影子报告必须完整覆盖三类材料".into(),
             ));
+        }
+        for result in &self.payload.material_results {
+            if result.dataset_ids.is_empty() || result.sample_scope_sha256s.is_empty() {
+                return Err(CoreError::Invalid(
+                    "老师影子报告必须保留每类材料的数据集与抽样范围引用".into(),
+                ));
+            }
+            let dataset_ids = result
+                .dataset_ids
+                .iter()
+                .map(|value| {
+                    required_opaque_id(value, "dataset_id")?;
+                    Ok(value.clone())
+                })
+                .collect::<CoreResult<BTreeSet<_>>>()?;
+            if dataset_ids.into_iter().collect::<Vec<_>>() != result.dataset_ids {
+                return Err(CoreError::Invalid(
+                    "老师影子报告 dataset_ids 必须排序且不重复".into(),
+                ));
+            }
+            let sample_hashes = result
+                .sample_scope_sha256s
+                .iter()
+                .map(|value| normalized_sha256(value, "样本范围引用"))
+                .collect::<CoreResult<BTreeSet<_>>>()?;
+            if sample_hashes.into_iter().collect::<Vec<_>>() != result.sample_scope_sha256s {
+                return Err(CoreError::Invalid(
+                    "老师影子报告样本范围 hash 必须排序且不重复".into(),
+                ));
+            }
         }
         let expected = payload_sha256(&self.payload)?;
         if normalized_sha256(&self.report_sha256, "报告 hash")? != expected {
@@ -504,14 +540,33 @@ pub fn evaluate_teacher_shadow(
     let material_results = by_material
         .iter()
         .map(|(kind, pairs)| {
+            let dataset_ids = pairs
+                .iter()
+                .map(|pair| pair.baseline.dataset_id.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let sample_scope_sha256s = pairs
+                .iter()
+                .map(|pair| {
+                    pair.baseline
+                        .sample_scope_sha256
+                        .trim()
+                        .to_ascii_lowercase()
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
             Ok(TeacherShadowMaterialResult {
                 material_kind: *kind,
+                dataset_ids,
+                sample_scope_sha256s,
                 metrics: aggregate(pairs)?,
             })
         })
         .collect::<CoreResult<Vec<_>>>()?;
     let payload = TeacherShadowReportPayload {
-        schema_version: TEACHER_SHADOW_SCHEMA_VERSION,
+        schema_version: TEACHER_SHADOW_REPORT_SCHEMA_VERSION,
         session_id: set.session_id.clone(),
         shadow_result_sha256: shadow_hashes.into_iter().next().unwrap_or_default(),
         generated_at: generated_at.to_owned(),

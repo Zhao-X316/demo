@@ -14,6 +14,7 @@ pub mod objective_recognition;
 pub mod ordinary_paper_recognition;
 pub mod pilot_data_gate;
 pub mod pilot_data_rights;
+pub mod pilot_evidence_bundle;
 pub mod service;
 pub mod shadow_pilot;
 pub mod short_answer_grading;
