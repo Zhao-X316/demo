@@ -16,6 +16,7 @@ mod dictation_provider;
 mod dictation_run;
 mod exam_commands;
 mod exam_intake;
+mod learning_commands;
 mod objective_provider;
 mod objective_run;
 mod office_answers;
@@ -92,6 +93,7 @@ fn main() {
             commands::anomaly_reassign,
             commands::suggest_match,
             exam_commands::class_operations_dashboard,
+            learning_commands::class_wrongbook_dashboard,
             exam_commands::kp_list,
             exam_commands::kp_create,
             exam_commands::kp_rename,

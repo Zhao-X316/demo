@@ -7,10 +7,20 @@ import Records from "./pages/Records";
 import Settings from "./pages/Settings";
 import Exam from "./pages/Exam";
 import ClassDashboard from "./pages/ClassDashboard";
+import LearningInsights from "./pages/LearningInsights";
 import { AppModule, DashboardTargetView } from "./api/classDashboard";
 
 type Module = AppModule;
-type View = "dashboard" | "today" | "desk" | "library" | "students" | "records" | "settings" | "exam";
+type View =
+  | "dashboard"
+  | "today"
+  | "desk"
+  | "library"
+  | "students"
+  | "records"
+  | "settings"
+  | "exam"
+  | "learning";
 
 const NAV: { key: View; icon: string; label: string }[] = [
   { key: "dashboard", icon: "▦", label: "班级概览" },
@@ -32,7 +42,7 @@ const EXAM_NAV: { key: View; icon: string; label: string }[] = [
 export default function App() {
   const [module, setModule] = useState<Module>("recitation");
   const [view, setView] = useState<View>("dashboard");
-  const nav = module === "recitation" ? NAV : EXAM_NAV;
+  const nav = view === "learning" ? [] : module === "recitation" ? NAV : EXAM_NAV;
 
   const switchModule = (next: Module) => {
     setModule(next);
@@ -55,16 +65,16 @@ export default function App() {
           <span className="kbd">⌘K</span>
         </div>
         <div className="navsec">模块</div>
-        <div className={module === "recitation" ? "mod-row on" : "mod-row"} onClick={() => switchModule("recitation")}>
+        <div className={module === "recitation" && view !== "learning" ? "mod-row on" : "mod-row"} onClick={() => switchModule("recitation")}>
           <span className="di">📖</span>背诵批改
         </div>
-        <div className={module === "exam" ? "mod-row on" : "mod-row"} onClick={() => switchModule("exam")}>
+        <div className={module === "exam" && view !== "learning" ? "mod-row on" : "mod-row"} onClick={() => switchModule("exam")}>
           <span className="di">✎</span>改作业
         </div>
-        <div className="mod-row">
-          <span className="di">⌗</span>错题本<span className="soon">即将</span>
+        <div className={view === "learning" ? "mod-row on" : "mod-row"} onClick={() => setView("learning")}>
+          <span className="di">⌗</span>错题与掌握
         </div>
-        <div className="navsec">{module === "recitation" ? "背诵" : "作业"}</div>
+        {view !== "learning" && <div className="navsec">{module === "recitation" ? "背诵" : "作业"}</div>}
         <nav>
           {nav.map((n) => (
             <button
@@ -88,6 +98,18 @@ export default function App() {
         {view === "records" && <Records />}
         {view === "settings" && <Settings />}
         {view === "exam" && <Exam />}
+        {view === "learning" && (
+          <LearningInsights
+            onOpenExam={() => {
+              setModule("exam");
+              setView("exam");
+            }}
+            onOpenStudents={() => {
+              setModule("recitation");
+              setView("students");
+            }}
+          />
+        )}
       </main>
     </div>
   );

@@ -1,0 +1,16 @@
+[package]
+name = "module-wrongbook"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "M3 错题事实与订正状态只读模型"
+
+[dependencies]
+suite-core = { path = "../core" }
+serde.workspace = true
+rusqlite = "0.31"
+
+[dev-dependencies]
+module-exam = { path = "../module-exam" }
+module-knowledge = { path = "../module-knowledge" }
