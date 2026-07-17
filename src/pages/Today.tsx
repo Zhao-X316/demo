@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   RecitationPointState,
   StructuredPointCard,
@@ -10,7 +10,7 @@ import {
   humanDecide,
 } from "../api/dashboard";
 import { Class, RecContent, Student, TaskGenerateResult, classesList, contentsList, studentsList } from "../api/manage";
-import { AudioPlayer } from "../components/AudioPlayer";
+import { AudioPlayer, AudioPlayerHandle } from "../components/AudioPlayer";
 import { Avatar } from "../components/ui";
 import { AssignModal } from "../components/modals";
 
@@ -38,15 +38,25 @@ function pointDraft(point: StructuredPointCard): PointDraft {
   };
 }
 
-function timeSpanText(point: StructuredPointCard) {
-  if (!point.evidence_spans.length) return "未定位到对应片段";
+function formatTimestamp(milliseconds: number) {
+  const totalTenths = Math.max(0, Math.floor(milliseconds / 100));
+  const minutes = Math.floor(totalTenths / 600);
+  const seconds = (totalTenths % 600) / 10;
+  return `${minutes}:${seconds.toFixed(1).padStart(4, "0")}`;
+}
+
+function validEvidenceSpans(point: StructuredPointCard) {
   return point.evidence_spans
-    .map((span) => {
-      const start = typeof span.start_ms === "number" ? `${(span.start_ms / 1000).toFixed(1)}s` : "—";
-      const end = typeof span.end_ms === "number" ? `${(span.end_ms / 1000).toFixed(1)}s` : "—";
-      return `${start}–${end}${span.text ? `「${span.text}」` : ""}`;
-    })
-    .join("；");
+    .map((span, index) => ({ ...span, index }))
+    .filter(
+      (span): span is typeof span & { start_ms: number; end_ms: number } =>
+        typeof span.start_ms === "number" &&
+        Number.isFinite(span.start_ms) &&
+        span.start_ms >= 0 &&
+        typeof span.end_ms === "number" &&
+        Number.isFinite(span.end_ms) &&
+        span.end_ms > span.start_ms,
+    );
 }
 
 function taskResultText(r: TaskGenerateResult) {
@@ -226,6 +236,8 @@ function TaskRow({
   const [pointReviewEnabled, setPointReviewEnabled] = useState(false);
   const [pointDrafts, setPointDrafts] = useState<Record<number, PointDraft>>({});
   const [pointError, setPointError] = useState("");
+  const [activeSpanKey, setActiveSpanKey] = useState("");
+  const audioPlayerRef = useRef<AudioPlayerHandle>(null);
   useEffect(() => {
     setNote(sub?.human_note ?? "");
     setAudioState("idle");
@@ -237,6 +249,7 @@ function TaskRow({
       ),
     );
     setPointError("");
+    setActiveSpanKey("");
   }, [
     sub?.submission_id,
     sub?.file_path,
@@ -322,6 +335,24 @@ function TaskRow({
     setPointError("");
   };
 
+  const playEvidenceSpan = async (
+    point: StructuredPointCard,
+    span: { start_ms: number; end_ms: number; index: number },
+  ) => {
+    const key = `${point.point_result_id}:${span.index}`;
+    setPointError("");
+    try {
+      if (audioState !== "ready" || !audioPlayerRef.current) {
+        throw new Error("录音尚未准备好，请稍后再试");
+      }
+      await audioPlayerRef.current.playRange(span.start_ms, span.end_ms);
+      setActiveSpanKey(key);
+    } catch (error) {
+      setActiveSpanKey("");
+      setPointError(String(error));
+    }
+  };
+
   const dot =
     t.status === "passed" ? "" : t.status === "failed" ? "f" : sub ? "w" : "n";
   const hasAsr = Boolean(sub?.recognized_text?.trim());
@@ -405,9 +436,11 @@ function TaskRow({
             <section>
               <h3>原始录音</h3>
               <AudioPlayer
+                ref={audioPlayerRef}
                 path={sub.file_path}
                 onReady={() => setAudioState("ready")}
                 onError={() => setAudioState("error")}
+                onRangeEnd={() => setActiveSpanKey("")}
               />
               {audioState === "idle" && <div className="evidence-hint">正在验证录音是否可读…</div>}
               {audioState === "error" && <div className="evidence-error">录音无法读取或格式不受支持，不能终审；可重开任务后重新提交。</div>}
@@ -482,6 +515,7 @@ function TaskRow({
               <div className="point-list">
                 {sub.structured_score.points.map((point) => {
                   const draft = pointDrafts[point.point_result_id] ?? pointDraft(point);
+                  const evidenceSpans = validEvidenceSpans(point);
                   const editable = pointReviewEnabled && (!sub.human_result || reviewMode !== "view");
                   const shownState =
                     sub.human_result && reviewMode === "view" && point.teacher_state
@@ -496,7 +530,38 @@ function TaskRow({
                         <div>
                           <b>{point.canonical_text}</b>
                           <p>{point.reason}</p>
-                          <small>{timeSpanText(point)}</small>
+                          {evidenceSpans.length > 0 ? (
+                            <div className="point-spans">
+                              {evidenceSpans.map((span) => {
+                                const key = `${point.point_result_id}:${span.index}`;
+                                return (
+                                  <button
+                                    type="button"
+                                    className={activeSpanKey === key ? "active" : ""}
+                                    key={key}
+                                    disabled={audioState !== "ready"}
+                                    onClick={() => playEvidenceSpan(point, span)}
+                                    title={
+                                      audioState === "ready"
+                                        ? "跳到并只播放这段录音"
+                                        : "录音准备好后可跳播"
+                                    }
+                                  >
+                                    <span aria-hidden="true">▶</span>
+                                    {formatTimestamp(span.start_ms)}–
+                                    {formatTimestamp(span.end_ms)}
+                                    {span.text ? <em>「{span.text}」</em> : null}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <small>
+                              {point.evidence_spans.length
+                                ? "时间片段不可用，请对照 ASR 原文或完整录音"
+                                : "未定位到对应片段，请对照 ASR 原文或完整录音"}
+                            </small>
+                          )}
                         </div>
                         <span className="point-confidence">
                           {Math.round(point.confidence * 100)}%
