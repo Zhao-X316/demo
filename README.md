@@ -94,6 +94,10 @@ npm run acceptance:subjective:build
 cargo test --manifest-path src-tauri/Cargo.toml --example t6_subjective_fixture
 ```
 
+当前主观题夹具 schema v2 覆盖 2 名学生 × 3 题（单槽填空、多槽填空、双评分点简答），
+可由服务级生命周期测试验证逐项终审、成绩发布和学习证据落账。真 `.app` 验收仍需在隔离
+`HOME` 下完成界面操作与重启回读，不能用上述命令通过替代 GUI 验收。
+
 ## 安全红线
 
 - 云凭据（火山 App ID / Access Token）只存本机 `secrets.json`（0600），**绝不入库、不打进包**。

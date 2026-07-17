@@ -29,7 +29,8 @@ use module_exam::service::papers::{
 };
 #[cfg(test)]
 use module_exam::service::subjective::{
-    accept_subjective_suggestion, correct_subjective_suggestion,
+    accept_subjective_suggestion, correct_subjective_components, SubjectiveComponentGradeInput,
+    SubjectiveWorkbenchRow,
 };
 use module_exam::service::subjective::{
     list_subjective_workbench, load_short_answer_grade_request, record_ocr_ai_run_transcription,
@@ -60,7 +61,7 @@ use suite_core::models::{ArchiveStatus, ArtifactKind, PrivacyClass};
 
 const FIXTURE_BUNDLE_ID: &str = "com.jiaofu.suite.subjectivefixture";
 const FIXTURE_TITLE: &str = "答题卡主观题隔离验收";
-const FIXTURE_SCHEMA: i64 = 1;
+const FIXTURE_SCHEMA: i64 = 2;
 const TEACHER: &str = "subjective-fixture-teacher";
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
@@ -70,6 +71,7 @@ struct Scenario {
     student_no: &'static str,
     student_name: &'static str,
     fill_text: &'static str,
+    multi_fill_text: &'static str,
     short_text: &'static str,
     short_mode: ShortMode,
 }
@@ -85,6 +87,7 @@ const SCENARIOS: [Scenario; 2] = [
         student_no: "S001",
         student_name: "建议明确",
         fill_text: "1842年",
+        multi_fill_text: "1842年 广州",
         short_text: "洋务派只学习西方技术，没有改变封建制度，而且内部管理腐败。",
         short_mode: ShortMode::Full,
     },
@@ -92,6 +95,7 @@ const SCENARIOS: [Scenario; 2] = [
         student_no: "S002",
         student_name: "分歧待判",
         fill_text: "1840年",
+        multi_fill_text: "1840年 广州",
         short_text: "洋务运动彻底改变了封建制度，但内部管理腐败。",
         short_mode: ShortMode::Contradicted,
     },
@@ -109,6 +113,7 @@ struct FixtureReport {
     workbench_rows: usize,
     attempts: usize,
     short_answer_analyses: i64,
+    subjective_components: i64,
     confirmed_rows: usize,
     confirmation_levels: BTreeMap<String, i64>,
     suggestion_outcomes: BTreeMap<String, i64>,
@@ -122,6 +127,7 @@ struct FixtureReport {
 struct ContentBundle {
     assessment_version_id: i64,
     fill_item_id: i64,
+    multi_fill_item_id: i64,
     short_item_id: i64,
 }
 
@@ -417,6 +423,127 @@ fn seed_content(conn: &Connection, class_id: i64, subject_id: i64) -> AppResult<
     )?;
     promote_question_version(conn, fill_version.id, "L3", TEACHER, Some("主观题隔离验收"))?;
 
+    let multi_fill_question = create_question(
+        conn,
+        &NewQuestion {
+            owner_scope: "personal",
+            owner_id: TEACHER,
+            question_family_id: None,
+            rights_status: "unknown",
+            sharing_allowed: false,
+        },
+    )?;
+    let multi_fill_version = create_question_version(
+        conn,
+        &NewQuestionVersion {
+            question_id: multi_fill_question.id,
+            revision: 1,
+            question_type: "fill_blank",
+            stem: "《南京条约》签订于____年，开放____等五处通商口岸。",
+            material_text: None,
+            max_score: 2.0,
+            source_artifact_id: None,
+            source_anchor_json: None,
+            supersedes_version_id: None,
+            quality_level: "L0",
+            state: "draft",
+            options: &[],
+        },
+    )?;
+    let multi_fill_slots = [
+        NewAnswerSlot {
+            stable_id: Some("treaty_year_multi"),
+            order_index: 0,
+            canonical_answers_json: r#"{"schema_version":1,"answers":["1842年","1842"]}"#,
+            normalization_rules_json: None,
+            max_score: 1.0,
+        },
+        NewAnswerSlot {
+            stable_id: Some("treaty_port"),
+            order_index: 1,
+            canonical_answers_json: r#"{"schema_version":1,"answers":["广州"]}"#,
+            normalization_rules_json: None,
+            max_score: 1.0,
+        },
+    ];
+    let multi_fill_answer = create_answer_key_version(
+        conn,
+        &NewAnswerKeyVersion {
+            question_version_id: multi_fill_version.id,
+            revision: 1,
+            answer_json: r#"{"schema_version":1,"values":["1842年 广州"],"slots":[{"stable_id":"treaty_year_multi","canonical_answers":["1842年","1842"]},{"stable_id":"treaty_port","canonical_answers":["广州"]}]}"#,
+            state: "confirmed",
+            confirmed_by: Some(TEACHER),
+            supersedes_answer_key_id: None,
+            slots: &multi_fill_slots,
+        },
+    )?;
+    let multi_fill_points = [
+        NewRubricPoint {
+            stable_id: Some("treaty_year_multi"),
+            order_index: 0,
+            canonical_text: "准确写出1842年",
+            allowed_paraphrases_json: Some(r#"["1842"]"#),
+            required_concepts_json: Some(r#"["1842"]"#),
+            max_score: 1.0,
+        },
+        NewRubricPoint {
+            stable_id: Some("treaty_port"),
+            order_index: 1,
+            canonical_text: "准确写出广州",
+            allowed_paraphrases_json: None,
+            required_concepts_json: Some(r#"["广州"]"#),
+            max_score: 1.0,
+        },
+    ];
+    let multi_fill_rubric = create_rubric_version(
+        conn,
+        &NewRubricVersion {
+            question_version_id: multi_fill_version.id,
+            revision: 1,
+            max_score: 2.0,
+            state: "confirmed",
+            confirmed_by: Some(TEACHER),
+            supersedes_rubric_id: None,
+            points: &multi_fill_points,
+        },
+    )?;
+    let multi_fill_links = create_link_set(
+        conn,
+        multi_fill_version.id,
+        map.id,
+        1,
+        "confirmed",
+        Some(TEACHER),
+        None,
+    )?;
+    let mut multi_slot_stmt = conn.prepare(
+        "SELECT public_id FROM k1_answer_slots
+         WHERE answer_key_version_id=?1 ORDER BY order_index,id",
+    )?;
+    let multi_slot_public_ids = multi_slot_stmt
+        .query_map([multi_fill_answer.id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(multi_slot_stmt);
+    for slot_public_id in &multi_slot_public_ids {
+        add_source_links(
+            conn,
+            multi_fill_links.id,
+            "answer_slot",
+            slot_public_id,
+            knowledge.id,
+            ability.id,
+            "recall",
+        )?;
+    }
+    promote_question_version(
+        conn,
+        multi_fill_version.id,
+        "L3",
+        TEACHER,
+        Some("主观题多槽隔离验收"),
+    )?;
+
     let short_question = create_question(
         conn,
         &NewQuestion {
@@ -577,10 +704,25 @@ fn seed_content(conn: &Connection, class_id: i64, subject_id: i64) -> AppResult<
             presentation_snapshot_json: r#"{"schema_version":1,"question_no":"2","page_no":1}"#,
         },
     )?;
+    let multi_fill_item = add_assessment_item(
+        conn,
+        assessment.assessment_version_id,
+        &NewAssessmentItem {
+            question_version_id: multi_fill_version.id,
+            answer_key_version_id: multi_fill_answer.id,
+            rubric_version_id: multi_fill_rubric.id,
+            link_set_id: multi_fill_links.id,
+            order_index: 2,
+            score: 2.0,
+            option_order_json: None,
+            presentation_snapshot_json: r#"{"schema_version":1,"question_no":"3","page_no":1}"#,
+        },
+    )?;
     confirm_assessment_version(conn, assessment.assessment_version_id, TEACHER)?;
     Ok(ContentBundle {
         assessment_version_id: assessment.assessment_version_id,
         fill_item_id: fill_item.id,
+        multi_fill_item_id: multi_fill_item.id,
         short_item_id: short_item.id,
     })
 }
@@ -845,7 +987,7 @@ fn seed_fixture(data_dir: &Path) -> AppResult<FixtureReport> {
         &FixtureArtifact {
             filename: "blank-template.png",
             title: "答题卡主观题空白模板",
-            answer: "第1题填空；第2题简答",
+            answer: "第1题填空；第2题简答；第3题多槽填空",
             kind: ArtifactKind::Image,
             parent_artifact_id: None,
             derivative_type: None,
@@ -853,8 +995,8 @@ fn seed_fixture(data_dir: &Path) -> AppResult<FixtureReport> {
         },
     )?;
     let template_json = format!(
-        r#"{{"schema_version":2,"items":[{{"assessment_item_id":{},"region_index":0,"question_type":"fill_blank"}},{{"assessment_item_id":{},"region_index":0,"question_type":"short_answer"}}]}}"#,
-        content.fill_item_id, content.short_item_id
+        r#"{{"schema_version":2,"items":[{{"assessment_item_id":{},"region_index":0,"question_type":"fill_blank"}},{{"assessment_item_id":{},"region_index":0,"question_type":"short_answer"}},{{"assessment_item_id":{},"region_index":0,"question_type":"fill_blank"}}]}}"#,
+        content.fill_item_id, content.short_item_id, content.multi_fill_item_id
     );
     conn.execute(
         "INSERT INTO exam_answer_sheet_template_revisions_v2
@@ -900,11 +1042,28 @@ fn seed_fixture(data_dir: &Path) -> AppResult<FixtureReport> {
             &FixtureArtifact {
                 filename: &format!("{}-aligned.png", scenario.student_no),
                 title: &format!("{}号已配准答题卡", scenario.student_no),
-                answer: "第1题填空；第2题简答",
+                answer: "第1题填空；第2题简答；第3题多槽填空",
                 kind: ArtifactKind::Page,
                 parent_artifact_id: Some(page_artifact_id),
                 derivative_type: Some("answer_sheet_aligned_input"),
                 accent: "#465ac8",
+            },
+        )?;
+        let (multi_fill_crop_id, multi_fill_hash, multi_fill_bytes) = artifact(
+            &conn,
+            &archive_dir,
+            &FixtureArtifact {
+                filename: &format!("{}-multi-fill.png", scenario.student_no),
+                title: "第3题 · 多槽填空",
+                answer: scenario.multi_fill_text,
+                kind: ArtifactKind::Crop,
+                parent_artifact_id: Some(aligned_artifact_id),
+                derivative_type: Some("answer_sheet_subjective_region"),
+                accent: if scenario.student_no == "S001" {
+                    "#228b57"
+                } else {
+                    "#c07020"
+                },
             },
         )?;
         let (fill_crop_id, fill_hash, fill_bytes) = artifact(
@@ -1020,9 +1179,23 @@ fn seed_fixture(data_dir: &Path) -> AppResult<FixtureReport> {
                 confirmed_by: Some(TEACHER),
             },
         )?;
+        let multi_fill_region = record_answer_region(
+            &conn,
+            &NewAnswerRegionRevision {
+                page_id: page.id,
+                assessment_item_id: content.multi_fill_item_id,
+                region_index: 0,
+                bbox_json: r#"{"schema_version":1,"x":0.08,"y":0.84,"width":0.84,"height":0.12}"#,
+                crop_artifact_id: Some(multi_fill_crop_id),
+                mapping_confidence: Some(1.0),
+                decision: "teacher_confirmed",
+                reason_code: Some("SUBJECTIVE_FIXTURE"),
+                confirmed_by: Some(TEACHER),
+            },
+        )?;
         let region_ids_json = format!(
-            r#"{{"schema_version":1,"region_revision_ids":[{},{}]}}"#,
-            fill_region.id, short_region.id
+            r#"{{"schema_version":1,"region_revision_ids":[{},{},{}]}}"#,
+            fill_region.id, short_region.id, multi_fill_region.id
         );
         conn.execute(
             "INSERT INTO exam_answer_sheet_page_materializations_v2
@@ -1057,6 +1230,18 @@ fn seed_fixture(data_dir: &Path) -> AppResult<FixtureReport> {
             "INSERT INTO exam_answer_sheet_region_routes_v2
              (materialization_id,answer_region_revision_id,assessment_item_id,region_index,
               recognition_route,question_type,created_at)
+             VALUES (?1,?2,?3,0,'handwriting_ocr','fill_blank',?4)",
+            (
+                materialization_id,
+                multi_fill_region.id,
+                content.multi_fill_item_id,
+                &created_at,
+            ),
+        )?;
+        conn.execute(
+            "INSERT INTO exam_answer_sheet_region_routes_v2
+             (materialization_id,answer_region_revision_id,assessment_item_id,region_index,
+              recognition_route,question_type,created_at)
              VALUES (?1,?2,?3,0,'handwriting_ocr','short_answer',?4)",
             (
                 materialization_id,
@@ -1083,6 +1268,15 @@ fn seed_fixture(data_dir: &Path) -> AppResult<FixtureReport> {
             scenario.short_text,
             &format!("subjective-fixture:{}:short:ocr", scenario.student_no),
         )?;
+        seed_ocr(
+            &mut conn,
+            multi_fill_region.id,
+            multi_fill_crop_id,
+            &multi_fill_hash,
+            &multi_fill_bytes,
+            scenario.multi_fill_text,
+            &format!("subjective-fixture:{}:multi-fill:ocr", scenario.student_no),
+        )?;
         seed_short_grade(
             &mut conn,
             short_transcription_id,
@@ -1098,7 +1292,7 @@ fn seed_fixture(data_dir: &Path) -> AppResult<FixtureReport> {
             "assessment_title": FIXTURE_TITLE,
             "assessment_version_id": content.assessment_version_id,
             "students": SCENARIOS.len(),
-            "items_per_student": 2
+            "items_per_student": 3
         }))?,
     )?;
     drop(conn);
@@ -1169,6 +1363,10 @@ fn inspect_fixture(data_dir: &Path, phase: &str) -> AppResult<FixtureReport> {
             &conn,
             "SELECT COUNT(*) FROM exam_short_answer_grade_analyses_v2 WHERE state='active'",
         )?,
+        subjective_components: count(
+            &conn,
+            "SELECT COUNT(*) FROM exam_grade_decision_subjective_components_v2",
+        )?,
         confirmed_rows: workbench
             .rows
             .iter()
@@ -1226,7 +1424,7 @@ fn verify_fixture(data_dir: &Path, phase: &str) -> AppResult<FixtureReport> {
     )?;
     expect(report.integrity_check == "ok", "integrity_check 必须为 ok")?;
     expect(report.foreign_key_violations == 0, "夹具不能包含外键违规")?;
-    expect(report.workbench_rows == 4, "工作台必须显示 4 条主观题证据")?;
+    expect(report.workbench_rows == 6, "工作台必须显示 6 条主观题证据")?;
     expect(report.attempts == 2, "工作台必须显示 2 份答题卡")?;
     expect(
         report.short_answer_analyses == 2,
@@ -1235,8 +1433,8 @@ fn verify_fixture(data_dir: &Path, phase: &str) -> AppResult<FixtureReport> {
     expect(
         report.suggestion_outcomes
             == BTreeMap::from([
-                ("correct".to_owned(), 2),
-                ("incorrect".to_owned(), 1),
+                ("correct".to_owned(), 3),
+                ("incorrect".to_owned(), 2),
                 ("partial".to_owned(), 1),
             ]),
         "建议结果分布不符合固定夹具",
@@ -1245,6 +1443,10 @@ fn verify_fixture(data_dir: &Path, phase: &str) -> AppResult<FixtureReport> {
     match phase {
         "seeded" => {
             expect(report.confirmed_rows == 0, "seeded 阶段不能有老师终审")?;
+            expect(
+                report.subjective_components == 0,
+                "seeded 阶段不能有逐项人工终审账本",
+            )?;
             expect(
                 report.confirmation_levels.is_empty(),
                 "seeded 阶段不能有 grade decision",
@@ -1259,14 +1461,18 @@ fn verify_fixture(data_dir: &Path, phase: &str) -> AppResult<FixtureReport> {
             )?;
         }
         "reviewed" => {
-            expect(report.confirmed_rows == 4, "reviewed 阶段必须完成 4 条终审")?;
+            expect(report.confirmed_rows == 6, "reviewed 阶段必须完成 6 条终审")?;
             expect(
                 report.confirmation_levels
                     == BTreeMap::from([
                         ("teacher_accepted".to_owned(), 2),
-                        ("teacher_corrected".to_owned(), 2),
+                        ("teacher_corrected".to_owned(), 4),
                     ]),
-                "reviewed 阶段必须是 2 条接受建议 + 2 条人工修正",
+                "reviewed 阶段必须是 2 条接受建议 + 4 条人工修正",
+            )?;
+            expect(
+                report.subjective_components == 7,
+                "reviewed 阶段必须保存 7 条逐槽/逐评分点结论",
             )?;
             expect(
                 report.attempt_states == BTreeMap::from([("ready_to_publish".to_owned(), 2)]),
@@ -1279,16 +1485,20 @@ fn verify_fixture(data_dir: &Path, phase: &str) -> AppResult<FixtureReport> {
         }
         "published" => {
             expect(
-                report.confirmed_rows == 4,
-                "published 阶段必须保留 4 条终审",
+                report.confirmed_rows == 6,
+                "published 阶段必须保留 6 条终审",
             )?;
             expect(
                 report.confirmation_levels
                     == BTreeMap::from([
                         ("teacher_accepted".to_owned(), 2),
-                        ("teacher_corrected".to_owned(), 2),
+                        ("teacher_corrected".to_owned(), 4),
                     ]),
                 "published 阶段评分来源必须保持不变",
+            )?;
+            expect(
+                report.subjective_components == 7,
+                "published 阶段必须保留 7 条逐项人工结论",
             )?;
             expect(
                 report.attempt_states == BTreeMap::from([("published".to_owned(), 2)]),
@@ -1299,8 +1509,8 @@ fn verify_fixture(data_dir: &Path, phase: &str) -> AppResult<FixtureReport> {
                 "必须显式发布 2 份答题卡",
             )?;
             expect(
-                report.active_learning_evidence == 8,
-                "每个已发布题目应生成知识与能力两类证据",
+                report.active_learning_evidence == 20,
+                "发布后必须按单槽、评分点和多槽组成生成 20 条正式证据",
             )?;
         }
         _ => return Err(invalid("--phase 只能是 seeded、reviewed 或 published")),
@@ -1309,30 +1519,163 @@ fn verify_fixture(data_dir: &Path, phase: &str) -> AppResult<FixtureReport> {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy)]
+struct FixtureComponentDecision<'a> {
+    stable_id: &'a str,
+    teacher_score: f64,
+    evidence_text: Option<&'a str>,
+    teacher_note: &'a str,
+}
+
+#[cfg(test)]
+fn fixture_component_inputs(
+    row: &SubjectiveWorkbenchRow,
+    decisions: &[FixtureComponentDecision<'_>],
+) -> AppResult<Vec<SubjectiveComponentGradeInput>> {
+    let (raw, field, source_type) = if row.question_type == "fill_blank" {
+        (&row.answer_slots_json, "answer_slots", "answer_slot")
+    } else if row.question_type == "short_answer" {
+        (&row.rubric_points_json, "rubric_points", "rubric_point")
+    } else {
+        return Err(invalid("夹具只支持填空和简答逐项终审"));
+    };
+    let value: serde_json::Value = serde_json::from_str(raw)?;
+    let components = value
+        .get(field)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| invalid(format!("夹具工作台缺少 {field}")))?;
+    if components.len() != decisions.len() {
+        return Err(invalid("夹具逐项决策数量与当前答案版本不一致"));
+    }
+    components
+        .iter()
+        .map(|component| {
+            let stable_id = component
+                .get("stable_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| invalid("夹具逐项定义缺少 stable_id"))?;
+            let source_public_id = component
+                .get("source_public_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| invalid("夹具逐项定义缺少 source_public_id"))?;
+            let decision = decisions
+                .iter()
+                .find(|decision| decision.stable_id == stable_id)
+                .ok_or_else(|| invalid(format!("夹具缺少 {stable_id} 的人工结论")))?;
+            Ok(SubjectiveComponentGradeInput {
+                source_type: source_type.to_owned(),
+                source_public_id: source_public_id.to_owned(),
+                teacher_score: decision.teacher_score,
+                evidence_text: decision.evidence_text.map(str::to_owned),
+                teacher_note: Some(decision.teacher_note.to_owned()),
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
 fn review_and_publish_with_services(data_dir: &Path) -> AppResult<()> {
     let assessment_version_id = marker_assessment_version(data_dir)?;
     let conn = suite_core::db::open(&data_dir.join("data.db"))?;
     let workbench = list_subjective_workbench(&conn, Some(assessment_version_id), 100)?;
     for row in &workbench.rows {
-        match (row.student_no.as_str(), row.question_type.as_str()) {
-            ("S001", "fill_blank") | ("S001", "short_answer") => {
+        match (row.student_no.as_str(), row.question_no.as_str()) {
+            ("S001", "1") | ("S001", "2") => {
                 accept_subjective_suggestion(&conn, row.suggestion_id, TEACHER)?;
             }
-            ("S002", "fill_blank") => {
-                correct_subjective_suggestion(
+            ("S001", "3") => {
+                let components = fixture_component_inputs(
+                    row,
+                    &[
+                        FixtureComponentDecision {
+                            stable_id: "treaty_year_multi",
+                            teacher_score: 1.0,
+                            evidence_text: Some("1842年"),
+                            teacher_note: "年份正确",
+                        },
+                        FixtureComponentDecision {
+                            stable_id: "treaty_port",
+                            teacher_score: 1.0,
+                            evidence_text: Some("广州"),
+                            teacher_note: "通商口岸正确",
+                        },
+                    ],
+                )?;
+                correct_subjective_components(
                     &conn,
                     row.suggestion_id,
-                    0.0,
-                    Some("原图写为1840年，与确认答案不一致"),
+                    &components,
+                    "两个填空槽位均按原图逐项确认",
                     TEACHER,
                 )?;
             }
-            ("S002", "short_answer") => {
-                correct_subjective_suggestion(
+            ("S002", "1") => {
+                let components = fixture_component_inputs(
+                    row,
+                    &[FixtureComponentDecision {
+                        stable_id: "treaty_year",
+                        teacher_score: 0.0,
+                        evidence_text: Some("1840年"),
+                        teacher_note: "原图年份与确认答案不一致",
+                    }],
+                )?;
+                correct_subjective_components(
                     &conn,
                     row.suggestion_id,
-                    2.0,
-                    Some("制度局限表述形成矛盾，仅内部管理腐败评分点得分"),
+                    &components,
+                    "按原图确认年份错误",
+                    TEACHER,
+                )?;
+            }
+            ("S002", "2") => {
+                let components = fixture_component_inputs(
+                    row,
+                    &[
+                        FixtureComponentDecision {
+                            stable_id: "institution_limit",
+                            teacher_score: 0.0,
+                            evidence_text: Some("彻底改变了封建制度"),
+                            teacher_note: "与评分点形成明确矛盾",
+                        },
+                        FixtureComponentDecision {
+                            stable_id: "internal_corruption",
+                            teacher_score: 2.0,
+                            evidence_text: Some("内部管理腐败"),
+                            teacher_note: "该评分点完整覆盖",
+                        },
+                    ],
+                )?;
+                correct_subjective_components(
+                    &conn,
+                    row.suggestion_id,
+                    &components,
+                    "制度局限不得分，内部管理腐败得满分",
+                    TEACHER,
+                )?;
+            }
+            ("S002", "3") => {
+                let components = fixture_component_inputs(
+                    row,
+                    &[
+                        FixtureComponentDecision {
+                            stable_id: "treaty_year_multi",
+                            teacher_score: 0.0,
+                            evidence_text: Some("1840年"),
+                            teacher_note: "年份错误",
+                        },
+                        FixtureComponentDecision {
+                            stable_id: "treaty_port",
+                            teacher_score: 1.0,
+                            evidence_text: Some("广州"),
+                            teacher_note: "通商口岸正确",
+                        },
+                    ],
+                )?;
+                correct_subjective_components(
+                    &conn,
+                    row.suggestion_id,
+                    &components,
+                    "多槽填空按原图分别判定",
                     TEACHER,
                 )?;
             }
@@ -1416,8 +1759,9 @@ mod tests {
     fn seeded_fixture_has_machine_analysis_without_teacher_effects() {
         let (root, data_dir) = test_data_dir("seeded");
         let report = seed_fixture(&data_dir).unwrap();
-        assert_eq!(report.workbench_rows, 4);
+        assert_eq!(report.workbench_rows, 6);
         assert_eq!(report.short_answer_analyses, 2);
+        assert_eq!(report.subjective_components, 0);
         assert_eq!(report.confirmed_rows, 0);
         fs::remove_dir_all(root).unwrap();
     }
@@ -1429,7 +1773,8 @@ mod tests {
         review_and_publish_with_services(&data_dir).unwrap();
         let report = verify_fixture(&data_dir, "published").unwrap();
         assert_eq!(report.published_publications, 2);
-        assert_eq!(report.active_learning_evidence, 8);
+        assert_eq!(report.subjective_components, 7);
+        assert_eq!(report.active_learning_evidence, 20);
         fs::remove_dir_all(root).unwrap();
     }
 }
