@@ -4,15 +4,22 @@
 //! 快照。未评估、证据不足和需要支持严格分开；快照不会修改成绩、任务、错题
 //! 或上游证据。
 
+pub mod class_profile;
 pub mod profile;
 
 use suite_core::models::ModuleKey;
 use suite_core::ports::{Migration, Module};
 
-static MIGRATIONS: &[Migration] = &[Migration {
-    id: "profile_0001",
-    sql: include_str!("../migrations/0001_student_profile_snapshots.sql"),
-}];
+static MIGRATIONS: &[Migration] = &[
+    Migration {
+        id: "profile_0001",
+        sql: include_str!("../migrations/0001_student_profile_snapshots.sql"),
+    },
+    Migration {
+        id: "profile_0002",
+        sql: include_str!("../migrations/0002_class_profile_snapshots.sql"),
+    },
+];
 
 pub fn profile_migrations() -> &'static [Migration] {
     MIGRATIONS

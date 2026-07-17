@@ -1,6 +1,7 @@
-"""M6.1-1 班级运行仪表盘浏览器冒烟测试。
+"""M6.1 班级运行仪表盘与掌握快照浏览器冒烟测试。
 
-通过浏览器端 Tauri invoke mock 验证页面布局、班级切换和跨模块跳转；
+通过浏览器端 Tauri invoke mock 验证运行事实、掌握预览/确认、热力图、
+班级切换和跨模块跳转；
 后端 SQL 口径由 Rust 单元测试覆盖。
 """
 
@@ -9,6 +10,96 @@ from playwright.sync_api import expect, sync_playwright
 
 MOCK_SCRIPT = r"""
 window.__dashboardCalls = [];
+window.__makeClassProfile = (revision = 1) => ({
+  public_id: `class-profile-${revision}`,
+  revision,
+  class: {
+    id: 1, name: "八年级一班", term: "2026秋",
+    textbook: "中国历史八上", enabled_student_count: 4
+  },
+  range_start: "2026-06-18", range_end: "2026-07-17",
+  scope_kind: "latest_exact_range_student_snapshots",
+  evidence_cutoff_at: "2026-07-16T11:50:00Z",
+  policy: {
+    public_id: "class-policy-1", revision: 1,
+    min_eligible_students: 3, min_eligible_ratio: 0.5,
+    common_support_ratio_at_or_above: 0.4
+  },
+  source_watermark: "a".repeat(64),
+  total_student_count: 4, snapshot_student_count: 3, eligible_student_count: 3,
+  knowledge_node_total: 1, knowledge_node_sample_sufficient: 1,
+  ability_node_total: 0, ability_node_sample_sufficient: 0,
+  state: "teacher_confirmed", payload_sha256: "b".repeat(64),
+  generated_by: "local_teacher", generated_at: "2026-07-16T12:00:00Z",
+  confirmed_by: "local_teacher", confirmed_at: "2026-07-16T12:00:00Z",
+  is_stale: false, stale_reason: null,
+  inputs: [
+    {
+      student: { id: 1, class_id: 1, student_no: "01", name: "小林" },
+      student_snapshot_public_id: "student-profile-1", inclusion_status: "included",
+      detail: "已纳入：最新个人快照范围一致且未过期。"
+    },
+    {
+      student: { id: 2, class_id: 1, student_no: "02", name: "小周" },
+      student_snapshot_public_id: "student-profile-2", inclusion_status: "included",
+      detail: "已纳入：最新个人快照范围一致且未过期。"
+    },
+    {
+      student: { id: 3, class_id: 1, student_no: "03", name: "小郑" },
+      student_snapshot_public_id: "student-profile-3", inclusion_status: "included",
+      detail: "已纳入：最新个人快照范围一致且未过期。"
+    },
+    {
+      student: { id: 4, class_id: 1, student_no: "04", name: "小吴" },
+      student_snapshot_public_id: null, inclusion_status: "missing_snapshot",
+      detail: "尚未生成个人掌握快照。"
+    }
+  ],
+  knowledge_metrics: [{
+    public_id: "class-node-1", target_type: "knowledge_node",
+    target_public_id: "knowledge-1", target_title: "洋务运动失败原因",
+    average_mastery_score: 0.37, class_status: "common_needs_support",
+    confidence_level: "medium", total_student_count: 4, snapshot_student_count: 3,
+    assessed_student_count: 3, eligible_student_count: 3,
+    needs_support_count: 2, developing_count: 1, stable_count: 0,
+    insufficient_evidence_count: 0, unassessed_count: 0,
+    missing_snapshot_count: 1, scope_mismatch_count: 0, stale_snapshot_count: 0,
+    eligible_ratio: 0.75, needs_support_ratio: 2 / 3, sample_sufficient: true,
+    last_evidence_at: "2026-07-16T11:40:00Z",
+    source_breakdown: { rubric_point: 9 },
+    explanation: "合格样本 3/4；其中需要支持 2/3。",
+    cells: [
+      {
+        student: { id: 1, class_id: 1, student_no: "01", name: "小林" },
+        student_snapshot_public_id: "student-profile-1",
+        student_metric_public_id: "metric-1", status: "needs_support",
+        mastery_score: 0.2, confidence_level: "medium",
+        last_evidence_at: "2026-07-16T11:30:00Z"
+      },
+      {
+        student: { id: 2, class_id: 1, student_no: "02", name: "小周" },
+        student_snapshot_public_id: "student-profile-2",
+        student_metric_public_id: "metric-2", status: "needs_support",
+        mastery_score: 0.3, confidence_level: "medium",
+        last_evidence_at: "2026-07-16T11:35:00Z"
+      },
+      {
+        student: { id: 3, class_id: 1, student_no: "03", name: "小郑" },
+        student_snapshot_public_id: "student-profile-3",
+        student_metric_public_id: "metric-3", status: "developing",
+        mastery_score: 0.6, confidence_level: "medium",
+        last_evidence_at: "2026-07-16T11:40:00Z"
+      },
+      {
+        student: { id: 4, class_id: 1, student_no: "04", name: "小吴" },
+        student_snapshot_public_id: null, student_metric_public_id: null,
+        status: "missing_snapshot", mastery_score: null, confidence_level: "none",
+        last_evidence_at: null
+      }
+    ]
+  }],
+  ability_metrics: []
+});
 window.__TAURI_INTERNALS__ = {
   transformCallback: () => 1,
   unregisterCallback: () => undefined,
@@ -61,7 +152,7 @@ window.__TAURI_INTERNALS__ = {
           calculated_at: "2026-07-16T12:00:00Z", as_of_date: args.asOfDate,
           recitation_watermark: "2026-07-16T11:30:00Z", exam_watermark: "2026-07-16T11:45:00Z"
         },
-        class: { id: 1, name: "八年级一班", term: "2026秋", textbook: "中国历史八上", enabled_student_count: 2 },
+        class: { id: 1, name: "八年级一班", term: "2026秋", textbook: "中国历史八上", enabled_student_count: 4 },
         recitation: {
           expected_student_count: 2, completed_student_count: 1, expected_task_count: 3,
           confirmed_task_count: 2, submitted_task_count: 2, not_submitted_student_count: 1,
@@ -90,6 +181,20 @@ window.__TAURI_INTERNALS__ = {
             recitation_confirmed_task_count: 0, exam_status: "not_submitted",
             exam_expected_submission_count: 1, exam_submitted_submission_count: 0,
             exam_published_submission_count: 0
+          },
+          {
+            student_id: 3, student_no: "03", student_name: "小郑",
+            recitation_status: "not_scheduled", recitation_due_task_count: 0,
+            recitation_confirmed_task_count: 0, exam_status: "not_assigned",
+            exam_expected_submission_count: 0, exam_submitted_submission_count: 0,
+            exam_published_submission_count: 0
+          },
+          {
+            student_id: 4, student_no: "04", student_name: "小吴",
+            recitation_status: "not_scheduled", recitation_due_task_count: 0,
+            recitation_confirmed_task_count: 0, exam_status: "not_assigned",
+            exam_expected_submission_count: 0, exam_submitted_submission_count: 0,
+            exam_published_submission_count: 0
           }
         ],
         actions: [
@@ -105,6 +210,37 @@ window.__TAURI_INTERNALS__ = {
           }
         ]
       };
+    }
+    if (cmd === "latest_class_profile") {
+      return Number(args.classId) === 1 ? window.__makeClassProfile(1) : null;
+    }
+    if (cmd === "preview_class_profile") {
+      return {
+        schema_version: 1, rule_version: "m6.1-latest-student-snapshots-v1",
+        calculated_at: "2026-07-17T12:00:00Z",
+        class: {
+          id: 1, name: "八年级一班", term: "2026秋",
+          textbook: "中国历史八上", enabled_student_count: 4
+        },
+        range_start: args.input.rangeStart, range_end: args.input.rangeEnd,
+        policy: {
+          public_id: "class-policy-1", revision: 1,
+          min_eligible_students: 3, min_eligible_ratio: 0.5,
+          common_support_ratio_at_or_above: 0.4
+        },
+        counts: {
+          total_student_count: 4, snapshot_student_count: 3, eligible_student_count: 3,
+          missing_snapshot_count: 1, scope_mismatch_count: 0, stale_snapshot_count: 0,
+          knowledge_node_total: 1, knowledge_node_sample_sufficient: 1,
+          ability_node_total: 0, ability_node_sample_sufficient: 0
+        },
+        source_watermark: "c".repeat(64), can_generate: true, blocker: null,
+        denominator_note: "班级结论同时显示合格样本人数/全班人数。",
+        scope_note: "只使用每位启用学生最新的个人快照。"
+      };
+    }
+    if (cmd === "generate_class_profile") {
+      return window.__makeClassProfile(2);
     }
     if (cmd === "day_rollover") return { rolled: 0, reviews: 0 };
     if (cmd === "dashboard_today") {
@@ -143,13 +279,28 @@ def test_dashboard(base_url: str) -> None:
         expect(page.locator(".dashboard-stat")).to_have_count(5)
         expect(page.get_by_text("1 / 2 人", exact=False)).to_be_visible()
         expect(page.get_by_text("处理背诵识别失败", exact=True)).to_be_visible()
-        expect(page.locator(".dashboard-students tbody tr")).to_have_count(2)
+        expect(page.locator(".dashboard-students tbody tr")).to_have_count(4)
         expect(page.get_by_text("未提交、识别失败和证据不足都不是“能力差”", exact=False)).to_be_visible()
+        expect(page.get_by_text("班级掌握快照", exact=True)).to_be_visible()
+        expect(page.get_by_text("3/4 人", exact=True).first).to_be_visible()
+        expect(page.get_by_text("洋务运动失败原因", exact=True).first).to_be_visible()
+        expect(page.locator(".class-profile-heatmap tbody tr")).to_have_count(4)
+        expect(page.locator(".class-profile-cell.needs-support")).to_have_count(2)
+
+        page.locator(".class-profile-heatmap thead button").click()
+        expect(page.locator(".class-profile-detail")).to_contain_text("合格样本")
+
+        page.get_by_role("button", name="预览班级掌握").click()
+        expect(page.get_by_text("生成前确认", exact=True)).to_be_visible()
+        expect(page.get_by_text("有当前快照", exact=False)).to_be_visible()
+        page.get_by_role("button", name="确认生成班级快照").click()
+        expect(page.locator(".class-profile-footnote")).to_contain_text("快照 v2")
         page.screenshot(path="/tmp/jiaofu-class-dashboard.png", full_page=True)
 
         page.locator(".dashboard-scope select").select_option("2")
         expect(page.locator(".dashboard-context b")).to_have_text("八年级二班")
         expect(page.get_by_text("当前没有待处理项。", exact=True)).to_be_visible()
+        expect(page.get_by_text("尚未生成班级掌握快照", exact=False)).to_be_visible()
 
         page.locator(".dashboard-scope select").select_option("1")
         expect(page.locator(".dashboard-context b")).to_have_text("八年级一班")
@@ -167,7 +318,10 @@ def test_dashboard(base_url: str) -> None:
         narrow.wait_for_load_state("networkidle")
         expect(narrow.get_by_role("heading", name="班级概览")).to_be_visible()
         expect(narrow.locator(".dashboard-stat")).to_have_count(5)
+        expect(narrow.get_by_text("班级掌握快照", exact=True)).to_be_visible()
         narrow.screenshot(path="/tmp/jiaofu-class-dashboard-narrow.png", full_page=True)
+        narrow.get_by_text("班级掌握快照", exact=True).scroll_into_view_if_needed()
+        narrow.screenshot(path="/tmp/jiaofu-class-dashboard-profile-narrow.png")
 
         empty = browser.new_page(viewport={"width": 1100, "height": 800})
         empty.add_init_script("window.__NO_CLASSES__ = true;")

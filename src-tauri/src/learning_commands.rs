@@ -1,5 +1,9 @@
 //! M3 错题事实 / M6 掌握分析教师入口命令。
 
+use module_profile::class_profile::{
+    self as class_profile_service, ClassProfilePreview, ClassProfileScope, ClassProfileSnapshot,
+    GenerateClassProfileInput,
+};
 use module_profile::profile::{
     self, GenerateStudentProfileInput, StudentProfilePreview, StudentProfileScope,
     StudentProfileSnapshot,
@@ -103,6 +107,23 @@ pub struct StudentProfileScopeRequest {
     student_id: i64,
     range_start: String,
     range_end: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassProfileScopeRequest {
+    class_id: i64,
+    range_start: String,
+    range_end: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateClassProfileRequest {
+    class_id: i64,
+    range_start: String,
+    range_end: String,
+    expected_source_watermark: String,
 }
 
 #[tauri::command]
@@ -323,5 +344,53 @@ pub fn latest_student_profile(
 ) -> Result<Option<StudentProfileSnapshot>, String> {
     let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     profile::latest_student_profile(&connection, class_id, student_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn preview_class_profile(
+    state: State<'_, AppState>,
+    input: ClassProfileScopeRequest,
+) -> Result<ClassProfilePreview, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    class_profile_service::preview_class_profile(
+        &connection,
+        &ClassProfileScope {
+            class_id: input.class_id,
+            range_start: &input.range_start,
+            range_end: &input.range_end,
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn generate_class_profile(
+    state: State<'_, AppState>,
+    input: GenerateClassProfileRequest,
+) -> Result<ClassProfileSnapshot, String> {
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    class_profile_service::generate_class_profile(
+        &mut connection,
+        &GenerateClassProfileInput {
+            scope: ClassProfileScope {
+                class_id: input.class_id,
+                range_start: &input.range_start,
+                range_end: &input.range_end,
+            },
+            expected_source_watermark: &input.expected_source_watermark,
+            confirmed_by: "local_teacher",
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn latest_class_profile(
+    state: State<'_, AppState>,
+    class_id: i64,
+) -> Result<Option<ClassProfileSnapshot>, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    class_profile_service::latest_class_profile(&connection, class_id)
         .map_err(|error| error.to_string())
 }

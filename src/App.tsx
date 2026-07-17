@@ -90,7 +90,12 @@ export default function App() {
         <div className="sidebar-foot">本机 · 数据不出门 · v0.3</div>
       </aside>
       <main className="main">
-        {view === "dashboard" && <ClassDashboard onNavigate={navigate} />}
+        {view === "dashboard" && (
+          <ClassDashboard
+            onNavigate={navigate}
+            onOpenLearning={() => setView("learning")}
+          />
+        )}
         {view === "today" && <Today />}
         {view === "desk" && <GradingDesk />}
         {view === "library" && <Library />}
