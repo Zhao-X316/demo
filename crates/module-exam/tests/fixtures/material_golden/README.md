@@ -34,6 +34,33 @@ cargo run -p module-exam --example check_real_pilot_workspace -- \
 
 草稿阶段会以退出码 3 和稳定 blocker code 明确列出缺失项；只有真实 gate、四类数据权利证据、三类真实标注和三类 provider 预测全部互相匹配，且数据集资产仍是受限目录内的 active 普通文件、大小与 SHA-256 未漂移时，才返回 `ready_for_provider_shadow=true`。该检查不解析图片正文、不调用 provider，也不写成绩。
 
+## 一条命令可恢复推进到总证据包
+
+三类材料、预测、gate 和 rights 全部就绪后，不再分别手工执行机器汇总、老师报告和总包命令。首次运行：
+
+```bash
+cargo run -p module-exam --example advance_real_pilot_workspace -- \
+  --workspace /受限目录/jiaofu-real-pilot-001 \
+  --as-of 2026-07-16 \
+  --started-at 2026-07-16T08:00:00Z \
+  --predictions-generated-at 2026-07-16T08:05:00Z \
+  --completed-at 2026-07-16T08:10:00Z \
+  --provider-ref "<provider 不透明引用>" \
+  --model-ref "<model 不透明引用>" \
+  --provider-config-version "<配置版本不透明引用>"
+```
+
+若工作区尚未就绪，命令退出码为 3 且不写任何结果；若已就绪，它只写
+`results/shadow_result_v1.json`，然后以 `TEACHER_OBSERVATIONS_NOT_READY` 等待老师。把同一批三类材料的人工基线/AI 辅助观察写入 `teacher/observations_v1.json` 后，再运行：
+
+```bash
+cargo run -p module-exam --example advance_real_pilot_workspace -- \
+  --workspace /受限目录/jiaofu-real-pilot-001 \
+  --as-of 2026-07-17
+```
+
+第二次运行会复核既有机器结果仍与当前 gate、rights、三类 manifest 和 predictions 完全一致，再生成 `teacher_shadow_report_v2.json` 与 `pilot_evidence_bundle_v1.json`。重复运行幂等；任何上游漂移、错误会话或不同结果占用同一路径都会失败关闭。仓库外受限工作区新写结果在 Unix 上固定为 `0600`，最终状态仍保持 `release_authorized=false`。
+
 离线生成报告：
 
 ```bash

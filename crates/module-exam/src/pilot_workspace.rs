@@ -32,7 +32,7 @@ use crate::teacher_shadow::{TeacherShadowObservationSet, TEACHER_SHADOW_SCHEMA_V
 
 pub const PILOT_WORKSPACE_SCHEMA_VERSION: i64 = 1;
 
-const INDEX_FILE: &str = "pilot_workspace_v1.json";
+pub(crate) const INDEX_FILE: &str = "pilot_workspace_v1.json";
 const GATE_FILE: &str = "pilot_data_gate_v1.json";
 const DATASET_FILE: &str = "pilot_dataset_v1.json";
 const RIGHTS_EVIDENCE_FILE: &str = "pilot_data_rights_evidence_v1.json";
@@ -142,14 +142,14 @@ fn safe_relative(relative: &str) -> CoreResult<&Path> {
 }
 
 #[cfg(unix)]
-fn set_mode(path: &Path, mode: u32) -> CoreResult<()> {
+pub(crate) fn set_mode(path: &Path, mode: u32) -> CoreResult<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
         .map_err(|error| CoreError::Io(error.to_string()))
 }
 
 #[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: u32) -> CoreResult<()> {
+pub(crate) fn set_mode(_path: &Path, _mode: u32) -> CoreResult<()> {
     Ok(())
 }
 
@@ -182,7 +182,7 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> CoreResult<()> {
     write_new(path, &bytes)
 }
 
-fn read_json<T: DeserializeOwned>(root: &Path, relative: &str) -> CoreResult<T> {
+pub(crate) fn read_json<T: DeserializeOwned>(root: &Path, relative: &str) -> CoreResult<T> {
     let path = root.join(safe_relative(relative)?);
     let metadata = fs::symlink_metadata(&path).map_err(|error| CoreError::Io(error.to_string()))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -315,15 +315,31 @@ fn workspace_readme(index: &PilotWorkspaceIndex) -> String {
 4. 按仓库 `crates/module-exam/tests/fixtures/material_golden/README.md` 生成四类回执和 `pilot_data_rights_evidence_v1.json`，把证据 hash/时间写回 gate，再由授权人将 gate 改为 `approved`。
 5. 在 `materials/` 标注三类真实 manifest；真实 case 必须使用 `real_photo` 或 `real_scan`、artifact hash、预期路由和预期单元。将批准后的 gate policy hash 写入三个 manifest。
 6. provider 预测写入三个 `*_predictions_v1.json`。模型、配置和时间由 `run_shadow_pilot` 冻结，不得把学生正文写入报告。
-7. 运行只读检查：
+7. 用同一个可恢复命令推进试点：
+
+```bash
+cargo run -p module-exam --example advance_real_pilot_workspace -- \
+  --workspace "<本工作区绝对路径>" \
+  --as-of <YYYY-MM-DD> \
+  --started-at <RFC3339> \
+  --predictions-generated-at <RFC3339> \
+  --completed-at <RFC3339> \
+  --provider-ref "<provider 不透明引用>" \
+  --model-ref "<model 不透明引用>" \
+  --provider-config-version "<配置版本不透明引用>"
+```
+
+工作区未就绪时该命令不写结果，只返回稳定 blocker；首次就绪运行会生成
+`results/shadow_result_v1.json` 并等待老师观察。之后填写
+`teacher/observations_v1.json`，直接用同一命令只传 `--workspace` 和 `--as-of`
+再次运行，即可生成老师报告和 `results/pilot_evidence_bundle_v1.json`。既有结果会按
+hash 幂等复用，输入漂移或跨会话混用时拒绝继续。只读排障仍可运行：
 
 ```bash
 cargo run -p module-exam --example check_real_pilot_workspace -- \
   --workspace "<本工作区绝对路径>" \
   --as-of <YYYY-MM-DD>
 ```
-
-只有输出 `ready_for_provider_shadow=true` 时才能执行真实三材料机器影子会话。之后再填写 `teacher/observations_v1.json`，生成老师报告和 `results/pilot_evidence_bundle_v1.json`。
 
 ## 安全边界
 

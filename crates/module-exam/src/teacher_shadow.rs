@@ -638,9 +638,14 @@ pub fn write_teacher_shadow_report_once(
     let bytes = serde_json::to_vec_pretty(report)
         .map_err(|error| CoreError::Config(format!("老师影子报告序列化失败：{error}")))?;
     let write_result = (|| -> CoreResult<()> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
             .open(&pending_path)
             .map_err(|error| CoreError::Io(error.to_string()))?;
         file.write_all(&bytes)

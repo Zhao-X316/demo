@@ -276,9 +276,14 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> CoreResult<()> {
     fs::create_dir_all(parent).map_err(|error| CoreError::Io(error.to_string()))?;
     let temporary = parent.join(format!(".pilot-write-{}.tmp", ids::new_public_id()));
     let result = (|| -> CoreResult<()> {
-        let mut file = fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
+        let mut options = fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
             .open(&temporary)
             .map_err(|error| CoreError::Io(error.to_string()))?;
         file.write_all(bytes)

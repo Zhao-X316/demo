@@ -414,9 +414,14 @@ pub fn write_pilot_evidence_bundle_once(
     let bytes = serde_json::to_vec_pretty(bundle)
         .map_err(|error| CoreError::Config(format!("试点总验收包序列化失败：{error}")))?;
     let write_result = (|| -> CoreResult<()> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
             .open(&pending_path)
             .map_err(|error| CoreError::Io(error.to_string()))?;
         file.write_all(&bytes)
