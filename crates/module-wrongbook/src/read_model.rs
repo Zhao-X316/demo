@@ -1636,4 +1636,191 @@ mod tests {
             "closed"
         );
     }
+
+    #[test]
+    fn statistics_filter_current_activity_and_only_aggregate_teacher_confirmed_causes() {
+        use crate::error_cause::{confirm_error_causes, ConfirmErrorCausesInput};
+        use crate::report::{wrongbook_statistics, WrongbookStatisticsScope};
+
+        let mut fixture = Fixture::new();
+        let student_one = fixture.students[0];
+        let student_two = fixture.students[1];
+        fixture.publish_response(student_one, 1, "first", 0.0, "2026-07-01T08:00:00Z");
+        let (latest_decision, latest_publication) =
+            fixture.publish_response(student_one, 2, "retry", 1.0, "2026-07-16T08:00:00Z");
+        fixture.publish_response(student_two, 1, "first", 0.0, "2026-06-01T08:00:00Z");
+        confirm_error_causes(
+            &mut fixture.conn,
+            &ConfirmErrorCausesInput {
+                class_id: fixture.class_one,
+                student_id: student_one,
+                question_version_public_id: "question-version-1",
+                grade_decision_public_id: &latest_decision,
+                publication_public_id: &latest_publication,
+                cause_codes: &["concept_confusion".into(), "fact_error".into()],
+                teacher_note: Some("根本原因与直接原因混淆"),
+                confirmed_by: "teacher",
+            },
+        )
+        .unwrap();
+
+        let before: i64 = fixture
+            .conn
+            .query_row("SELECT total_changes()", [], |row| row.get(0))
+            .unwrap();
+        let statistics = wrongbook_statistics(
+            &fixture.conn,
+            &WrongbookStatisticsScope {
+                class_id: fixture.class_one,
+                student_id: None,
+                range_start: "2026-07-10",
+                range_end: "2026-07-17",
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            fixture
+                .conn
+                .query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            before
+        );
+        assert_eq!(statistics.summary.student_count, 1);
+        assert_eq!(statistics.summary.fact_count, 1);
+        assert_eq!(statistics.summary.evidence_count, 2);
+        assert_eq!(statistics.summary.repeated_error_count, 1);
+        assert_eq!(statistics.summary.confirmed_cause_review_count, 1);
+        assert_eq!(statistics.summary.confirmed_cause_item_count, 2);
+        assert_eq!(statistics.students[0].student_id, student_one);
+        assert_eq!(statistics.question_causes.len(), 1);
+        assert_eq!(statistics.knowledge_causes.len(), 1);
+        assert_eq!(
+            statistics.question_causes[0]
+                .causes
+                .iter()
+                .map(|cause| cause.cause_label.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["史实错误", "概念混淆"])
+        );
+        assert!(statistics.meta.activity_filter_rule.contains("最近一次"));
+        assert!(statistics
+            .meta
+            .evidence_count_rule
+            .contains("不等同于独立掌握"));
+    }
+
+    #[test]
+    fn report_snapshot_freezes_scope_and_student_export_excludes_classmates() {
+        use crate::report::{
+            create_report_snapshot, write_report_snapshot_csv, CreateWrongbookReportInput,
+        };
+
+        let mut fixture = Fixture::new();
+        let student_one = fixture.students[0];
+        let student_two = fixture.students[1];
+        fixture.publish_response(student_one, 1, "first", 0.0, "2026-07-16T08:00:00Z");
+        fixture.publish_response(student_two, 1, "first", 1.0, "2026-07-16T09:00:00Z");
+
+        let snapshot = create_report_snapshot(
+            &mut fixture.conn,
+            &CreateWrongbookReportInput {
+                report_kind: "student_parent",
+                class_id: fixture.class_one,
+                student_id: Some(student_one),
+                range_start: "2026-07-01",
+                range_end: "2026-07-17",
+                generated_by: "teacher",
+            },
+        )
+        .unwrap();
+        assert_eq!(snapshot.student_id, Some(student_one));
+        assert_eq!(snapshot.fact_count, 1);
+        assert_eq!(snapshot.evidence_count, 1);
+        assert!(snapshot.suggested_file_name.ends_with(".csv"));
+
+        let payload: String = fixture
+            .conn
+            .query_row(
+                "SELECT payload_json FROM wb_report_snapshots WHERE public_id=?1",
+                [&snapshot.public_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(payload.contains("小十"));
+        assert!(!payload.contains("小二"));
+
+        let path = std::env::temp_dir().join(format!(
+            "jiaofu-wrongbook-report-{}.csv",
+            suite_core::domain::ids::new_public_id()
+        ));
+        let written =
+            write_report_snapshot_csv(&fixture.conn, &snapshot.public_id, path.to_str().unwrap())
+                .unwrap();
+        assert_eq!(written.sha256, snapshot.csv_sha256);
+        let csv = std::fs::read_to_string(&path).unwrap();
+        assert!(csv.contains("小十"));
+        assert!(!csv.contains("小二"));
+        assert!(csv.contains("不含名次、班级排名或掌握总分"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert!(write_report_snapshot_csv(
+            &fixture.conn,
+            &snapshot.public_id,
+            path.to_str().unwrap()
+        )
+        .is_err());
+        std::fs::remove_file(path).unwrap();
+
+        let immutable = fixture.conn.execute(
+            "UPDATE wb_report_snapshots SET evidence_count=99 WHERE public_id=?1",
+            [&snapshot.public_id],
+        );
+        assert!(immutable.is_err());
+    }
+
+    #[test]
+    fn report_scope_validation_is_fail_closed_without_snapshot_rows() {
+        use crate::report::{create_report_snapshot, CreateWrongbookReportInput};
+
+        let mut fixture = Fixture::new();
+        assert!(create_report_snapshot(
+            &mut fixture.conn,
+            &CreateWrongbookReportInput {
+                report_kind: "student_parent",
+                class_id: fixture.class_one,
+                student_id: None,
+                range_start: "2026-07-01",
+                range_end: "2026-07-17",
+                generated_by: "teacher",
+            },
+        )
+        .is_err());
+        assert!(create_report_snapshot(
+            &mut fixture.conn,
+            &CreateWrongbookReportInput {
+                report_kind: "class_summary",
+                class_id: fixture.class_one,
+                student_id: Some(fixture.students[0]),
+                range_start: "2026-07-01",
+                range_end: "2026-07-17",
+                generated_by: "teacher",
+            },
+        )
+        .is_err());
+        assert_eq!(
+            fixture
+                .conn
+                .query_row("SELECT COUNT(*) FROM wb_report_snapshots", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+    }
 }

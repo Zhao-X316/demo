@@ -220,6 +220,40 @@ button.dashboard-action { display: grid; grid-template-columns: 34px minmax(0, 1
 .wrongbook-time b { overflow: hidden; color: var(--text-2); font-size: 10.5px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .learning-rule-note { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; padding: 10px 12px; border-radius: 8px; background: var(--bg-sub); color: var(--text-2); font-size: 11px; line-height: 1.55; }
 .learning-rule-note span { color: var(--muted); }
+.wrongbook-report-panel { display: flex; flex-direction: column; gap: 12px; margin: 12px 0; padding: 15px; border: 1px solid #CFE3D9; border-radius: 10px; background: #F8FCFA; }
+.wrongbook-report-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 14px; }
+.wrongbook-report-head > div:first-child { display: flex; flex-direction: column; gap: 4px; }
+.wrongbook-report-head > div:first-child b { color: var(--text); font-size: 14px; }
+.wrongbook-report-head > div:first-child span { color: var(--muted); font-size: 11px; }
+.wrongbook-report-range { display: flex; align-items: flex-end; gap: 7px; }
+.wrongbook-report-range label { display: flex; flex-direction: column; gap: 4px; }
+.wrongbook-report-range label span { color: var(--muted); font-size: 10.5px; }
+.wrongbook-report-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.wrongbook-report-summary > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); }
+.wrongbook-report-summary span { color: var(--muted); font-size: 10.5px; }
+.wrongbook-report-summary b { color: var(--text); font-size: 17px; }
+.wrongbook-student-facts { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); overflow: hidden; }
+.wrongbook-student-facts-head { display: flex; justify-content: space-between; gap: 10px; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+.wrongbook-student-facts-head b { font-size: 11.5px; }
+.wrongbook-student-facts-head span { color: var(--muted); font-size: 10.5px; }
+.wrongbook-student-facts-list > div { display: grid; grid-template-columns: minmax(130px, 1.4fr) repeat(4, minmax(72px, .7fr)) minmax(160px, 1fr); gap: 8px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line); color: var(--text-2); font-size: 10.5px; }
+.wrongbook-student-facts-list > div:last-child { border-bottom: 0; }
+.wrongbook-student-facts-list b { overflow: hidden; color: var(--text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.wrongbook-distribution-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.wrongbook-distribution { min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.wrongbook-distribution-title { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 7px; }
+.wrongbook-distribution-title b { font-size: 11.5px; }
+.wrongbook-distribution-title span { color: var(--muted); font-size: 10px; }
+.wrongbook-distribution-empty { padding: 12px 0; color: var(--muted); font-size: 10.5px; }
+.wrongbook-distribution-list { display: flex; flex-direction: column; gap: 6px; }
+.wrongbook-distribution-list > div { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(0, 1.2fr); gap: 8px; align-items: start; padding-top: 6px; border-top: 1px solid var(--line); }
+.wrongbook-distribution-list > div:first-child { padding-top: 0; border-top: 0; }
+.wrongbook-distribution-list > div > div:first-child { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.wrongbook-distribution-list b { overflow: hidden; color: var(--text-2); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+.wrongbook-distribution-list > div > div:first-child span { color: var(--muted); font-size: 9.5px; }
+.wrongbook-distribution-list > div > div:last-child { display: flex; flex-wrap: wrap; gap: 4px; }
+.wrongbook-distribution-list > div > div:last-child span { padding: 2px 5px; border-radius: 4px; background: #FFF2DD; color: #94621A; font-size: 9.5px; }
+.wrongbook-report-rule { display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; border-radius: 7px; background: var(--bg-sub); color: var(--muted); font-size: 10px; line-height: 1.45; }
 .schedule-policy-panel { margin: 12px 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
 .schedule-policy-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .schedule-policy-title > div { display: flex; flex-direction: column; gap: 3px; }
@@ -563,6 +597,10 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
   .wrongbook-filters { flex-wrap: wrap; }
   .wrongbook-item { grid-template-columns: 145px minmax(0, 1fr); }
   .wrongbook-time { grid-column: 2; }
+  .wrongbook-report-head { align-items: stretch; flex-direction: column; }
+  .wrongbook-report-range { flex-wrap: wrap; }
+  .wrongbook-student-facts-list > div { grid-template-columns: minmax(120px, 1.2fr) repeat(2, minmax(70px, .6fr)); }
+  .wrongbook-student-facts-list > div span:nth-of-type(n+3) { display: none; }
 }
 
 @media (max-width: 620px) {
@@ -582,4 +620,8 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
   .wrongbook-student { grid-template-columns: 34px minmax(0, 1fr) auto; }
   .wrongbook-student > .tag { grid-column: auto; }
   .wrongbook-time { grid-column: 1; }
+  .wrongbook-report-range { align-items: stretch; flex-direction: column; }
+  .wrongbook-report-summary, .wrongbook-distribution-grid { grid-template-columns: 1fr 1fr; }
+  .wrongbook-student-facts-list > div { grid-template-columns: 1fr 1fr; }
+  .wrongbook-distribution-list > div { grid-template-columns: 1fr; }
 }

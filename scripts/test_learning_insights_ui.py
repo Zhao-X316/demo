@@ -11,6 +11,9 @@ window.__TAURI_INTERNALS__ = {
   convertFileSrc: (path) => path,
   invoke: async (cmd, args = {}) => {
     window.__learningCalls.push({ cmd, args });
+    if (cmd === "plugin:dialog|save") {
+      return "/tmp/八年级一班_错题事实汇总.csv";
+    }
     if (cmd === "classes_list") {
       return window.__NO_CLASSES__ ? [] : [
         { id: 1, name: "八年级一班", term: "2026秋", textbook: "中国历史八上" },
@@ -216,6 +219,106 @@ window.__TAURI_INTERNALS__ = {
         created_by: "local_teacher", created_at: "2026-07-16T12:12:00Z"
       };
     }
+    if (cmd === "wrongbook_statistics") {
+      const input = args.input;
+      const studentOnly = input.studentId === 2;
+      const emptyClass = input.classId === 2;
+      return {
+        meta: {
+          schema_version: 1, rule_version: "m3-current-facts-statistics-v1",
+          calculated_at: "2026-07-16T12:20:00Z",
+          range_start: input.rangeStart, range_end: input.rangeEnd,
+          exam_watermark: emptyClass ? null : "2026-07-16T11:40:00Z",
+          activity_filter_rule: "仅纳入最近一次有效发布作答的上海业务日期落在所选范围内的当前错题事实。",
+          evidence_count_rule: "证据数为入选事实关联的全部当前有效已发布老师评分次数，不等同于独立掌握证据数。"
+        },
+        class: {
+          id: input.classId,
+          name: emptyClass ? "八年级二班" : "八年级一班",
+          term: "2026秋", textbook: "中国历史八上",
+          enabled_student_count: emptyClass ? 1 : 3
+        },
+        selected_student: studentOnly
+          ? { id: 2, student_no: "02", name: "小周" }
+          : null,
+        summary: emptyClass ? {
+          student_count: 0, fact_count: 0, evidence_count: 0,
+          needs_correction_count: 0, corrected_once_count: 0,
+          rechecked_correct_count: 0, repeated_error_count: 0,
+          confirmed_cause_review_count: 0, confirmed_cause_item_count: 0,
+          unlinked_fact_count: 0
+        } : studentOnly ? {
+          student_count: 1, fact_count: 2, evidence_count: 4,
+          needs_correction_count: 0, corrected_once_count: 1,
+          rechecked_correct_count: 1, repeated_error_count: 0,
+          confirmed_cause_review_count: 1, confirmed_cause_item_count: 1,
+          unlinked_fact_count: 1
+        } : {
+          student_count: 2, fact_count: 3, evidence_count: 6,
+          needs_correction_count: 1, corrected_once_count: 1,
+          rechecked_correct_count: 1, repeated_error_count: 1,
+          confirmed_cause_review_count: 1, confirmed_cause_item_count: 1,
+          unlinked_fact_count: 1
+        },
+        students: emptyClass ? [] : studentOnly ? [{
+          student_id: 2, student_no: "02", student_name: "小周",
+          fact_count: 2, evidence_count: 4, needs_correction_count: 0,
+          corrected_once_count: 1, rechecked_correct_count: 1,
+          repeated_error_count: 0, confirmed_cause_review_count: 1,
+          latest_response_at: "2026-07-16T09:00:00Z",
+          latest_verification_at: "2026-07-16T09:00:00Z"
+        }] : [
+          {
+            student_id: 1, student_no: "01", student_name: "小林",
+            fact_count: 1, evidence_count: 2, needs_correction_count: 1,
+            corrected_once_count: 0, rechecked_correct_count: 0,
+            repeated_error_count: 1, confirmed_cause_review_count: 0,
+            latest_response_at: "2026-07-16T08:00:00Z", latest_verification_at: null
+          },
+          {
+            student_id: 2, student_no: "02", student_name: "小周",
+            fact_count: 2, evidence_count: 4, needs_correction_count: 0,
+            corrected_once_count: 1, rechecked_correct_count: 1,
+            repeated_error_count: 0, confirmed_cause_review_count: 1,
+            latest_response_at: "2026-07-16T09:00:00Z",
+            latest_verification_at: "2026-07-16T09:00:00Z"
+          }
+        ],
+        question_causes: emptyClass ? [] : [{
+          public_id: "qv-3", title: "辛亥革命结束了中国封建制度。",
+          confirmed_review_count: 1,
+          causes: [{ cause_code: "concept_confusion", cause_label: "概念混淆", count: 1 }]
+        }],
+        knowledge_causes: emptyClass ? [] : [{
+          public_id: "k-2", title: "辛亥革命局限",
+          confirmed_review_count: 1,
+          causes: [{ cause_code: "concept_confusion", cause_label: "概念混淆", count: 1 }]
+        }]
+      };
+    }
+    if (cmd === "create_wrongbook_report_snapshot") {
+      const input = args.input;
+      return {
+        public_id: "report-snapshot-1", report_kind: input.reportKind,
+        class_id: input.classId, student_id: input.studentId ?? null,
+        range_start: input.rangeStart, range_end: input.rangeEnd,
+        schema_version: 1, rule_version: "m3-wrongbook-report-v1",
+        source_exam_watermark: "2026-07-16T11:40:00Z",
+        evidence_count: input.studentId ? 4 : 6,
+        fact_count: input.studentId ? 2 : 3,
+        confirmed_cause_review_count: 1,
+        payload_sha256: "a".repeat(64), csv_sha256: "b".repeat(64),
+        suggested_file_name: input.studentId ? "小周_学习事实.csv" : "八年级一班_错题事实汇总.csv",
+        generated_by: "local_teacher", generated_at: "2026-07-16T12:21:00Z"
+      };
+    }
+    if (cmd === "write_wrongbook_report_snapshot") {
+      return {
+        snapshot_public_id: args.snapshotPublicId,
+        file_name: "八年级一班_错题事实汇总.csv",
+        byte_size: 2048, sha256: "b".repeat(64)
+      };
+    }
     if (cmd === "class_operations_dashboard") {
       return {
         meta: { schema_version: 2, rule_version: "m6.1-operations-v2",
@@ -271,6 +374,21 @@ def test_learning_insights(base_url: str) -> None:
         expect(page.get_by_text("洋务运动失败的根本原因是？", exact=True)).to_be_visible()
         expect(page.locator(".wrongbook-item .bad-text", has_text="重复出错")).to_be_visible()
         expect(page.get_by_text("尚未绑定已确认的知识点或能力", exact=False)).to_be_visible()
+
+        page.get_by_role("button", name="统计与导出").click()
+        expect(page.get_by_text("班级错题统计与导出", exact=True)).to_be_visible()
+        expect(page.get_by_text("自然学号顺序，不按数量高低排序", exact=True)).to_be_visible()
+        expect(page.get_by_text("题目错因分布", exact=True)).to_be_visible()
+        expect(page.get_by_text("辛亥革命局限", exact=True)).to_be_visible()
+        page.get_by_role("button", name="导出班级表格").click()
+        expect(page.get_by_text("已导出 八年级一班_错题事实汇总.csv", exact=True)).to_be_visible()
+        report_calls = page.evaluate(
+            "() => window.__learningCalls.filter((item) => "
+            "item.cmd === 'create_wrongbook_report_snapshot')"
+        )
+        assert len(report_calls) == 1
+        assert report_calls[0]["args"]["input"]["reportKind"] == "class_summary"
+        assert report_calls[0]["args"]["input"]["studentId"] is None
 
         page.get_by_role("button", name="巩固规则").click()
         expect(page.get_by_text("只有老师确认后才会建立任务", exact=False)).to_be_visible()
@@ -338,6 +456,10 @@ def test_learning_insights(base_url: str) -> None:
         assert reinforcement_input["expectedPolicyPublicId"] == "policy-2"
         assert reinforcement_input["expectedDueDate"] == "2026-07-22"
         assert reinforcement_input["previewedAsOfDate"] == "2026-07-16"
+        page.wait_for_function(
+            "() => window.__learningCalls.filter((item) => "
+            "item.cmd === 'wrongbook_statistics').length >= 4"
+        )
         page.screenshot(path="/tmp/jiaofu-learning-insights.png", full_page=True)
 
         page.get_by_label("筛选订正状态").select_option("needs_correction")
@@ -345,6 +467,15 @@ def test_learning_insights(base_url: str) -> None:
         page.get_by_label("筛选订正状态").select_option("all")
         page.get_by_label("筛选学生").select_option("2")
         expect(page.locator(".wrongbook-item")).to_have_count(2)
+        expect(page.get_by_text("02号 小周 · 学习事实报告", exact=True)).to_be_visible()
+        page.get_by_role("button", name="导出家长沟通表").click()
+        student_report_calls = page.evaluate(
+            "() => window.__learningCalls.filter((item) => "
+            "item.cmd === 'create_wrongbook_report_snapshot')"
+        )
+        assert len(student_report_calls) == 2
+        assert student_report_calls[1]["args"]["input"]["reportKind"] == "student_parent"
+        assert student_report_calls[1]["args"]["input"]["studentId"] == 2
 
         page.get_by_label("筛选学生").select_option("all")
         page.get_by_role("button", name="去题目批改").click()
@@ -360,6 +491,8 @@ def test_learning_insights(base_url: str) -> None:
         narrow.wait_for_load_state("networkidle")
         narrow.locator(".mod-row", has_text="错题与掌握").click()
         expect(narrow.locator(".wrongbook-item")).to_have_count(3)
+        narrow.get_by_role("button", name="统计与导出").click()
+        expect(narrow.get_by_text("班级错题统计与导出", exact=True)).to_be_visible()
         narrow.screenshot(path="/tmp/jiaofu-learning-insights-narrow.png", full_page=True)
 
         empty = browser.new_page(viewport={"width": 1100, "height": 800})

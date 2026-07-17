@@ -7,6 +7,10 @@ use module_wrongbook::reinforcement::{
     self, ConfirmReinforcementInput, ReinforcementAssignment, ReinforcementScopeInput,
     ReinforcementSuggestion,
 };
+use module_wrongbook::report::{
+    self, CreateWrongbookReportInput, WrittenWrongbookReport, WrongbookReportSnapshot,
+    WrongbookStatistics, WrongbookStatisticsScope,
+};
 use serde::Deserialize;
 use suite_core::services::scheduling::{ScheduleHoliday, SchedulePolicy, SchedulePolicyUpdate};
 use tauri::State;
@@ -67,6 +71,25 @@ pub struct UpdateWrongbookSchedulePolicyRequest {
     holiday_policy: String,
     max_shift_days: i64,
     holidays: Vec<ScheduleHoliday>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WrongbookStatisticsRequest {
+    class_id: i64,
+    student_id: Option<i64>,
+    range_start: String,
+    range_end: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateWrongbookReportRequest {
+    report_kind: String,
+    class_id: i64,
+    student_id: Option<i64>,
+    range_start: String,
+    range_end: String,
 }
 
 #[tauri::command]
@@ -189,4 +212,53 @@ pub fn confirm_wrongbook_reinforcement(
         },
     )
     .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn wrongbook_statistics(
+    state: State<'_, AppState>,
+    input: WrongbookStatisticsRequest,
+) -> Result<WrongbookStatistics, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    report::wrongbook_statistics(
+        &connection,
+        &WrongbookStatisticsScope {
+            class_id: input.class_id,
+            student_id: input.student_id,
+            range_start: &input.range_start,
+            range_end: &input.range_end,
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn create_wrongbook_report_snapshot(
+    state: State<'_, AppState>,
+    input: CreateWrongbookReportRequest,
+) -> Result<WrongbookReportSnapshot, String> {
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    report::create_report_snapshot(
+        &mut connection,
+        &CreateWrongbookReportInput {
+            report_kind: &input.report_kind,
+            class_id: input.class_id,
+            student_id: input.student_id,
+            range_start: &input.range_start,
+            range_end: &input.range_end,
+            generated_by: "local_teacher",
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn write_wrongbook_report_snapshot(
+    state: State<'_, AppState>,
+    snapshot_public_id: String,
+    output_path: String,
+) -> Result<WrittenWrongbookReport, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    report::write_report_snapshot_csv(&connection, &snapshot_public_id, &output_path)
+        .map_err(|error| error.to_string())
 }

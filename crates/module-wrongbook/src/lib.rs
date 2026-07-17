@@ -8,6 +8,7 @@ pub mod correction;
 pub mod error_cause;
 pub mod read_model;
 pub mod reinforcement;
+pub mod report;
 
 use suite_core::models::ModuleKey;
 use suite_core::ports::{Migration, Module};
@@ -24,6 +25,10 @@ static MIGRATIONS: &[Migration] = &[
     Migration {
         id: "wrongbook_0003",
         sql: include_str!("../migrations/0003_reinforcement_scheduling.sql"),
+    },
+    Migration {
+        id: "wrongbook_0004",
+        sql: include_str!("../migrations/0004_report_snapshots.sql"),
     },
 ];
 
