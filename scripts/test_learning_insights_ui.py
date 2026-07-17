@@ -20,6 +20,126 @@ window.__TAURI_INTERNALS__ = {
         { id: 2, name: "八年级二班", term: "2026秋", textbook: "中国历史八上" }
       ];
     }
+    if (cmd === "students_list") {
+      return [
+        { id: 1, student_no: "01", name: "小林", class_id: 1, enabled: true },
+        { id: 2, student_no: "02", name: "小周", class_id: 1, enabled: true },
+        { id: 3, student_no: "03", name: "小许", class_id: 2, enabled: true }
+      ];
+    }
+    if (cmd === "preview_student_profile") {
+      const input = args.input;
+      return {
+        schema_version: 1, rule_version: "m6-confirmed-evidence-profile-v1",
+        calculated_at: "2026-07-17T03:00:00Z",
+        student: input.studentId === 2
+          ? { id: 2, class_id: 1, student_no: "02", name: "小周" }
+          : { id: 1, class_id: 1, student_no: "01", name: "小林" },
+        range_start: input.rangeStart, range_end: input.rangeEnd,
+        policy: {
+          public_id: "profile-policy-1", revision: 1,
+          min_independent_groups: 3, min_distinct_dates: 2,
+          min_distinct_sources: 2, needs_support_below: 0.6,
+          stable_at_or_above: 0.85, freshness_days: 30
+        },
+        counts: {
+          mapped_formal_evidence: 4, knowledge_node_total: 3,
+          knowledge_node_assessed: 2, knowledge_node_eligible: 1,
+          ability_node_total: 2, ability_node_assessed: 1,
+          ability_node_eligible: 0, machine_only_excluded: 2,
+          teacher_overall_excluded: 1, unmapped_formal_excluded: 1,
+          referenced_knowledge_map_count: 1
+        },
+        source_watermark: "profile-watermark-1", can_generate: true, blocker: null,
+        scope_note: "范围来自当前正式证据引用的已确认知识地图。",
+        evidence_note: "只纳入老师接受或修正的正式逐点证据。"
+      };
+    }
+    if (cmd === "generate_student_profile") {
+      const input = args.input;
+      window.__generatedProfile = {
+        public_id: "profile-snapshot-1", revision: 1,
+        student: { id: input.studentId, class_id: input.classId,
+          student_no: input.studentId === 2 ? "02" : "01",
+          name: input.studentId === 2 ? "小周" : "小林" },
+        range_start: input.rangeStart, range_end: input.rangeEnd,
+        scope_kind: "confirmed_evidence_maps",
+        evidence_cutoff_at: "2026-07-17T03:00:00Z",
+        policy: {
+          public_id: "profile-policy-1", revision: 1,
+          min_independent_groups: 3, min_distinct_dates: 2,
+          min_distinct_sources: 2, needs_support_below: 0.6,
+          stable_at_or_above: 0.85, freshness_days: 30
+        },
+        source_watermark: "profile-watermark-1", evidence_count: 4,
+        knowledge_node_total: 3, knowledge_node_assessed: 2,
+        knowledge_node_eligible: 1, ability_node_total: 2,
+        ability_node_assessed: 1, ability_node_eligible: 0,
+        state: "teacher_confirmed", payload_sha256: "c".repeat(64),
+        generated_by: "local_teacher", generated_at: "2026-07-17T03:01:00Z",
+        confirmed_by: "local_teacher", confirmed_at: "2026-07-17T03:01:00Z",
+        is_stale: false, stale_reason: null,
+        knowledge_metrics: [
+          {
+            public_id: "profile-metric-1", target_type: "knowledge_node",
+            target_public_id: "k-1", target_title: "洋务运动失败原因",
+            mastery_score: 0.88, status: "stable", confidence_level: "medium",
+            freshness: "fresh", evidence_count: 3, independent_group_count: 3,
+            distinct_date_count: 3, distinct_source_count: 3,
+            last_evidence_at: "2026-07-16T08:00:00Z",
+            source_breakdown: { grading: 3 },
+            explanation: "多次跨日期正式证据显示当前表现较稳定。",
+            evidence: [{
+              public_id: "learning-evidence-1", source_module: "grading",
+              source_type: "question_rubric_point", source_ref_type: "question",
+              source_ref_id: "q-1", decision_ref_type: "grade_decision",
+              decision_ref_id: "decision-1", decision_revision: 1,
+              evidence_kind: "accuracy", value: 1, evidence_quality: 0.95,
+              assessment_context: "closed_book",
+              confirmation_level: "teacher_accepted",
+              occurred_at: "2026-07-16T08:00:00Z",
+              independence_group_key: "question:q-1:2026-07-16",
+              effective_weight: 0.95
+            }]
+          },
+          {
+            public_id: "profile-metric-2", target_type: "knowledge_node",
+            target_public_id: "k-2", target_title: "辛亥革命局限",
+            mastery_score: 0.5, status: "insufficient_evidence", confidence_level: "low",
+            freshness: "fresh", evidence_count: 1, independent_group_count: 1,
+            distinct_date_count: 1, distinct_source_count: 1,
+            last_evidence_at: "2026-07-15T08:00:00Z",
+            source_breakdown: { grading: 1 },
+            explanation: "证据尚未达到跨日期与不同来源门槛。",
+            evidence: []
+          },
+          {
+            public_id: "profile-metric-3", target_type: "knowledge_node",
+            target_public_id: "k-3", target_title: "戊戌变法过程",
+            mastery_score: null, status: "unassessed", confidence_level: "none",
+            freshness: "none", evidence_count: 0, independent_group_count: 0,
+            distinct_date_count: 0, distinct_source_count: 0,
+            last_evidence_at: null, source_breakdown: {},
+            explanation: "所选范围没有老师确认的逐点证据，不解释为零分或薄弱。",
+            evidence: []
+          }
+        ],
+        ability_metrics: [{
+          public_id: "profile-metric-4", target_type: "ability_dimension",
+          target_public_id: "a-1", target_title: "因果分析",
+          mastery_score: 0.7, status: "insufficient_evidence", confidence_level: "low",
+          freshness: "fresh", evidence_count: 1, independent_group_count: 1,
+          distinct_date_count: 1, distinct_source_count: 1,
+          last_evidence_at: "2026-07-16T08:00:00Z",
+          source_breakdown: { grading: 1 },
+          explanation: "高阶能力证据不足，暂不形成稳定结论。", evidence: []
+        }]
+      };
+      return window.__generatedProfile;
+    }
+    if (cmd === "latest_student_profile") {
+      return window.__generatedProfile ?? null;
+    }
     if (cmd === "wrongbook_schedule_policy") {
       return {
         id: 1, public_id: "policy-1", policy_key: "learning_default", revision: 1,
@@ -347,7 +467,7 @@ window.__TAURI_INTERNALS__ = {
         || cmd === "exam_dictation_workbench") {
       return { rows: [], attempts: [] };
     }
-    if (cmd === "students_list" || cmd === "contents_list" || cmd === "questions_list"
+    if (cmd === "contents_list" || cmd === "questions_list"
         || cmd === "kp_list" || cmd === "exam_answers_list"
         || cmd === "exam_fixed_intake_options" || cmd === "anomalies_list"
         || cmd === "recognition_failures_list") return [];
@@ -368,7 +488,33 @@ def test_learning_insights(base_url: str) -> None:
         page.locator(".mod-row", has_text="错题与掌握").click()
         expect(page.get_by_role("heading", name="错题与掌握")).to_be_visible()
         expect(page.get_by_text("订正一次 ≠ 已掌握", exact=False)).to_be_visible()
-        expect(page.get_by_role("button", name="掌握分析 · 待验证")).to_be_disabled()
+        page.get_by_role("button", name="个人掌握快照").click()
+        expect(page.get_by_text("个人学习掌握快照", exact=True)).to_be_visible()
+        expect(page.get_by_label("掌握快照学生")).to_have_value("1")
+        expect(page.get_by_text("正式逐点证据", exact=True)).to_be_visible()
+        preview_notes = page.locator(".profile-preview-notes")
+        expect(preview_notes).to_contain_text("纯机器 2")
+        expect(preview_notes).to_contain_text("仅总体确认 1")
+        expect(preview_notes).to_contain_text("未映射逐点 1")
+        page.get_by_role("button", name="确认生成快照").click()
+        expect(page.get_by_text("第 1 版掌握快照", exact=True)).to_be_visible()
+        expect(page.locator(".profile-metric-title").first).to_contain_text("未评估不等于薄弱")
+        unassessed_metric = page.locator(".profile-metric", has_text="戊戌变法过程")
+        expect(unassessed_metric.get_by_text("戊戌变法过程", exact=True)).to_be_visible()
+        expect(unassessed_metric).to_contain_text("未评估")
+        stable_metric = page.locator(".profile-metric", has_text="洋务运动失败原因")
+        stable_metric.locator("summary").click()
+        expect(stable_metric.get_by_text("闭卷", exact=True)).to_be_visible()
+        profile_calls = page.evaluate(
+            "() => window.__learningCalls.filter((item) => "
+            "item.cmd === 'generate_student_profile')"
+        )
+        assert len(profile_calls) == 1
+        assert profile_calls[0]["args"]["input"]["classId"] == 1
+        assert profile_calls[0]["args"]["input"]["studentId"] == 1
+        page.screenshot(path="/tmp/jiaofu-student-profile.png", full_page=True)
+
+        page.get_by_role("button", name="错题事实").click()
         expect(page.locator(".learning-stat")).to_have_count(4)
         expect(page.locator(".wrongbook-item")).to_have_count(3)
         expect(page.get_by_text("洋务运动失败的根本原因是？", exact=True)).to_be_visible()
@@ -491,6 +637,10 @@ def test_learning_insights(base_url: str) -> None:
         narrow.wait_for_load_state("networkidle")
         narrow.locator(".mod-row", has_text="错题与掌握").click()
         expect(narrow.locator(".wrongbook-item")).to_have_count(3)
+        narrow.get_by_role("button", name="个人掌握快照").click()
+        expect(narrow.get_by_text("个人学习掌握快照", exact=True)).to_be_visible()
+        expect(narrow.get_by_role("button", name="确认生成快照")).to_be_visible()
+        narrow.get_by_role("button", name="错题事实").click()
         narrow.get_by_role("button", name="统计与导出").click()
         expect(narrow.get_by_text("班级错题统计与导出", exact=True)).to_be_visible()
         narrow.screenshot(path="/tmp/jiaofu-learning-insights-narrow.png", full_page=True)

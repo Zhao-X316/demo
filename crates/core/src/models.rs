@@ -13,6 +13,7 @@ pub enum ModuleKey {
     Exam,
     Knowledge,
     Wrongbook,
+    Profile,
 }
 
 impl ModuleKey {
@@ -22,6 +23,7 @@ impl ModuleKey {
             ModuleKey::Exam => "exam",
             ModuleKey::Knowledge => "knowledge",
             ModuleKey::Wrongbook => "wrongbook",
+            ModuleKey::Profile => "profile",
         }
     }
     /// 从数据库字符串解析（未知值兜底为 Recitation）。
@@ -30,6 +32,7 @@ impl ModuleKey {
             "exam" => ModuleKey::Exam,
             "knowledge" => ModuleKey::Knowledge,
             "wrongbook" => ModuleKey::Wrongbook,
+            "profile" => ModuleKey::Profile,
             _ => ModuleKey::Recitation,
         }
     }

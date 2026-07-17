@@ -22,6 +22,7 @@ pub fn run_all_migrations(conn: &Connection) -> CoreResult<()> {
     suite_core::db::run_migrations(conn, module_recitation::recitation_migrations())?;
     suite_core::db::run_migrations(conn, module_exam::exam_migrations())?;
     suite_core::db::run_migrations(conn, module_wrongbook::wrongbook_migrations())?;
+    suite_core::db::run_migrations(conn, module_profile::profile_migrations())?;
     Ok(())
 }
 
@@ -88,7 +89,8 @@ fn has_pending_migrations(conn: &Connection) -> CoreResult<bool> {
         || group_has_pending(conn, module_knowledge::knowledge_migrations())?
         || group_has_pending(conn, module_recitation::recitation_migrations())?
         || group_has_pending(conn, module_exam::exam_migrations())?
-        || group_has_pending(conn, module_wrongbook::wrongbook_migrations())?)
+        || group_has_pending(conn, module_wrongbook::wrongbook_migrations())?
+        || group_has_pending(conn, module_profile::profile_migrations())?)
 }
 
 fn open_managed_database(db_path: &std::path::Path, backup_dir: &std::path::Path) -> CoreResult<Connection> {

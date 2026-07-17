@@ -254,6 +254,66 @@ button.dashboard-action { display: grid; grid-template-columns: 34px minmax(0, 1
 .wrongbook-distribution-list > div > div:last-child { display: flex; flex-wrap: wrap; gap: 4px; }
 .wrongbook-distribution-list > div > div:last-child span { padding: 2px 5px; border-radius: 4px; background: #FFF2DD; color: #94621A; font-size: 9.5px; }
 .wrongbook-report-rule { display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; border-radius: 7px; background: var(--bg-sub); color: var(--muted); font-size: 10px; line-height: 1.45; }
+.student-profile-panel { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+.profile-toolbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 14px; padding: 15px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.profile-toolbar > div:first-child { display: flex; flex-direction: column; gap: 4px; }
+.profile-toolbar > div:first-child b { font-size: 14px; }
+.profile-toolbar > div:first-child span { color: var(--muted); font-size: 11px; line-height: 1.45; }
+.profile-toolbar > div:last-child { display: flex; align-items: flex-end; gap: 7px; }
+.profile-toolbar label { display: flex; flex-direction: column; gap: 4px; }
+.profile-toolbar label span { color: var(--muted); font-size: 10px; }
+.profile-preview { display: flex; flex-direction: column; gap: 10px; padding: 14px; border: 1px solid #D8CFEA; border-radius: 10px; background: #FBF9FD; }
+.profile-preview-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.profile-preview-head > div { display: flex; flex-direction: column; gap: 3px; }
+.profile-preview-head b { font-size: 13px; }
+.profile-preview-head span { color: var(--muted); font-size: 10.5px; }
+.profile-preview-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.profile-preview-stats > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); }
+.profile-preview-stats span { color: var(--muted); font-size: 10.5px; }
+.profile-preview-stats b { font-size: 16px; }
+.profile-preview-notes { display: flex; flex-direction: column; gap: 3px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.profile-blocker { padding: 9px 10px; border-radius: 7px; background: #FFF2DD; color: #855A18; font-size: 11px; }
+.profile-snapshot { display: flex; flex-direction: column; gap: 12px; }
+.profile-snapshot-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 14px; border: 1px solid #CFE3D9; border-radius: 9px; background: #F5FBF8; }
+.profile-snapshot-head > div { display: flex; flex-direction: column; gap: 3px; }
+.profile-snapshot-head b { font-size: 14px; }
+.profile-snapshot-head span { color: var(--muted); font-size: 10.5px; }
+.profile-stale { padding: 9px 10px; border: 1px solid #E7B8B8; border-radius: 7px; background: #FFF5F5; color: #9E3E3E; font-size: 11px; }
+.profile-snapshot-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.profile-snapshot-summary > div { display: flex; flex-direction: column; gap: 4px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.profile-snapshot-summary span { color: var(--muted); font-size: 10.5px; }
+.profile-snapshot-summary b { font-size: 18px; }
+.profile-metric-section { padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.profile-metric-title { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.profile-metric-title b { font-size: 13px; }
+.profile-metric-title span { color: var(--muted); font-size: 10.5px; }
+.profile-metric-list { display: flex; flex-direction: column; gap: 6px; }
+.profile-metric { border: 1px solid var(--line); border-radius: 8px; background: var(--bg-sub); overflow: hidden; }
+.profile-metric.needs_support { border-color: #E7B8B8; }
+.profile-metric.stable { border-color: #CFE3D9; }
+.profile-metric summary { display: grid; grid-template-columns: minmax(180px, 1fr) auto minmax(270px, auto); gap: 12px; align-items: center; padding: 10px 11px; cursor: pointer; list-style: none; }
+.profile-metric summary::-webkit-details-marker { display: none; }
+.profile-metric summary > div:first-child { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.profile-metric summary > div:first-child b { overflow: hidden; font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+.profile-metric summary > div:first-child span { color: var(--muted); font-size: 9.5px; line-height: 1.4; }
+.profile-status { padding: 3px 7px; border-radius: 5px; font-size: 10px; white-space: nowrap; }
+.profile-status.unassessed { background: #EEF0F2; color: #68717A; }
+.profile-status.insufficient_evidence { background: #F3EFFA; color: #70509A; }
+.profile-status.needs_support { background: #FCEAEA; color: #A33F3F; }
+.profile-status.developing { background: #FFF2DD; color: #94621A; }
+.profile-status.stable { background: #EAF6F0; color: #34745B; }
+.profile-metric-numbers { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px 11px; color: var(--text-2); font-size: 10px; }
+.profile-metric-detail { display: flex; flex-direction: column; gap: 9px; padding: 10px 11px; border-top: 1px solid var(--line); background: var(--panel); }
+.profile-metric-detail > button { align-self: flex-start; min-height: 28px; padding: 4px 8px; font-size: 10px; }
+.profile-metric-facts { display: flex; flex-wrap: wrap; gap: 5px 14px; color: var(--muted); font-size: 10px; }
+.profile-metric-facts b { color: var(--text-2); }
+.profile-no-evidence { color: var(--muted); font-size: 10.5px; }
+.profile-evidence-list { display: flex; flex-direction: column; gap: 5px; }
+.profile-evidence-list > div { display: grid; grid-template-columns: minmax(180px, 1fr) repeat(3, auto); gap: 9px; align-items: center; padding: 7px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg-sub); color: var(--text-2); font-size: 9.5px; }
+.profile-evidence-list > div > div { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.profile-evidence-list b { font-size: 10.5px; }
+.profile-evidence-list > div > div span { color: var(--muted); }
+.profile-footnote { padding: 9px 10px; border-radius: 7px; background: var(--bg-sub); color: var(--muted); font-size: 10.5px; }
 .schedule-policy-panel { margin: 12px 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
 .schedule-policy-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .schedule-policy-title > div { display: flex; flex-direction: column; gap: 3px; }
@@ -601,6 +661,11 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
   .wrongbook-report-range { flex-wrap: wrap; }
   .wrongbook-student-facts-list > div { grid-template-columns: minmax(120px, 1.2fr) repeat(2, minmax(70px, .6fr)); }
   .wrongbook-student-facts-list > div span:nth-of-type(n+3) { display: none; }
+  .profile-toolbar { align-items: stretch; flex-direction: column; }
+  .profile-toolbar > div:last-child { flex-wrap: wrap; }
+  .profile-preview-stats, .profile-snapshot-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .profile-metric summary { grid-template-columns: minmax(0, 1fr) auto; }
+  .profile-metric-numbers { grid-column: 1 / -1; justify-content: flex-start; }
 }
 
 @media (max-width: 620px) {
@@ -624,4 +689,11 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
   .wrongbook-report-summary, .wrongbook-distribution-grid { grid-template-columns: 1fr 1fr; }
   .wrongbook-student-facts-list > div { grid-template-columns: 1fr 1fr; }
   .wrongbook-distribution-list > div { grid-template-columns: 1fr; }
+  .profile-toolbar > div:last-child { align-items: stretch; flex-direction: column; }
+  .profile-toolbar select, .profile-toolbar input { width: 100%; }
+  .profile-preview-head, .profile-snapshot-head, .profile-metric-title { align-items: stretch; flex-direction: column; }
+  .profile-preview-stats, .profile-snapshot-summary { grid-template-columns: 1fr 1fr; }
+  .profile-metric summary { grid-template-columns: 1fr; }
+  .profile-metric-numbers { grid-column: auto; justify-content: flex-start; }
+  .profile-evidence-list > div { grid-template-columns: 1fr 1fr; }
 }

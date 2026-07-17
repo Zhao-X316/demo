@@ -368,3 +368,141 @@ export const writeWrongbookReportSnapshot = (
   snapshotPublicId,
   outputPath,
 });
+
+export interface ProfileStudent {
+  id: number;
+  class_id: number;
+  student_no: string;
+  name: string;
+}
+
+export interface ProfilePolicy {
+  public_id: string;
+  revision: number;
+  min_independent_groups: number;
+  min_distinct_dates: number;
+  min_distinct_sources: number;
+  needs_support_below: number;
+  stable_at_or_above: number;
+  freshness_days: number;
+}
+
+export interface ProfilePreviewCounts {
+  mapped_formal_evidence: number;
+  knowledge_node_total: number;
+  knowledge_node_assessed: number;
+  knowledge_node_eligible: number;
+  ability_node_total: number;
+  ability_node_assessed: number;
+  ability_node_eligible: number;
+  machine_only_excluded: number;
+  teacher_overall_excluded: number;
+  unmapped_formal_excluded: number;
+  referenced_knowledge_map_count: number;
+}
+
+export interface StudentProfilePreview {
+  schema_version: number;
+  rule_version: string;
+  calculated_at: string;
+  student: ProfileStudent;
+  range_start: string;
+  range_end: string;
+  policy: ProfilePolicy;
+  counts: ProfilePreviewCounts;
+  source_watermark: string;
+  can_generate: boolean;
+  blocker: string | null;
+  scope_note: string;
+  evidence_note: string;
+}
+
+export interface ProfileEvidenceView {
+  public_id: string;
+  source_module: string;
+  source_type: string;
+  source_ref_type: string;
+  source_ref_id: string;
+  decision_ref_type: string | null;
+  decision_ref_id: string | null;
+  decision_revision: number | null;
+  evidence_kind: string;
+  value: number;
+  evidence_quality: number;
+  assessment_context: string;
+  confirmation_level: string;
+  occurred_at: string;
+  independence_group_key: string;
+  effective_weight: number;
+}
+
+export type ProfileNodeStatus =
+  | "unassessed"
+  | "insufficient_evidence"
+  | "needs_support"
+  | "developing"
+  | "stable";
+
+export interface ProfileNodeMetric {
+  public_id: string;
+  target_type: "knowledge_node" | "ability_dimension";
+  target_public_id: string;
+  target_title: string;
+  mastery_score: number | null;
+  status: ProfileNodeStatus;
+  confidence_level: "none" | "low" | "medium" | "high";
+  freshness: "none" | "fresh" | "aging" | "stale";
+  evidence_count: number;
+  independent_group_count: number;
+  distinct_date_count: number;
+  distinct_source_count: number;
+  last_evidence_at: string | null;
+  source_breakdown: Record<string, number>;
+  explanation: string;
+  evidence: ProfileEvidenceView[];
+}
+
+export interface StudentProfileSnapshot {
+  public_id: string;
+  revision: number;
+  student: ProfileStudent;
+  range_start: string;
+  range_end: string;
+  scope_kind: string;
+  evidence_cutoff_at: string;
+  policy: ProfilePolicy;
+  source_watermark: string;
+  evidence_count: number;
+  knowledge_node_total: number;
+  knowledge_node_assessed: number;
+  knowledge_node_eligible: number;
+  ability_node_total: number;
+  ability_node_assessed: number;
+  ability_node_eligible: number;
+  state: string;
+  payload_sha256: string;
+  generated_by: string;
+  generated_at: string;
+  confirmed_by: string;
+  confirmed_at: string;
+  is_stale: boolean;
+  stale_reason: string | null;
+  knowledge_metrics: ProfileNodeMetric[];
+  ability_metrics: ProfileNodeMetric[];
+}
+
+export interface StudentProfileScopeInput {
+  classId: number;
+  studentId: number;
+  rangeStart: string;
+  rangeEnd: string;
+}
+
+export const previewStudentProfile = (input: StudentProfileScopeInput) =>
+  call<StudentProfilePreview>("preview_student_profile", { input });
+
+export const generateStudentProfile = (input: StudentProfileScopeInput) =>
+  call<StudentProfileSnapshot>("generate_student_profile", { input });
+
+export const loadLatestStudentProfile = (classId: number, studentId: number) =>
+  call<StudentProfileSnapshot | null>("latest_student_profile", { classId, studentId });

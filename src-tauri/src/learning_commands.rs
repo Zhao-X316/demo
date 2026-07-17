@@ -1,5 +1,9 @@
 //! M3 错题事实 / M6 掌握分析教师入口命令。
 
+use module_profile::profile::{
+    self, GenerateStudentProfileInput, StudentProfilePreview, StudentProfileScope,
+    StudentProfileSnapshot,
+};
 use module_wrongbook::correction::{self, CorrectionAssignment, CreateCorrectionInput};
 use module_wrongbook::error_cause::{self, ConfirmErrorCausesInput, ErrorCauseReview};
 use module_wrongbook::read_model::{self, ClassWrongbookDashboard};
@@ -88,6 +92,15 @@ pub struct CreateWrongbookReportRequest {
     report_kind: String,
     class_id: i64,
     student_id: Option<i64>,
+    range_start: String,
+    range_end: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StudentProfileScopeRequest {
+    class_id: i64,
+    student_id: i64,
     range_start: String,
     range_end: String,
 }
@@ -260,5 +273,55 @@ pub fn write_wrongbook_report_snapshot(
 ) -> Result<WrittenWrongbookReport, String> {
     let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     report::write_report_snapshot_csv(&connection, &snapshot_public_id, &output_path)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn preview_student_profile(
+    state: State<'_, AppState>,
+    input: StudentProfileScopeRequest,
+) -> Result<StudentProfilePreview, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    profile::preview_student_profile(
+        &connection,
+        &StudentProfileScope {
+            class_id: input.class_id,
+            student_id: input.student_id,
+            range_start: &input.range_start,
+            range_end: &input.range_end,
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn generate_student_profile(
+    state: State<'_, AppState>,
+    input: StudentProfileScopeRequest,
+) -> Result<StudentProfileSnapshot, String> {
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    profile::generate_student_profile(
+        &mut connection,
+        &GenerateStudentProfileInput {
+            scope: StudentProfileScope {
+                class_id: input.class_id,
+                student_id: input.student_id,
+                range_start: &input.range_start,
+                range_end: &input.range_end,
+            },
+            confirmed_by: "local_teacher",
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn latest_student_profile(
+    state: State<'_, AppState>,
+    class_id: i64,
+    student_id: i64,
+) -> Result<Option<StudentProfileSnapshot>, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    profile::latest_student_profile(&connection, class_id, student_id)
         .map_err(|error| error.to_string())
 }

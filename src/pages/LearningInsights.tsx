@@ -13,6 +13,11 @@ import {
   loadClassWrongbookDashboard,
   loadWrongbookSchedulePolicy,
   loadWrongbookStatistics,
+  generateStudentProfile,
+  loadLatestStudentProfile,
+  previewStudentProfile,
+  ProfileNodeMetric,
+  ProfileNodeStatus,
   previewWrongbookReinforcement,
   ReinforcementAssignment,
   ReinforcementAssignmentStatus,
@@ -22,9 +27,11 @@ import {
   WrongbookQuestion,
   WrongbookStatistics,
   WrongbookStatus,
+  StudentProfilePreview,
+  StudentProfileSnapshot,
   writeWrongbookReportSnapshot,
 } from "../api/learning";
-import { Class, classesList } from "../api/manage";
+import { Class, Student, classesList, studentsList } from "../api/manage";
 
 interface Props {
   onOpenExam: () => void;
@@ -47,6 +54,8 @@ const QUESTION_TYPE_LABELS: Record<string, string> = {
 
 const CONTEXT_LABELS: Record<string, string> = {
   classwork: "课堂练习",
+  in_class: "课堂练习",
+  closed_book: "闭卷",
   homework: "家庭作业",
   quiz: "随堂测验",
   exam: "正式考试",
@@ -67,6 +76,28 @@ const REINFORCEMENT_STATUS_LABELS: Record<ReinforcementAssignmentStatus, string>
   in_progress: "巩固处理中",
   ready_to_publish: "巩固待发布",
   published: "巩固已发布",
+};
+
+const PROFILE_STATUS_LABELS: Record<ProfileNodeStatus, string> = {
+  unassessed: "未评估",
+  insufficient_evidence: "证据不足",
+  needs_support: "需要支持",
+  developing: "发展中",
+  stable: "相对稳定",
+};
+
+const PROFILE_CONFIDENCE_LABELS: Record<string, string> = {
+  none: "暂无",
+  low: "低",
+  medium: "中",
+  high: "高",
+};
+
+const PROFILE_FRESHNESS_LABELS: Record<string, string> = {
+  none: "暂无",
+  fresh: "近期",
+  aging: "较早",
+  stale: "久未更新",
 };
 
 function statusClass(status: WrongbookStatus) {
@@ -314,6 +345,286 @@ function WrongbookReportPanel({
         </>
       )}
     </section>
+  );
+}
+
+function ProfileMetricList({
+  title,
+  metrics,
+  onOpenExam,
+}: {
+  title: string;
+  metrics: ProfileNodeMetric[];
+  onOpenExam: () => void;
+}) {
+  return (
+    <section className="profile-metric-section">
+      <div className="profile-metric-title">
+        <b>{title}</b>
+        <span>{metrics.length} 个范围节点 · 未评估不等于薄弱</span>
+      </div>
+      <div className="profile-metric-list">
+        {metrics.map((metric) => {
+          const eligible = !["unassessed", "insufficient_evidence"].includes(metric.status);
+          return (
+            <details className={`profile-metric ${metric.status}`} key={metric.public_id}>
+              <summary>
+                <div>
+                  <b>{metric.target_title}</b>
+                  <span>{metric.explanation}</span>
+                </div>
+                <span className={`profile-status ${metric.status}`}>
+                  {PROFILE_STATUS_LABELS[metric.status]}
+                </span>
+                <div className="profile-metric-numbers">
+                  <span>{eligible && metric.mastery_score != null
+                    ? `已测表现 ${Math.round(metric.mastery_score * 100)}%`
+                    : PROFILE_STATUS_LABELS[metric.status]}</span>
+                  <span>可信度 {PROFILE_CONFIDENCE_LABELS[metric.confidence_level]}</span>
+                  <span>{metric.evidence_count} 条证据</span>
+                </div>
+              </summary>
+              <div className="profile-metric-detail">
+                <div className="profile-metric-facts">
+                  <span>独立组 <b>{metric.independent_group_count}</b></span>
+                  <span>跨日期 <b>{metric.distinct_date_count}</b></span>
+                  <span>不同来源 <b>{metric.distinct_source_count}</b></span>
+                  <span>新鲜度 <b>{PROFILE_FRESHNESS_LABELS[metric.freshness]}</b></span>
+                  <span>最近证据 <b>{metric.last_evidence_at ? formatTime(metric.last_evidence_at) : "暂无"}</b></span>
+                </div>
+                {metric.evidence.length === 0 ? (
+                  <div className="profile-no-evidence">当前范围没有可追溯的老师确认逐点证据。</div>
+                ) : (
+                  <div className="profile-evidence-list">
+                    {metric.evidence.map((evidence) => (
+                      <div key={evidence.public_id}>
+                        <div>
+                          <b>{CONTEXT_LABELS[evidence.assessment_context] ?? evidence.assessment_context}</b>
+                          <span>{formatTime(evidence.occurred_at)}</span>
+                        </div>
+                        <span>表现 {Math.round(evidence.value * 100)}%</span>
+                        <span>质量 {Math.round(evidence.evidence_quality * 100)}%</span>
+                        <span>{evidence.source_type}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {metric.evidence.length > 0 && (
+                  <button onClick={onOpenExam}>回到题目批改查看原始证据</button>
+                )}
+              </div>
+            </details>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function StudentProfilePanel({
+  classId,
+  students,
+  refreshToken: externalRefreshToken,
+  onOpenExam,
+}: {
+  classId: number;
+  students: Student[];
+  refreshToken: number;
+  onOpenExam: () => void;
+}) {
+  const today = shanghaiDate();
+  const [studentId, setStudentId] = useState<number | null>(students[0]?.id ?? null);
+  const [rangeStart, setRangeStart] = useState(shiftShanghaiDate(today, -89));
+  const [rangeEnd, setRangeEnd] = useState(today);
+  const [preview, setPreview] = useState<StudentProfilePreview | null>(null);
+  const [snapshot, setSnapshot] = useState<StudentProfileSnapshot | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [profileError, setProfileError] = useState("");
+  const [generatedRefreshToken, setGeneratedRefreshToken] = useState(0);
+
+  useEffect(() => {
+    setStudentId((current) =>
+      current != null && students.some((student) => student.id === current)
+        ? current
+        : students[0]?.id ?? null);
+  }, [students]);
+
+  useEffect(() => {
+    if (studentId == null || !rangeStart || !rangeEnd || rangeStart > rangeEnd) {
+      setPreview(null);
+      setSnapshot(null);
+      if (rangeStart && rangeEnd && rangeStart > rangeEnd) {
+        setProfileError("开始日期不能晚于结束日期");
+      }
+      return;
+    }
+    let current = true;
+    setLoading(true);
+    setProfileError("");
+    Promise.all([
+      previewStudentProfile({ classId, studentId, rangeStart, rangeEnd }),
+      loadLatestStudentProfile(classId, studentId),
+    ])
+      .then(([nextPreview, latest]) => {
+        if (!current) return;
+        setPreview(nextPreview);
+        setSnapshot(latest);
+      })
+      .catch((reason) => {
+        if (!current) return;
+        setPreview(null);
+        setProfileError(String(reason));
+      })
+      .finally(() => {
+        if (current) setLoading(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [classId, externalRefreshToken, generatedRefreshToken, rangeEnd, rangeStart, studentId]);
+
+  const generate = async () => {
+    if (studentId == null || !preview?.can_generate) return;
+    setGenerating(true);
+    setProfileError("");
+    try {
+      const generated = await generateStudentProfile({
+        classId,
+        studentId,
+        rangeStart,
+        rangeEnd,
+      });
+      setSnapshot(generated);
+      setGeneratedRefreshToken((value) => value + 1);
+    } catch (reason) {
+      setProfileError(String(reason));
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  if (students.length === 0) {
+    return <div className="empty-state">当前班级没有启用学生，无法生成个人掌握快照。</div>;
+  }
+
+  return (
+    <div className="student-profile-panel">
+      <div className="profile-toolbar">
+        <div>
+          <b>个人学习掌握快照</b>
+          <span>老师按需生成；只使用已发布、老师确认且链接明确的逐点证据。</span>
+        </div>
+        <div>
+          <label>
+            <span>学生</span>
+            <select aria-label="掌握快照学生" value={studentId ?? ""}
+              onChange={(event) => setStudentId(Number(event.target.value))}>
+              {students.map((student) => (
+                <option value={student.id} key={student.id}>
+                  {student.student_no}号 {student.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>从</span>
+            <input type="date" value={rangeStart}
+              onChange={(event) => setRangeStart(event.target.value)} />
+          </label>
+          <label>
+            <span>到</span>
+            <input type="date" value={rangeEnd}
+              onChange={(event) => setRangeEnd(event.target.value)} />
+          </label>
+        </div>
+      </div>
+
+      <div className="learning-safety">
+        <b>计算边界</b>
+        同一道题同一天只算一个独立组；订正和开卷已降权。M1 只确认总体时不会扩散为逐知识点结论。
+      </div>
+      {profileError && <div className="error">{profileError}</div>}
+      {loading && !preview && <div className="loading">正在核对可用学习证据…</div>}
+
+      {preview && (
+        <section className="profile-preview">
+          <div className="profile-preview-head">
+            <div>
+              <b>生成前预览</b>
+              <span>{preview.student.student_no}号 {preview.student.name} · {preview.range_start} 至 {preview.range_end}</span>
+            </div>
+            <button className="primary" disabled={!preview.can_generate || generating}
+              onClick={generate}>
+              {generating ? "生成中…" : "确认生成快照"}
+            </button>
+          </div>
+          <div className="profile-preview-stats">
+            <div><span>正式逐点证据</span><b>{preview.counts.mapped_formal_evidence}</b></div>
+            <div><span>知识覆盖</span><b>{preview.counts.knowledge_node_assessed} / {preview.counts.knowledge_node_total}</b></div>
+            <div><span>知识达门槛</span><b>{preview.counts.knowledge_node_eligible}</b></div>
+            <div><span>能力达门槛</span><b>{preview.counts.ability_node_eligible}</b></div>
+          </div>
+          {preview.blocker && <div className="profile-blocker">{preview.blocker}</div>}
+          <div className="profile-preview-notes">
+            <span>{preview.scope_note}</span>
+            <span>{preview.evidence_note}</span>
+            {(preview.counts.machine_only_excluded
+              + preview.counts.teacher_overall_excluded
+              + preview.counts.unmapped_formal_excluded) > 0 && (
+              <span>
+                未纳入：纯机器 {preview.counts.machine_only_excluded}、
+                仅总体确认 {preview.counts.teacher_overall_excluded}、
+                未映射逐点 {preview.counts.unmapped_formal_excluded}。
+              </span>
+            )}
+          </div>
+        </section>
+      )}
+
+      {snapshot && (
+        <section className="profile-snapshot">
+          <div className="profile-snapshot-head">
+            <div>
+              <b>第 {snapshot.revision} 版掌握快照</b>
+              <span>
+                {snapshot.range_start} 至 {snapshot.range_end} · 数据截至 {formatTime(snapshot.evidence_cutoff_at)}
+                {" "}· 规则第 {snapshot.policy.revision} 版
+              </span>
+            </div>
+            <span className={snapshot.is_stale ? "tag fail" : "tag pass"}>
+              {snapshot.is_stale ? "有新证据，建议重生成" : "当前快照"}
+            </span>
+          </div>
+          {snapshot.stale_reason && <div className="profile-stale">{snapshot.stale_reason}</div>}
+          <div className="profile-snapshot-summary">
+            <div>
+              <span>知识已评估</span>
+              <b>{snapshot.knowledge_node_assessed} / {snapshot.knowledge_node_total}</b>
+            </div>
+            <div>
+              <span>知识达门槛</span>
+              <b>{snapshot.knowledge_node_eligible}</b>
+            </div>
+            <div>
+              <span>能力已评估</span>
+              <b>{snapshot.ability_node_assessed} / {snapshot.ability_node_total}</b>
+            </div>
+            <div>
+              <span>证据总数</span>
+              <b>{snapshot.evidence_count}</b>
+            </div>
+          </div>
+          <ProfileMetricList title="知识掌握" metrics={snapshot.knowledge_metrics}
+            onOpenExam={onOpenExam} />
+          <ProfileMetricList title="学科能力" metrics={snapshot.ability_metrics}
+            onOpenExam={onOpenExam} />
+          <div className="profile-footnote">
+            本快照不修改成绩、任务、错题或上游证据；历史版本保留，不生成学生排名。
+          </div>
+        </section>
+      )}
+    </div>
   );
 }
 
@@ -823,6 +1134,7 @@ function ItemCard({
 
 export default function LearningInsights({ onOpenExam, onOpenStudents }: Props) {
   const [classes, setClasses] = useState<Class[]>([]);
+  const [allStudents, setAllStudents] = useState<Student[]>([]);
   const [classId, setClassId] = useState<number | null>(null);
   const [dashboard, setDashboard] = useState<ClassWrongbookDashboard | null>(null);
   const [studentFilter, setStudentFilter] = useState("all");
@@ -835,11 +1147,13 @@ export default function LearningInsights({ onOpenExam, onOpenStudents }: Props) 
   const [policyError, setPolicyError] = useState("");
   const [reportOpen, setReportOpen] = useState(false);
   const [reportRefreshTick, setReportRefreshTick] = useState(0);
+  const [activeTab, setActiveTab] = useState<"wrongbook" | "profile">("wrongbook");
 
   useEffect(() => {
-    classesList()
-      .then((items) => {
+    Promise.all([classesList(), studentsList()])
+      .then(([items, studentItems]) => {
         setClasses(items);
+        setAllStudents(studentItems);
         setClassId((current) => current ?? items[0]?.id ?? null);
         if (items.length === 0) setLoading(false);
       })
@@ -909,6 +1223,13 @@ export default function LearningInsights({ onOpenExam, onOpenStudents }: Props) 
       : students.find((student) => student.id === Number(studentFilter)) ?? null,
     [studentFilter, students],
   );
+  const classStudents = useMemo(
+    () => allStudents
+      .filter((student) => student.enabled && student.class_id === classId)
+      .sort((left, right) =>
+        left.student_no.localeCompare(right.student_no, "zh-CN", { numeric: true })),
+    [allStudents, classId],
+  );
 
   if (classes.length === 0 && !loading) {
     return (
@@ -929,7 +1250,7 @@ export default function LearningInsights({ onOpenExam, onOpenStudents }: Props) 
       <div className="page-head learning-head">
         <div>
           <h1>错题与掌握</h1>
-          <div className="sub">同一入口先呈现可核对的错题事实；掌握分析在证据规则验证后接入。</div>
+          <div className="sub">错题处理与学习掌握共用一个入口，但事实、证据和掌握结论保持分层。</div>
         </div>
         <div className="learning-scope">
           <label>
@@ -938,19 +1259,19 @@ export default function LearningInsights({ onOpenExam, onOpenStudents }: Props) 
               {classes.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
             </select>
           </label>
-          <button disabled={!policy} onClick={() => setPolicyOpen((current) => !current)}>
+          {activeTab === "wrongbook" && <button disabled={!policy} onClick={() => setPolicyOpen((current) => !current)}>
             {policyOpen ? "收起规则" : "巩固规则"}
-          </button>
-          <button onClick={() => setReportOpen((current) => !current)}>
+          </button>}
+          {activeTab === "wrongbook" && <button onClick={() => setReportOpen((current) => !current)}>
             {reportOpen ? "收起统计" : "统计与导出"}
-          </button>
+          </button>}
           <button onClick={() => setRefreshTick((value) => value + 1)}>刷新</button>
         </div>
       </div>
 
       {policyError && <div className="error">{policyError}</div>}
-      {policyOpen && policy && <SchedulePolicyPanel policy={policy} onSaved={setPolicy} />}
-      {reportOpen && dashboard && (
+      {activeTab === "wrongbook" && policyOpen && policy && <SchedulePolicyPanel policy={policy} onSaved={setPolicy} />}
+      {activeTab === "wrongbook" && reportOpen && dashboard && (
         <WrongbookReportPanel
           classId={dashboard.class.id}
           className={dashboard.class.name}
@@ -960,12 +1281,21 @@ export default function LearningInsights({ onOpenExam, onOpenStudents }: Props) 
       )}
 
       <div className="tabs learning-tabs">
-        <button className="tab active">错题事实</button>
-        <button className="tab" disabled title="需完成跨日期证据与权重验证">
-          掌握分析 · 待验证
+        <button className={activeTab === "wrongbook" ? "tab active" : "tab"}
+          onClick={() => setActiveTab("wrongbook")}>错题事实</button>
+        <button className={activeTab === "profile" ? "tab active" : "tab"}
+          onClick={() => setActiveTab("profile")}>
+          个人掌握快照
         </button>
       </div>
 
+      {activeTab === "profile" && classId != null && (
+        <StudentProfilePanel classId={classId} students={classStudents}
+          refreshToken={refreshTick} onOpenExam={onOpenExam} />
+      )}
+
+      {activeTab === "wrongbook" && (
+        <>
       <div className="learning-safety">
         <b>边界</b>
         这里只显示当前有效发布快照中的老师评分。订正一次 ≠ 已掌握；没有知识点标签 ≠ 没有错题。
@@ -1095,6 +1425,8 @@ export default function LearningInsights({ onOpenExam, onOpenStudents }: Props) 
             {dashboard.summary.denominator_note}
             <span>本页按学号展示，不生成学生排名，也不读取旧 mastery 聚合。</span>
           </div>
+        </>
+      )}
         </>
       )}
     </div>
