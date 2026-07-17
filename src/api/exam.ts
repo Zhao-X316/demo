@@ -107,6 +107,17 @@ export interface ObjectiveWorkbenchRow {
   decided_at: string | null;
 }
 
+export interface AcceptedAnswerPromotionResult {
+  outcome: "created_new_version" | "already_promoted" | "already_available";
+  promotion_id: number | null;
+  accepted_text: string;
+  adopted_assessment_version_id: number;
+  adopted_assessment_revision: number;
+  adopted_answer_key_version_id: number;
+  current_grade_unchanged: boolean;
+  current_publication_unchanged: boolean;
+}
+
 export interface ObjectiveAttemptSummary {
   assessment_id: number;
   assessment_version_id: number;
@@ -539,6 +550,8 @@ export interface SubjectiveWorkbenchRow {
   review_mode: "single" | "teacher_corrected" | null;
   current_suggestion_confirmed: boolean;
   decided_at: string | null;
+  accepted_answer_promotion_id: number | null;
+  accepted_answer_promoted_at: string | null;
 }
 
 export interface ShortAnswerGradeAnalysis {
@@ -972,6 +985,11 @@ export const examAnswerSheetSubjectiveCorrect = (
   teacherScore: teacher_score,
   teacherNote: teacher_note,
 });
+
+export const examAnswerSheetPromoteAcceptedAnswer = (grade_decision_id: number) =>
+  call<AcceptedAnswerPromotionResult>("exam_answer_sheet_promote_accepted_answer", {
+    gradeDecisionId: grade_decision_id,
+  });
 
 export const examAnswerSheetSubjectivePublishAttempt = (attempt_id: number) =>
   call<GradePublication>("exam_answer_sheet_subjective_publish_attempt", {

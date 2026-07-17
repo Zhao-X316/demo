@@ -38,6 +38,7 @@ import {
   examAnswerSheetRecognizeSubjectiveRegion,
   examAnswerSheetCorrectSubjectiveTranscription,
   examAnswerSheetGradeShortAnswer,
+  examAnswerSheetPromoteAcceptedAnswer,
   examAnswerSheetSubjectiveAccept,
   examAnswerSheetSubjectiveCorrect,
   examAnswerSheetSubjectivePublishAttempt,
@@ -2104,6 +2105,35 @@ function SubjectiveReviewTab({
     }
   }
 
+  async function promoteAcceptedAnswer(row: SubjectiveWorkbenchRow) {
+    if (row.grade_decision_id == null) {
+      onError("请先完成本题人工终审");
+      return;
+    }
+    const acceptedText = (row.teacher_corrected_text ?? row.normalized_text ?? "").trim();
+    if (!acceptedText) {
+      onError("当前没有可加入答案库的老师确认写法");
+      return;
+    }
+    if (!window.confirm(
+      `确认把“${acceptedText}”加入未来可接受答案？\n\n系统会创建新的答案与作业版本；本次得分、已发布成绩和历史记录均不会改变。`,
+    )) return;
+    setBusy(true);
+    try {
+      const result = await examAnswerSheetPromoteAcceptedAnswer(row.grade_decision_id);
+      const prefix = result.outcome === "created_new_version"
+        ? "已创建新答案版本"
+        : result.outcome === "already_promoted"
+          ? "该写法此前已加入答案库"
+          : "最新答案版本已包含该写法";
+      onDone(`${prefix}：${result.accepted_text}；当前作业与历史成绩保持不变`);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function publishAttempt(attemptId: number, studentName: string) {
     if (!window.confirm(`确认发布 ${studentName} 的本次答题卡成绩？只采用当前老师终审 revision。`)) return;
     setBusy(true);
@@ -2187,6 +2217,7 @@ function SubjectiveReviewTab({
                   <span>置信度 <b>{row.confidence == null ? "—" : `${Math.round(row.confidence * 100)}%`}</b></span>
                   <span>建议得分 <b>{row.suggested_score == null ? "—" : `${row.suggested_score} / ${row.max_score}`}</b></span>
                   {row.current_suggestion_confirmed && <span>老师终审 <b>{row.teacher_score} 分 · {row.confirmation_level === "teacher_corrected" ? "人工修正" : "接受建议"}</b></span>}
+                  {row.accepted_answer_promotion_id != null && <span>答案库 <b>已加入未来可接受写法</b></span>}
                 </div>
               </div>
               {row.question_type === "short_answer" && (
@@ -2261,6 +2292,17 @@ function SubjectiveReviewTab({
                     <button disabled={busy} onClick={() => void correctGrade(row)}>保存人工 revision</button>
                   </details>
                 )}
+                {row.question_type === "fill_blank"
+                  && row.current_suggestion_confirmed
+                  && row.confirmation_level === "teacher_corrected"
+                  && row.teacher_score != null
+                  && Math.abs(row.teacher_score - row.max_score) < 0.000001
+                  && row.suggestion_outcome !== "correct"
+                  && row.accepted_answer_promotion_id == null && (
+                    <button disabled={busy} onClick={() => void promoteAcceptedAnswer(row)}>
+                      加入未来可接受答案
+                    </button>
+                  )}
               </div>
             </article>
           );

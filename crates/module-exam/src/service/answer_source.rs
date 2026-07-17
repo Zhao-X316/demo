@@ -653,6 +653,32 @@ fn non_empty_string_array<'a>(value: &'a Value, field: &str) -> CoreResult<Vec<&
     Ok(result)
 }
 
+fn optional_non_empty_string_array<'a>(value: &'a Value, field: &str) -> CoreResult<Vec<&'a str>> {
+    let Some(values) = value.get(field) else {
+        return Ok(Vec::new());
+    };
+    let values = values
+        .as_array()
+        .ok_or_else(|| CoreError::Invalid(format!("上传答案 {field} 必须是数组")))?;
+    let mut normalized = BTreeSet::new();
+    let mut result = Vec::new();
+    for value in values {
+        let text = value.as_str().map(str::trim).unwrap_or_default();
+        let normalized_text = text
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>()
+            .to_lowercase();
+        if text.is_empty() || !normalized.insert(normalized_text) {
+            return Err(CoreError::Invalid(format!(
+                "上传答案 {field} 含空值或重复值"
+            )));
+        }
+        result.push(text);
+    }
+    Ok(result)
+}
+
 fn optional_string_array_json(value: &Value, field: &str) -> CoreResult<Option<String>> {
     let Some(values) = value.get(field) else {
         return Ok(None);
@@ -930,6 +956,30 @@ fn validate_adoptable_candidate(
                     return Err(CoreError::Invalid("填空题答案槽位顺序重复".into()));
                 }
                 let answers = non_empty_string_array(slot, "canonical_answers")?;
+                let accepted_variants = optional_non_empty_string_array(slot, "accepted_variants")?;
+                let canonical_normalized = answers
+                    .iter()
+                    .map(|answer| {
+                        answer
+                            .chars()
+                            .filter(|character| !character.is_whitespace())
+                            .collect::<String>()
+                            .to_lowercase()
+                    })
+                    .collect::<BTreeSet<_>>();
+                if accepted_variants.iter().any(|variant| {
+                    canonical_normalized.contains(
+                        &variant
+                            .chars()
+                            .filter(|character| !character.is_whitespace())
+                            .collect::<String>()
+                            .to_lowercase(),
+                    )
+                }) {
+                    return Err(CoreError::Invalid(
+                        "填空题可接受写法不能与标准答案重复".into(),
+                    ));
+                }
                 let (stable_id, current_order, normalization, max_score) = current
                     .iter()
                     .find(|(_, current_order, _, _)| *current_order == order_index)
@@ -942,6 +992,7 @@ fn validate_adoptable_candidate(
                     canonical_answers_json: serde_json::json!({
                         "schema_version": 1,
                         "answers": answers,
+                        "accepted_variants": accepted_variants,
                     })
                     .to_string(),
                     normalization_rules_json: normalization.clone(),
@@ -2587,7 +2638,8 @@ mod tests {
                 "schema_version": 1,
                 "slots": [{
                     "order_index": 0,
-                    "canonical_answers": ["1842年", "一八四二年"]
+                    "canonical_answers": ["1842年"],
+                    "accepted_variants": ["一八四二年"]
                 }]
             }),
         );
@@ -2626,7 +2678,11 @@ mod tests {
         assert_eq!(stable_id, "stable-slot");
         assert_eq!(
             serde_json::from_str::<Value>(&canonical).unwrap(),
-            serde_json::json!({"schema_version":1,"answers":["1842年","一八四二年"]})
+            serde_json::json!({
+                "schema_version":1,
+                "answers":["1842年"],
+                "accepted_variants":["一八四二年"]
+            })
         );
         assert_eq!(
             serde_json::from_str::<Value>(&normalization).unwrap(),

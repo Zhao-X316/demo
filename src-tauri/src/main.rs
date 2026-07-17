@@ -131,6 +131,7 @@ fn main() {
             exam_commands::exam_answer_sheet_subjective_workbench,
             exam_commands::exam_answer_sheet_subjective_accept,
             exam_commands::exam_answer_sheet_subjective_correct,
+            exam_commands::exam_answer_sheet_promote_accepted_answer,
             exam_commands::exam_answer_sheet_subjective_publish_attempt,
             exam_commands::exam_answer_sheet_template_status,
             exam_commands::exam_answer_sheet_analyze_template,

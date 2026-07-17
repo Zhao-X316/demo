@@ -69,6 +69,12 @@ fn setup() -> Fixture {
              VALUES ('answer-s',1,1,'{{"schema_version":1,"values":["1842年"]}}',
                      'confirmed','2026-07-16T09:00:00.000Z','teacher',
                      '2026-07-16T09:00:00.000Z');
+           INSERT INTO k1_answer_slots
+             (public_id,stable_id,answer_key_version_id,order_index,
+              canonical_answers_json,max_score,created_at)
+             VALUES ('answer-slot-s','year',1,0,
+                     '{{"schema_version":1,"answers":["1842年"]}}',1,
+                     '2026-07-16T09:00:00.000Z');
            INSERT INTO k1_rubric_versions
              (public_id,question_version_id,revision,max_score,state,created_at,
               confirmed_by,confirmed_at)
@@ -522,6 +528,276 @@ fn exact_fill_suggestion_never_becomes_a_grade_until_teacher_accepts() {
         })
         .unwrap();
     assert_eq!((publication_count, evidence_count), (0, 0));
+}
+
+#[test]
+fn teacher_can_promote_full_score_fill_variant_without_changing_current_grade() {
+    let mut fixture = setup();
+    let run_id = successful_run(
+        &mut fixture,
+        "subjective-ocr-accepted-variant",
+        "一八四二年",
+    );
+    subjective::record_ocr_ai_run_transcription(&mut fixture.conn, run_id).unwrap();
+    let row = subjective::list_subjective_workbench(&fixture.conn, Some(1), 10)
+        .unwrap()
+        .rows
+        .pop()
+        .unwrap();
+    assert_eq!(row.suggestion_outcome, "incorrect");
+    let decision = subjective::correct_subjective_suggestion(
+        &fixture.conn,
+        row.suggestion_id,
+        1.0,
+        Some("中文年份写法等价，查看原图后判满分"),
+        "teacher",
+    )
+    .unwrap();
+
+    let promoted =
+        subjective::promote_fill_accepted_answer(&mut fixture.conn, decision.id, "teacher")
+            .unwrap();
+    assert_eq!(promoted.outcome, "created_new_version");
+    assert_eq!(promoted.accepted_text, "一八四二年");
+    assert_eq!(promoted.adopted_assessment_revision, 2);
+    assert!(promoted.current_grade_unchanged);
+    assert!(promoted.current_publication_unchanged);
+
+    let old_answer: String = fixture
+        .conn
+        .query_row(
+            "SELECT answer_json FROM k1_answer_key_versions WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!old_answer.contains("一八四二年"));
+    let (new_answer, supersedes): (String, i64) = fixture
+        .conn
+        .query_row(
+            "SELECT answer_json,supersedes_answer_key_id
+             FROM k1_answer_key_versions WHERE id=?1",
+            [promoted.adopted_answer_key_version_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(new_answer.contains("一八四二年"));
+    assert_eq!(supersedes, 1);
+    let new_slot: String = fixture
+        .conn
+        .query_row(
+            "SELECT canonical_answers_json FROM k1_answer_slots
+             WHERE answer_key_version_id=?1 AND stable_id='year'",
+            [promoted.adopted_answer_key_version_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(new_slot.contains("一八四二年"));
+
+    let unchanged: (i64, f64, i64, i64) = fixture
+        .conn
+        .query_row(
+            "SELECT attempt.assessment_version_id,decision.teacher_score,
+                    (SELECT COUNT(*) FROM exam_grade_publications_v2),
+                    (SELECT COUNT(*) FROM learning_evidence)
+             FROM exam_grade_decisions_v2 decision
+             JOIN exam_attempts_v2 attempt ON attempt.id=decision.attempt_id
+             WHERE decision.id=?1 AND decision.state='active'",
+            [decision.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(unchanged, (1, 1.0, 0, 0));
+    let workbench = subjective::list_subjective_workbench(&fixture.conn, Some(1), 10).unwrap();
+    assert_eq!(
+        workbench.rows[0].accepted_answer_promotion_id,
+        promoted.promotion_id
+    );
+
+    let repeated =
+        subjective::promote_fill_accepted_answer(&mut fixture.conn, decision.id, "teacher")
+            .unwrap();
+    assert_eq!(repeated.outcome, "already_promoted");
+    assert_eq!(repeated.promotion_id, promoted.promotion_id);
+    let version_counts: (i64, i64, i64) = fixture
+        .conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM k1_answer_key_versions),
+                    (SELECT COUNT(*) FROM exam_assessment_versions_v2),
+                    (SELECT COUNT(*) FROM exam_accepted_answer_promotions_v2)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(version_counts, (2, 2, 1));
+}
+
+#[test]
+fn later_accepted_variants_accumulate_on_the_latest_future_answer_version() {
+    let mut fixture = setup();
+    let first_run = successful_run(&mut fixture, "subjective-ocr-first-variant", "一八四二年");
+    subjective::record_ocr_ai_run_transcription(&mut fixture.conn, first_run).unwrap();
+    let first_row = subjective::list_subjective_workbench(&fixture.conn, Some(1), 10)
+        .unwrap()
+        .rows
+        .pop()
+        .unwrap();
+    let first_decision = subjective::correct_subjective_suggestion(
+        &fixture.conn,
+        first_row.suggestion_id,
+        1.0,
+        Some("确认中文年份写法"),
+        "teacher",
+    )
+    .unwrap();
+    subjective::promote_fill_accepted_answer(&mut fixture.conn, first_decision.id, "teacher")
+        .unwrap();
+
+    subjective::teacher_correct_transcription(
+        &mut fixture.conn,
+        fixture.region_id,
+        "公元一八四二年",
+        "teacher",
+    )
+    .unwrap();
+    let second_row = subjective::list_subjective_workbench(&fixture.conn, Some(1), 10)
+        .unwrap()
+        .rows
+        .pop()
+        .unwrap();
+    let second_decision = subjective::correct_subjective_suggestion(
+        &fixture.conn,
+        second_row.suggestion_id,
+        1.0,
+        Some("确认带公元前缀的等价写法"),
+        "teacher",
+    )
+    .unwrap();
+    let second =
+        subjective::promote_fill_accepted_answer(&mut fixture.conn, second_decision.id, "teacher")
+            .unwrap();
+    assert_eq!(second.adopted_assessment_revision, 3);
+    let latest_answer: String = fixture
+        .conn
+        .query_row(
+            "SELECT answer_json FROM k1_answer_key_versions WHERE id=?1",
+            [second.adopted_answer_key_version_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(latest_answer.contains("一八四二年"));
+    assert!(latest_answer.contains("公元一八四二年"));
+    let counts: (i64, i64, i64) = fixture
+        .conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM k1_answer_key_versions),
+                    (SELECT COUNT(*) FROM exam_assessment_versions_v2),
+                    (SELECT COUNT(*) FROM exam_accepted_answer_promotions_v2)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(counts, (3, 3, 2));
+}
+
+#[test]
+fn accepted_answer_promotion_rejects_non_manual_or_non_full_score_decisions() {
+    let mut exact_fixture = setup();
+    let exact_run = successful_run(&mut exact_fixture, "subjective-ocr-existing", "1842年");
+    subjective::record_ocr_ai_run_transcription(&mut exact_fixture.conn, exact_run).unwrap();
+    let exact_row = subjective::list_subjective_workbench(&exact_fixture.conn, Some(1), 10)
+        .unwrap()
+        .rows
+        .pop()
+        .unwrap();
+    let accepted = subjective::accept_subjective_suggestion(
+        &exact_fixture.conn,
+        exact_row.suggestion_id,
+        "teacher",
+    )
+    .unwrap();
+    assert!(subjective::promote_fill_accepted_answer(
+        &mut exact_fixture.conn,
+        accepted.id,
+        "teacher",
+    )
+    .is_err());
+
+    let mut zero_fixture = setup();
+    let zero_run = successful_run(&mut zero_fixture, "subjective-ocr-zero", "1840年");
+    subjective::record_ocr_ai_run_transcription(&mut zero_fixture.conn, zero_run).unwrap();
+    let zero_row = subjective::list_subjective_workbench(&zero_fixture.conn, Some(1), 10)
+        .unwrap()
+        .rows
+        .pop()
+        .unwrap();
+    let zero = subjective::correct_subjective_suggestion(
+        &zero_fixture.conn,
+        zero_row.suggestion_id,
+        0.0,
+        Some("年份错误"),
+        "teacher",
+    )
+    .unwrap();
+    assert!(
+        subjective::promote_fill_accepted_answer(&mut zero_fixture.conn, zero.id, "teacher",)
+            .is_err()
+    );
+    let side_effects: (i64, i64, i64) = zero_fixture
+        .conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM k1_answer_key_versions),
+                    (SELECT COUNT(*) FROM exam_assessment_versions_v2),
+                    (SELECT COUNT(*) FROM exam_accepted_answer_promotions_v2)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(side_effects, (1, 1, 0));
+}
+
+#[test]
+fn accepted_answer_promotion_ledger_is_immutable() {
+    let mut fixture = setup();
+    let run_id = successful_run(&mut fixture, "subjective-ocr-ledger", "一八四二年");
+    subjective::record_ocr_ai_run_transcription(&mut fixture.conn, run_id).unwrap();
+    let row = subjective::list_subjective_workbench(&fixture.conn, Some(1), 10)
+        .unwrap()
+        .rows
+        .pop()
+        .unwrap();
+    let decision = subjective::correct_subjective_suggestion(
+        &fixture.conn,
+        row.suggestion_id,
+        1.0,
+        Some("确认等价写法"),
+        "teacher",
+    )
+    .unwrap();
+    let promotion =
+        subjective::promote_fill_accepted_answer(&mut fixture.conn, decision.id, "teacher")
+            .unwrap();
+    let promotion_id = promotion.promotion_id.unwrap();
+    let update_error = fixture
+        .conn
+        .execute(
+            "UPDATE exam_accepted_answer_promotions_v2 SET accepted_text='改写' WHERE id=?1",
+            [promotion_id],
+        )
+        .unwrap_err();
+    assert!(update_error
+        .to_string()
+        .contains("M2_ACCEPTED_ANSWER_PROMOTION_IMMUTABLE"));
+    let delete_error = fixture
+        .conn
+        .execute(
+            "DELETE FROM exam_accepted_answer_promotions_v2 WHERE id=?1",
+            [promotion_id],
+        )
+        .unwrap_err();
+    assert!(delete_error
+        .to_string()
+        .contains("M2_ACCEPTED_ANSWER_PROMOTION_IMMUTABLE"));
 }
 
 #[test]

@@ -39,7 +39,8 @@ use module_exam::service::objective::{
 };
 use module_exam::service::ordinary_structure::OrdinaryStructureConfirmationResult;
 use module_exam::service::subjective::{
-    ShortAnswerGradeAnalysis, SubjectiveTranscriptionRevision, SubjectiveWorkbench,
+    AcceptedAnswerPromotionResult, ShortAnswerGradeAnalysis, SubjectiveTranscriptionRevision,
+    SubjectiveWorkbench,
 };
 use module_exam::short_answer_grading::{
     ShortAnswerGradeErrorCode, ShortAnswerGradeFailure, ShortAnswerGrader,
@@ -904,6 +905,21 @@ pub fn exam_answer_sheet_subjective_correct(
         suggestion_id,
         teacher_score,
         teacher_note.as_deref(),
+        LOCAL_TEACHER_ACTOR,
+    )
+    .map_err(e)
+}
+
+/// 老师把一次已人工判满分的填空写法加入未来答案版本；当前成绩与发布保持不变。
+#[tauri::command]
+pub fn exam_answer_sheet_promote_accepted_answer(
+    state: State<'_, AppState>,
+    grade_decision_id: i64,
+) -> R<AcceptedAnswerPromotionResult> {
+    let mut conn = lock(&state)?;
+    module_exam::service::subjective::promote_fill_accepted_answer(
+        &mut conn,
+        grade_decision_id,
         LOCAL_TEACHER_ACTOR,
     )
     .map_err(e)
