@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   AnswerDetail,
   AnswerSourceAnalysisResult,
+  AnswerSourceReviewSummary,
   AnswerSheetPageProcessingResult,
   AnswerSheetTemplateRunResult,
   AnswerSheetTemplateStatus,
@@ -25,6 +26,7 @@ import {
   SubjectiveWorkbenchRow,
   Question,
   QuestionInput,
+  RubricPointMappingInput,
   examAnswerHumanDecide,
   examAnswerSourceAdoptNewVersion,
   examAnswerSourceAnalyze,
@@ -209,6 +211,45 @@ function shortAnswerRubricPoints(raw: string | null) {
   } catch {
     return [];
   }
+}
+
+const NEW_RUBRIC_POINT = "__new_rubric_point__";
+
+function initialRubricPointMappings(review: AnswerSourceReviewSummary | null) {
+  const result: Record<string, string> = {};
+  review?.items
+    .filter((item) => item.questionType === "short_answer" && item.matchState === "conflict")
+    .forEach((item) => {
+      const candidates = shortAnswerRubricPoints(item.candidateAnswerJson);
+      const sameShape = candidates.length === item.boundRubricPoints.length
+        && candidates.every((candidate) => item.boundRubricPoints.some(
+          (current) => current.orderIndex === candidate.orderIndex,
+        ));
+      candidates.forEach((candidate) => {
+        const current = item.boundRubricPoints.find(
+          (point) => point.orderIndex === candidate.orderIndex,
+        );
+        result[`${item.assessmentItemId}:${candidate.orderIndex}`] = sameShape && current
+          ? current.stableId
+          : "";
+      });
+    });
+  return result;
+}
+
+function rubricPointMappingsReady(
+  review: AnswerSourceReviewSummary,
+  mappings: Record<string, string>,
+) {
+  for (const item of review.items) {
+    if (item.questionType !== "short_answer" || item.matchState !== "conflict") continue;
+    const reused = new Set<string>();
+    for (const point of shortAnswerRubricPoints(item.candidateAnswerJson)) {
+      const selected = mappings[`${item.assessmentItemId}:${point.orderIndex}`] || "";
+      if (!selected || (selected !== NEW_RUBRIC_POINT && !reused.add(selected))) return false;
+    }
+  }
+  return true;
 }
 
 function shortAnswerPointResults(raw: string | null) {
@@ -409,6 +450,7 @@ function FixedIntakeTab({
   const [answerSourceAnalysis, setAnswerSourceAnalysis] = useState<AnswerSourceAnalysisResult | null>(null);
   const [answerSourceBusy, setAnswerSourceBusy] = useState(false);
   const [answerSourceError, setAnswerSourceError] = useState("");
+  const [rubricPointMappings, setRubricPointMappings] = useState<Record<string, string>>({});
   const [expectedPages, setExpectedPages] = useState("1");
   const [pageCycle, setPageCycle] = useState<PageCycleSuggestion | null>(null);
   const [busy, setBusy] = useState(false);
@@ -464,6 +506,7 @@ function FixedIntakeTab({
     setAnswerSourceAnalysis(null);
     setAnswerSourceBusy(false);
     setAnswerSourceError("");
+    setRubricPointMappings({});
     setOrdinaryPaperRuns({});
     setAnalyzingPageIds([]);
     setAnswerSheetTemplateStatus(null);
@@ -500,6 +543,7 @@ function FixedIntakeTab({
       setAnswerSourceAnalysis(null);
       setAnswerSourceBusy(false);
       setAnswerSourceError("");
+      setRubricPointMappings({});
       setOrdinaryPaperRuns({});
       setAnalyzingPageIds([]);
       setOrdinaryConfirmations({});
@@ -605,6 +649,7 @@ function FixedIntakeTab({
           : `answer-source:${batchId}:structure:v3`,
       );
       setAnswerSourceAnalysis(analysis);
+      setRubricPointMappings(initialRubricPointMappings(analysis.review));
       if (analysis.run.status === "failed") {
         replaceAnswerSourceReason("ANSWER_SOURCE_STRUCTURE_FAILED");
       } else if (analysis.review?.route === "ready_to_confirm") {
@@ -660,11 +705,34 @@ function FixedIntakeTab({
   async function adoptAnswerSourceAsNewVersion() {
     const review = answerSourceAnalysis?.review;
     if (!result || !review) return;
+    const rubricMappings: RubricPointMappingInput[] = [];
+    for (const item of review.items) {
+      if (item.questionType !== "short_answer" || item.matchState !== "conflict") continue;
+      const reused = new Set<string>();
+      for (const point of shortAnswerRubricPoints(item.candidateAnswerJson)) {
+        const selected = rubricPointMappings[`${item.assessmentItemId}:${point.orderIndex}`] || "";
+        if (!selected) {
+          onError(`第 ${item.questionNo} 题还有评分点没有确认对应关系`);
+          return;
+        }
+        if (selected !== NEW_RUBRIC_POINT && !reused.add(selected)) {
+          onError(`第 ${item.questionNo} 题不能把两个新评分点对应到同一个旧评分点`);
+          return;
+        }
+        rubricMappings.push({
+          assessmentItemId: item.assessmentItemId,
+          candidateOrderIndex: point.orderIndex,
+          action: selected === NEW_RUBRIC_POINT ? "new_point" : "reuse_existing",
+          previousStableId: selected === NEW_RUBRIC_POINT ? null : selected,
+        });
+      }
+    }
     setAnswerSourceBusy(true);
     try {
       const confirmed = await examAnswerSourceAdoptNewVersion(
         result.batchId,
         review.sourceAiRunId,
+        rubricMappings,
       );
       setAnswerSourceAnalysis({ ...answerSourceAnalysis, review: confirmed });
       replaceAnswerSourceReason(null);
@@ -1398,7 +1466,32 @@ function FixedIntakeTab({
                                         {point.confirmedAbilityTitles.length > 0 && ` · 能力：${point.confirmedAbilityTitles.join("、")}`}
                                       </span>
                                     ))}
-                                    <span>系统只按顺序沿用已有链接；评分点数量或总分变化时会整笔拒绝，不会猜测映射。</span>
+                                    <b>确认评分点对应</b>
+                                    <span>结构未变时已按顺序预填；如有增删或重排，只需改下面的对应关系。</span>
+                                    {proposedPoints.map((point) => {
+                                      const mappingKey = `${item.assessmentItemId}:${point.orderIndex}`;
+                                      return (
+                                        <label className="rubric-mapping-row" key={`mapping-${mappingKey}`}>
+                                          <span>{point.orderIndex + 1}. {point.canonicalText}</span>
+                                          <select
+                                            value={rubricPointMappings[mappingKey] || ""}
+                                            onChange={(event) => setRubricPointMappings((current) => ({
+                                              ...current,
+                                              [mappingKey]: event.target.value,
+                                            }))}
+                                          >
+                                            <option value="">请选择对应关系</option>
+                                            {item.boundRubricPoints.map((current) => (
+                                              <option value={current.stableId} key={current.stableId}>
+                                                沿用旧点 {current.orderIndex + 1}：{current.canonicalText}
+                                              </option>
+                                            ))}
+                                            <option value={NEW_RUBRIC_POINT}>这是新增评分点</option>
+                                          </select>
+                                        </label>
+                                      );
+                                    })}
+                                    <span>未被选择的旧评分点会在新版本中退役；新增点不会猜测继承知识/能力链接，补链前不产生对应图谱证据。</span>
                                   </div>
                                 )}
                               </div>
@@ -1413,7 +1506,7 @@ function FixedIntakeTab({
                       <div className="muted">
                         已把 {answerSourceAnalysis.review.adoption.changedItemCount} 道冲突题保存为作业第 {answerSourceAnalysis.review.adoption.adoptedAssessmentRevision} 版；本批学生照片仍按原答案批改，不会被重写。
                         {answerSourceAnalysis.review.adoption.changedRubricCount > 0 && (
-                          <> 其中 {answerSourceAnalysis.review.adoption.changedRubricCount} 道简答题同步建立新评分点，并沿用 {answerSourceAnalysis.review.adoption.carriedKnowledgeLinkCount} 条知识链接、{answerSourceAnalysis.review.adoption.carriedAbilityLinkCount} 条能力链接；原有机器建议/老师确认级别保持不变。</>
+                          <> 其中 {answerSourceAnalysis.review.adoption.changedRubricCount} 道简答题同步建立新评分点，并沿用 {answerSourceAnalysis.review.adoption.carriedKnowledgeLinkCount} 条知识链接、{answerSourceAnalysis.review.adoption.carriedAbilityLinkCount} 条能力链接；新增 {answerSourceAnalysis.review.adoption.newRubricPointCount} 点、退役 {answerSourceAnalysis.review.adoption.retiredRubricPointCount} 点。{answerSourceAnalysis.review.adoption.unlinkedNewRubricPointCount > 0 && ` 新增的 ${answerSourceAnalysis.review.adoption.unlinkedNewRubricPointCount} 个评分点待补知识/能力链接，补链前不进入图谱。`}</>
                         )}
                       </div>
                     )}
@@ -1434,7 +1527,10 @@ function FixedIntakeTab({
                     answerSourceAnalysis.review.sourceState === "ready"
                     && answerSourceAnalysis.review.conflictCount > 0
                     && answerSourceAnalysis.review.missingCount === 0 && (
-                      <button onClick={() => void adoptAnswerSourceAsNewVersion()}>
+                      <button
+                        disabled={!rubricPointMappingsReady(answerSourceAnalysis.review, rubricPointMappings)}
+                        onClick={() => void adoptAnswerSourceAsNewVersion()}
+                      >
                         采用答案与评分点，另存新版本
                       </button>
                     )

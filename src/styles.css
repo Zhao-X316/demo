@@ -288,6 +288,8 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
 .intake-answer-review-item { display: flex; flex-direction: column; gap: 5px; padding: 7px 8px; border: 1px solid #E8B8B8; border-radius: 7px; background: #FFF8F8; }
 .intake-answer-review-item .muted { display: flex; flex-direction: column; gap: 3px; color: var(--text-2); }
 .intake-answer-review-item .muted b { margin-top: 3px; color: var(--text); }
+.rubric-mapping-row { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.2fr); gap: 8px; align-items: center; }
+.rubric-mapping-row select { width: 100%; min-width: 0; }
 .intake-analysis-actions { display: flex; flex-wrap: wrap; gap: 7px; }
 .intake-analysis-actions button { width: auto; }
 .intake-absence-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 6px; max-height: 156px; margin-top: 8px; overflow-y: auto; }

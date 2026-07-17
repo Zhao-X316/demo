@@ -278,9 +278,21 @@ export interface AnswerSourceReviewSummary {
     changedRubricCount: number;
     carriedKnowledgeLinkCount: number;
     carriedAbilityLinkCount: number;
+    newRubricPointCount: number;
+    retiredRubricPointCount: number;
+    unlinkedNewRubricPointCount: number;
+    droppedKnowledgeLinkCount: number;
+    droppedAbilityLinkCount: number;
     currentBatchUnchanged: boolean;
   } | null;
   items: AnswerSourceReviewItem[];
+}
+
+export interface RubricPointMappingInput {
+  assessmentItemId: number;
+  candidateOrderIndex: number;
+  action: "reuse_existing" | "new_point";
+  previousStableId: string | null;
 }
 
 export interface AnswerSourceAnalysisResult {
@@ -840,10 +852,15 @@ export const examAnswerSourceKeepBound = (batch_id: number, source_ai_run_id: nu
     sourceAiRunId: source_ai_run_id,
   });
 
-export const examAnswerSourceAdoptNewVersion = (batch_id: number, source_ai_run_id: number) =>
+export const examAnswerSourceAdoptNewVersion = (
+  batch_id: number,
+  source_ai_run_id: number,
+  rubric_mappings: RubricPointMappingInput[] = [],
+) =>
   call<AnswerSourceReviewSummary>("exam_answer_source_adopt_new_version", {
     batchId: batch_id,
     sourceAiRunId: source_ai_run_id,
+    rubricMappings: rubric_mappings,
   });
 
 export const examFixedIntakeConfirmMaterialType = (

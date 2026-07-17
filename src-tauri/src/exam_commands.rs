@@ -25,7 +25,9 @@ use module_exam::ordinary_paper_recognition::{
     OrdinaryPaperRecognitionErrorCode, OrdinaryPaperRecognitionFailure, OrdinaryPaperRecognizer,
     ORDINARY_PAPER_SCHEMA_VERSION,
 };
-use module_exam::service::answer_source::{self, AnswerSourceReviewSummary};
+use module_exam::service::answer_source::{
+    self, AnswerSourceReviewSummary, RubricPointMappingInput,
+};
 use module_exam::service::assessment::{self, GradeDecision, Publication};
 use module_exam::service::dictation_pipeline::{
     self, DictationPageMaterializationResult, DictationReviewBatch, DictationTemplateConfirmation,
@@ -476,13 +478,15 @@ pub fn exam_answer_source_adopt_new_version(
     state: State<'_, AppState>,
     batch_id: i64,
     source_ai_run_id: i64,
+    rubric_mappings: Option<Vec<RubricPointMappingInput>>,
 ) -> R<AnswerSourceReviewSummary> {
     let mut conn = lock(&state)?;
-    let result = answer_source::adopt_conflicts_as_new_version(
+    let result = answer_source::adopt_conflicts_as_new_version_with_mappings(
         &mut conn,
         batch_id,
         source_ai_run_id,
         LOCAL_TEACHER_ACTOR,
+        rubric_mappings.as_deref().unwrap_or_default(),
     )
     .map_err(e)?;
     refresh_fixed_preflight(&conn, batch_id)?;

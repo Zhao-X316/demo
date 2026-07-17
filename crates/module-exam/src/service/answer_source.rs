@@ -76,7 +76,28 @@ pub struct AnswerSourceAdoptionSummary {
     pub changed_rubric_count: i64,
     pub carried_knowledge_link_count: i64,
     pub carried_ability_link_count: i64,
+    pub new_rubric_point_count: i64,
+    pub retired_rubric_point_count: i64,
+    pub unlinked_new_rubric_point_count: i64,
+    pub dropped_knowledge_link_count: i64,
+    pub dropped_ability_link_count: i64,
     pub current_batch_unchanged: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RubricPointMappingAction {
+    ReuseExisting,
+    NewPoint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RubricPointMappingInput {
+    pub assessment_item_id: i64,
+    pub candidate_order_index: i64,
+    pub action: RubricPointMappingAction,
+    pub previous_stable_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,6 +278,26 @@ pub fn review_summary(
                         .unwrap_or(0),
                     carried_ability_link_count: details
                         .get("carried_ability_link_count")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0),
+                    new_rubric_point_count: details
+                        .get("new_rubric_point_count")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0),
+                    retired_rubric_point_count: details
+                        .get("retired_rubric_point_count")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0),
+                    unlinked_new_rubric_point_count: details
+                        .get("unlinked_new_rubric_point_count")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0),
+                    dropped_knowledge_link_count: details
+                        .get("dropped_knowledge_link_count")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0),
+                    dropped_ability_link_count: details
+                        .get("dropped_ability_link_count")
                         .and_then(Value::as_i64)
                         .unwrap_or(0),
                     current_batch_unchanged: true,
@@ -526,7 +567,7 @@ struct AdoptedAnswerSlot {
 #[derive(Debug)]
 struct AdoptedRubricPoint {
     stable_id: String,
-    old_public_id: String,
+    old_public_id: Option<String>,
     order_index: i64,
     canonical_text: String,
     allowed_paraphrases_json: Option<String>,
@@ -534,10 +575,49 @@ struct AdoptedRubricPoint {
     max_score: f64,
 }
 
+#[derive(Debug)]
+struct RetiredRubricPoint {
+    old_public_id: String,
+}
+
+#[derive(Debug)]
+struct ValidatedRubricChange {
+    points: Vec<AdoptedRubricPoint>,
+    retired_points: Vec<RetiredRubricPoint>,
+    new_point_count: i64,
+}
+
+#[derive(Debug)]
+struct InsertedRubricPointMapping {
+    candidate_order_index: i64,
+    previous_rubric_point_public_id: Option<String>,
+    adopted_rubric_point_public_id: String,
+}
+
+#[derive(Debug)]
+struct PendingRubricMappingLedgerRow {
+    mapping_action: &'static str,
+    candidate_order_index: Option<i64>,
+    previous_rubric_point_public_id: Option<String>,
+    adopted_rubric_point_public_id: Option<String>,
+}
+
+#[derive(Debug)]
+struct RubricMappingLedgerRow {
+    source_assessment_item_id: i64,
+    adopted_assessment_item_id: i64,
+    mapping_action: &'static str,
+    candidate_order_index: Option<i64>,
+    previous_rubric_point_public_id: Option<String>,
+    adopted_rubric_point_public_id: Option<String>,
+}
+
 #[derive(Debug, Default)]
 struct CarriedLinkCounts {
     knowledge: i64,
     ability: i64,
+    dropped_knowledge: i64,
+    dropped_ability: i64,
 }
 
 #[derive(Serialize)]
@@ -605,7 +685,8 @@ fn validate_short_answer_candidate(
     bound_rubric_version_id: i64,
     item_score: f64,
     candidate: &Value,
-) -> CoreResult<Vec<AdoptedRubricPoint>> {
+    mappings: &[RubricPointMappingInput],
+) -> CoreResult<ValidatedRubricChange> {
     let reference_answer = candidate
         .get("reference_answer")
         .and_then(Value::as_str)
@@ -641,13 +722,38 @@ fn validate_short_answer_candidate(
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    if candidate_points.is_empty() || candidate_points.len() != current_points.len() {
+    if candidate_points.is_empty() {
+        return Err(CoreError::Invalid("上传简答评分点不能为空".into()));
+    }
+    let automatic_order_mapping = mappings.is_empty();
+    if automatic_order_mapping && candidate_points.len() != current_points.len() {
         return Err(CoreError::Invalid(
-            "上传简答评分点数量与当前知识链接结构不同，请老师先逐点补录映射".into(),
+            "上传简答评分点数量发生变化，请逐点选择沿用旧评分点或新增评分点".into(),
         ));
+    }
+    let mut mappings_by_order = BTreeMap::new();
+    if !automatic_order_mapping {
+        if mappings.len() != candidate_points.len() {
+            return Err(CoreError::Invalid(
+                "评分点结构映射必须覆盖上传答案的每一个评分点".into(),
+            ));
+        }
+        for mapping in mappings {
+            if mapping.candidate_order_index < 0
+                || mappings_by_order
+                    .insert(mapping.candidate_order_index, mapping)
+                    .is_some()
+            {
+                return Err(CoreError::Invalid(
+                    "评分点结构映射包含非法或重复的候选顺序".into(),
+                ));
+            }
+        }
     }
     let mut result = Vec::with_capacity(candidate_points.len());
     let mut seen = BTreeSet::new();
+    let mut reused_stable_ids = BTreeSet::new();
+    let mut new_point_count = 0;
     let mut total = 0.0;
     for (index, point) in candidate_points.iter().enumerate() {
         let order_index = point
@@ -669,15 +775,62 @@ fn validate_short_answer_candidate(
         if canonical_text.is_empty() || !max_score.is_finite() || max_score <= 0.0 {
             return Err(CoreError::Invalid("上传简答评分点表述或分值非法".into()));
         }
-        let (stable_id, old_public_id, current_order) = current_points
-            .iter()
-            .find(|(_, _, current_order)| *current_order == order_index)
-            .ok_or_else(|| CoreError::Invalid("上传简答评分点无法按顺序对应当前知识链接".into()))?;
+        let (stable_id, old_public_id) = if automatic_order_mapping {
+            let (stable_id, old_public_id, _) = current_points
+                .iter()
+                .find(|(_, _, current_order)| *current_order == order_index)
+                .ok_or_else(|| {
+                    CoreError::Invalid("上传简答评分点无法按顺序对应当前知识链接".into())
+                })?;
+            reused_stable_ids.insert(stable_id.clone());
+            (stable_id.clone(), Some(old_public_id.clone()))
+        } else {
+            let mapping = mappings_by_order
+                .get(&order_index)
+                .ok_or_else(|| CoreError::Invalid("评分点结构映射缺少上传评分点".into()))?;
+            match mapping.action {
+                RubricPointMappingAction::ReuseExisting => {
+                    let previous_stable_id = mapping
+                        .previous_stable_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| {
+                            CoreError::Invalid("沿用旧评分点时必须明确选择旧评分点".into())
+                        })?;
+                    let (stable_id, old_public_id, _) = current_points
+                        .iter()
+                        .find(|(stable_id, _, _)| stable_id == previous_stable_id)
+                        .ok_or_else(|| {
+                            CoreError::Invalid("评分点结构映射引用了不存在的旧评分点".into())
+                        })?;
+                    if !reused_stable_ids.insert(stable_id.clone()) {
+                        return Err(CoreError::Invalid(
+                            "同一个旧评分点不能对应多个新评分点".into(),
+                        ));
+                    }
+                    (stable_id.clone(), Some(old_public_id.clone()))
+                }
+                RubricPointMappingAction::NewPoint => {
+                    if mapping
+                        .previous_stable_id
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                    {
+                        return Err(CoreError::Invalid(
+                            "新增评分点不能同时沿用旧评分点身份".into(),
+                        ));
+                    }
+                    new_point_count += 1;
+                    (format!("rubric-point-{}", ids::new_public_id()), None)
+                }
+            }
+        };
         total += max_score;
         result.push(AdoptedRubricPoint {
-            stable_id: stable_id.clone(),
-            old_public_id: old_public_id.clone(),
-            order_index: *current_order,
+            stable_id,
+            old_public_id,
+            order_index,
             canonical_text: canonical_text.into(),
             allowed_paraphrases_json: optional_string_array_json(point, "allowed_paraphrases")?,
             required_concepts_json: optional_string_array_json(point, "required_concepts")?,
@@ -690,7 +843,16 @@ fn validate_short_answer_candidate(
         ));
     }
     result.sort_by_key(|point| point.order_index);
-    Ok(result)
+    let retired_points = current_points
+        .into_iter()
+        .filter(|(stable_id, _, _)| !reused_stable_ids.contains(stable_id))
+        .map(|(_, old_public_id, _)| RetiredRubricPoint { old_public_id })
+        .collect();
+    Ok(ValidatedRubricChange {
+        points: result,
+        retired_points,
+        new_point_count,
+    })
 }
 
 fn validate_adoptable_candidate(
@@ -857,7 +1019,11 @@ fn insert_confirmed_rubric_version(
     points: &[AdoptedRubricPoint],
     confirmed_by: &str,
     now: &str,
-) -> CoreResult<(i64, BTreeMap<String, String>)> {
+) -> CoreResult<(
+    i64,
+    BTreeMap<String, String>,
+    Vec<InsertedRubricPointMapping>,
+)> {
     let revision: i64 = conn.query_row(
         "SELECT COALESCE(MAX(revision),0)+1 FROM k1_rubric_versions
          WHERE question_version_id=?1",
@@ -882,6 +1048,7 @@ fn insert_confirmed_rubric_version(
     )?;
     let rubric_version_id = conn.last_insert_rowid();
     let mut public_id_map = BTreeMap::new();
+    let mut inserted_mappings = Vec::with_capacity(points.len());
     for point in points {
         let public_id = ids::new_public_id();
         conn.execute(
@@ -901,9 +1068,16 @@ fn insert_confirmed_rubric_version(
                 now,
             ],
         )?;
-        public_id_map.insert(point.old_public_id.clone(), public_id);
+        if let Some(old_public_id) = point.old_public_id.as_ref() {
+            public_id_map.insert(old_public_id.clone(), public_id.clone());
+        }
+        inserted_mappings.push(InsertedRubricPointMapping {
+            candidate_order_index: point.order_index,
+            previous_rubric_point_public_id: point.old_public_id.clone(),
+            adopted_rubric_point_public_id: public_id,
+        });
     }
-    Ok((rubric_version_id, public_id_map))
+    Ok((rubric_version_id, public_id_map, inserted_mappings))
 }
 
 fn carry_forward_link_set(
@@ -911,6 +1085,7 @@ fn carry_forward_link_set(
     question_version_id: i64,
     bound_link_set_id: i64,
     rubric_point_public_ids: &BTreeMap<String, String>,
+    retired_rubric_point_public_ids: &BTreeSet<String>,
     confirmed_by: &str,
     now: &str,
 ) -> CoreResult<(i64, CarriedLinkCounts)> {
@@ -967,12 +1142,18 @@ fn carry_forward_link_set(
         knowledge_rows
     {
         let source_public_id = match source_type.as_str() {
-            "rubric_point" => rubric_point_public_ids
-                .get(&old_source_public_id)
-                .cloned()
-                .ok_or_else(|| {
-                    CoreError::Invalid("当前知识链接无法对应新的简答评分点，请老师逐点补录".into())
-                })?,
+            "rubric_point" => match rubric_point_public_ids.get(&old_source_public_id) {
+                Some(value) => value.clone(),
+                None if retired_rubric_point_public_ids.contains(&old_source_public_id) => {
+                    counts.dropped_knowledge += 1;
+                    continue;
+                }
+                None => {
+                    return Err(CoreError::Invalid(
+                        "当前知识链接无法对应新的简答评分点，请老师逐点补录".into(),
+                    ))
+                }
+            },
             "answer_slot" => {
                 return Err(CoreError::Invalid(
                     "简答题知识链接不能引用填空答案槽位".into(),
@@ -1030,12 +1211,18 @@ fn carry_forward_link_set(
     ) in ability_rows
     {
         let source_public_id = match source_type.as_str() {
-            "rubric_point" => rubric_point_public_ids
-                .get(&old_source_public_id)
-                .cloned()
-                .ok_or_else(|| {
-                    CoreError::Invalid("当前能力链接无法对应新的简答评分点，请老师逐点补录".into())
-                })?,
+            "rubric_point" => match rubric_point_public_ids.get(&old_source_public_id) {
+                Some(value) => value.clone(),
+                None if retired_rubric_point_public_ids.contains(&old_source_public_id) => {
+                    counts.dropped_ability += 1;
+                    continue;
+                }
+                None => {
+                    return Err(CoreError::Invalid(
+                        "当前能力链接无法对应新的简答评分点，请老师逐点补录".into(),
+                    ))
+                }
+            },
             "answer_slot" => {
                 return Err(CoreError::Invalid(
                     "简答题能力链接不能引用填空答案槽位".into(),
@@ -1078,6 +1265,22 @@ pub fn adopt_conflicts_as_new_version(
     source_ai_run_id: i64,
     confirmed_by: &str,
 ) -> CoreResult<AnswerSourceReviewSummary> {
+    adopt_conflicts_as_new_version_with_mappings(
+        conn,
+        batch_id,
+        source_ai_run_id,
+        confirmed_by,
+        &[],
+    )
+}
+
+pub fn adopt_conflicts_as_new_version_with_mappings(
+    conn: &mut Connection,
+    batch_id: i64,
+    source_ai_run_id: i64,
+    confirmed_by: &str,
+    rubric_mappings: &[RubricPointMappingInput],
+) -> CoreResult<AnswerSourceReviewSummary> {
     if confirmed_by.trim().is_empty() {
         return Err(CoreError::Invalid("答案版本确认人不能为空".into()));
     }
@@ -1094,6 +1297,19 @@ pub fn adopt_conflicts_as_new_version(
         return Err(CoreError::Invalid(
             "只有来源完整、高置信且至少存在一项冲突时，才能建立新版本".into(),
         ));
+    }
+
+    let mut requested_mapping_keys = BTreeSet::new();
+    for mapping in rubric_mappings {
+        if mapping.assessment_item_id <= 0
+            || mapping.candidate_order_index < 0
+            || !requested_mapping_keys
+                .insert((mapping.assessment_item_id, mapping.candidate_order_index))
+        {
+            return Err(CoreError::Invalid(
+                "评分点结构映射包含非法题目、顺序或重复项".into(),
+            ));
+        }
     }
 
     let now = time::utc_now_rfc3339();
@@ -1170,6 +1386,13 @@ pub fn adopt_conflicts_as_new_version(
     let mut changed_rubric_count = 0;
     let mut carried_knowledge_link_count = 0;
     let mut carried_ability_link_count = 0;
+    let mut new_rubric_point_count = 0;
+    let mut retired_rubric_point_count = 0;
+    let mut unlinked_new_rubric_point_count = 0;
+    let mut dropped_knowledge_link_count = 0;
+    let mut dropped_ability_link_count = 0;
+    let mut used_mapping_keys = BTreeSet::new();
+    let mut rubric_mapping_rows = Vec::new();
     for (
         source_item_id,
         question_version_id,
@@ -1188,6 +1411,9 @@ pub fn adopt_conflicts_as_new_version(
             .iter()
             .find(|item| item.assessment_item_id == source_item_id)
             .ok_or_else(|| CoreError::Invalid("答案核对题目集合与作业版本不一致".into()))?;
+        let mut item_rubric_mapping_rows = Vec::new();
+        let mut item_new_point_count = 0;
+        let mut item_retired_point_count = 0;
         let (answer_key_version_id, rubric_version_id, link_set_id) =
             if review_item.match_state == "conflict" {
                 let candidate_json = review_item
@@ -1195,7 +1421,15 @@ pub fn adopt_conflicts_as_new_version(
                     .as_deref()
                     .ok_or_else(|| CoreError::Invalid("冲突项缺少上传答案候选".into()))?;
                 let candidate = parse_object(candidate_json, "上传答案")?;
-                let (slots, rubric_points) = if question_type == "short_answer" {
+                let (slots, rubric_change) = if question_type == "short_answer" {
+                    let item_mappings = rubric_mappings
+                        .iter()
+                        .filter(|mapping| mapping.assessment_item_id == source_item_id)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    used_mapping_keys.extend(item_mappings.iter().map(|mapping| {
+                        (mapping.assessment_item_id, mapping.candidate_order_index)
+                    }));
                     (
                         Vec::new(),
                         Some(validate_short_answer_candidate(
@@ -1203,6 +1437,7 @@ pub fn adopt_conflicts_as_new_version(
                             rubric_version_id,
                             score,
                             &candidate,
+                            &item_mappings,
                         )?),
                     )
                 } else {
@@ -1226,32 +1461,70 @@ pub fn adopt_conflicts_as_new_version(
                     confirmed_by.trim(),
                     &now,
                 )?;
-                let (new_rubric_version_id, new_link_set_id, link_counts) =
-                    if let Some(points) = rubric_points {
-                        let (new_rubric_version_id, point_public_ids) =
-                            insert_confirmed_rubric_version(
-                                &tx,
-                                question_version_id,
-                                rubric_version_id,
-                                &points,
-                                confirmed_by.trim(),
-                                &now,
-                            )?;
-                        let (new_link_set_id, link_counts) = carry_forward_link_set(
+                let (new_rubric_version_id, new_link_set_id, link_counts) = if let Some(change) =
+                    rubric_change
+                {
+                    let retired_public_ids = change
+                        .retired_points
+                        .iter()
+                        .map(|point| point.old_public_id.clone())
+                        .collect::<BTreeSet<_>>();
+                    let (new_rubric_version_id, point_public_ids, inserted_mappings) =
+                        insert_confirmed_rubric_version(
                             &tx,
                             question_version_id,
-                            link_set_id,
-                            &point_public_ids,
+                            rubric_version_id,
+                            &change.points,
                             confirmed_by.trim(),
                             &now,
                         )?;
-                        changed_rubric_count += 1;
-                        carried_knowledge_link_count += link_counts.knowledge;
-                        carried_ability_link_count += link_counts.ability;
-                        (new_rubric_version_id, new_link_set_id, link_counts)
-                    } else {
-                        (rubric_version_id, link_set_id, CarriedLinkCounts::default())
-                    };
+                    let (new_link_set_id, link_counts) = carry_forward_link_set(
+                        &tx,
+                        question_version_id,
+                        link_set_id,
+                        &point_public_ids,
+                        &retired_public_ids,
+                        confirmed_by.trim(),
+                        &now,
+                    )?;
+                    for mapping in inserted_mappings {
+                        let action = if mapping.previous_rubric_point_public_id.is_some() {
+                            "reuse_existing"
+                        } else {
+                            "new_point"
+                        };
+                        item_rubric_mapping_rows.push(PendingRubricMappingLedgerRow {
+                            mapping_action: action,
+                            candidate_order_index: Some(mapping.candidate_order_index),
+                            previous_rubric_point_public_id: mapping
+                                .previous_rubric_point_public_id,
+                            adopted_rubric_point_public_id: Some(
+                                mapping.adopted_rubric_point_public_id,
+                            ),
+                        });
+                    }
+                    for retired in &change.retired_points {
+                        item_rubric_mapping_rows.push(PendingRubricMappingLedgerRow {
+                            mapping_action: "retire_existing",
+                            candidate_order_index: None,
+                            previous_rubric_point_public_id: Some(retired.old_public_id.clone()),
+                            adopted_rubric_point_public_id: None,
+                        });
+                    }
+                    item_new_point_count = change.new_point_count;
+                    item_retired_point_count = change.retired_points.len() as i64;
+                    changed_rubric_count += 1;
+                    carried_knowledge_link_count += link_counts.knowledge;
+                    carried_ability_link_count += link_counts.ability;
+                    new_rubric_point_count += item_new_point_count;
+                    retired_rubric_point_count += item_retired_point_count;
+                    unlinked_new_rubric_point_count += item_new_point_count;
+                    dropped_knowledge_link_count += link_counts.dropped_knowledge;
+                    dropped_ability_link_count += link_counts.dropped_ability;
+                    (new_rubric_version_id, new_link_set_id, link_counts)
+                } else {
+                    (rubric_version_id, link_set_id, CarriedLinkCounts::default())
+                };
                 changed_items.push(serde_json::json!({
                     "source_assessment_item_id": source_item_id,
                     "question_version_id": question_version_id,
@@ -1263,6 +1536,10 @@ pub fn adopt_conflicts_as_new_version(
                     "new_link_set_id": new_link_set_id,
                     "carried_knowledge_link_count": link_counts.knowledge,
                     "carried_ability_link_count": link_counts.ability,
+                    "new_rubric_point_count": item_new_point_count,
+                    "retired_rubric_point_count": item_retired_point_count,
+                    "dropped_knowledge_link_count": link_counts.dropped_knowledge,
+                    "dropped_ability_link_count": link_counts.dropped_ability,
                 }));
                 (
                     new_answer_key_version_id,
@@ -1292,8 +1569,19 @@ pub fn adopt_conflicts_as_new_version(
                 &now,
             ],
         )?;
+        let adopted_assessment_item_id = tx.last_insert_rowid();
+        for mapping in item_rubric_mapping_rows {
+            rubric_mapping_rows.push(RubricMappingLedgerRow {
+                source_assessment_item_id: source_item_id,
+                adopted_assessment_item_id,
+                mapping_action: mapping.mapping_action,
+                candidate_order_index: mapping.candidate_order_index,
+                previous_rubric_point_public_id: mapping.previous_rubric_point_public_id,
+                adopted_rubric_point_public_id: mapping.adopted_rubric_point_public_id,
+            });
+        }
         hash_items.push(AdoptedItemHashInput {
-            item_id: tx.last_insert_rowid(),
+            item_id: adopted_assessment_item_id,
             question_version_id,
             answer_key_version_id,
             rubric_version_id,
@@ -1301,6 +1589,11 @@ pub fn adopt_conflicts_as_new_version(
             order_index,
             score_millis: (score * 1000.0).round() as i64,
         });
+    }
+    if used_mapping_keys != requested_mapping_keys {
+        return Err(CoreError::Invalid(
+            "评分点结构映射包含不属于当前冲突简答题的项目".into(),
+        ));
     }
     if changed_items.len() as i64 != summary.conflict_count {
         return Err(CoreError::Invalid(
@@ -1337,6 +1630,11 @@ pub fn adopt_conflicts_as_new_version(
         "changed_rubric_count": changed_rubric_count,
         "carried_knowledge_link_count": carried_knowledge_link_count,
         "carried_ability_link_count": carried_ability_link_count,
+        "new_rubric_point_count": new_rubric_point_count,
+        "retired_rubric_point_count": retired_rubric_point_count,
+        "unlinked_new_rubric_point_count": unlinked_new_rubric_point_count,
+        "dropped_knowledge_link_count": dropped_knowledge_link_count,
+        "dropped_ability_link_count": dropped_ability_link_count,
         "changed_items": changed_items,
     })
     .to_string();
@@ -1357,6 +1655,30 @@ pub fn adopt_conflicts_as_new_version(
             &now,
         ),
     )?;
+    let answer_source_adoption_id = tx.last_insert_rowid();
+    for mapping in &rubric_mapping_rows {
+        tx.execute(
+            "INSERT INTO exam_rubric_point_mappings_v2
+             (public_id,answer_source_adoption_id,source_ai_run_id,
+              source_assessment_item_id,adopted_assessment_item_id,mapping_action,
+              candidate_order_index,previous_rubric_point_public_id,
+              adopted_rubric_point_public_id,created_by,created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![
+                ids::new_public_id(),
+                answer_source_adoption_id,
+                source_ai_run_id,
+                mapping.source_assessment_item_id,
+                mapping.adopted_assessment_item_id,
+                mapping.mapping_action,
+                mapping.candidate_order_index,
+                mapping.previous_rubric_point_public_id.as_deref(),
+                mapping.adopted_rubric_point_public_id.as_deref(),
+                confirmed_by.trim(),
+                &now,
+            ],
+        )?;
+    }
     audit::append(
         &tx,
         &audit::NewAuditEvent {
@@ -2013,6 +2335,248 @@ mod tests {
             )
             .unwrap();
         assert_eq!(counts, (1, 1, 1, 1, 0));
+    }
+
+    #[test]
+    fn teacher_mapping_can_reuse_one_point_and_add_one_without_guessing_links() {
+        let mut fixture = fixture_with_candidate(
+            "short_answer",
+            serde_json::json!({
+                "schema_version": 1,
+                "reference_answer": "需要新的参考答案",
+                "rubric_points": [
+                    {"order_index":0,"canonical_text":"沿用旧知识点的新表述","max_score":0.5},
+                    {"order_index":1,"canonical_text":"新增评分点","max_score":0.5}
+                ],
+            }),
+        );
+        let adopted = adopt_conflicts_as_new_version_with_mappings(
+            &mut fixture.conn,
+            fixture.batch_id,
+            fixture.run_id,
+            "teacher",
+            &[
+                RubricPointMappingInput {
+                    assessment_item_id: 1,
+                    candidate_order_index: 0,
+                    action: RubricPointMappingAction::ReuseExisting,
+                    previous_stable_id: Some("stable-rp".into()),
+                },
+                RubricPointMappingInput {
+                    assessment_item_id: 1,
+                    candidate_order_index: 1,
+                    action: RubricPointMappingAction::NewPoint,
+                    previous_stable_id: None,
+                },
+            ],
+        )
+        .unwrap();
+        let adoption = adopted.adoption.unwrap();
+        assert_eq!(adoption.changed_rubric_count, 1);
+        assert_eq!(adoption.new_rubric_point_count, 1);
+        assert_eq!(adoption.retired_rubric_point_count, 0);
+        assert_eq!(adoption.unlinked_new_rubric_point_count, 1);
+        assert_eq!(adoption.carried_knowledge_link_count, 1);
+        assert_eq!(adoption.carried_ability_link_count, 1);
+        assert_eq!(adoption.dropped_knowledge_link_count, 0);
+        assert_eq!(adoption.dropped_ability_link_count, 0);
+
+        let new_rubric_version_id: i64 = fixture
+            .conn
+            .query_row(
+                "SELECT rubric_version_id FROM exam_assessment_items_v2
+                 WHERE assessment_version_id=?1",
+                [adoption.adopted_assessment_version_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let (point_count, reused_count, generated_count): (i64, i64, i64) = fixture
+            .conn
+            .query_row(
+                "SELECT COUNT(*),
+                        SUM(CASE WHEN stable_id='stable-rp' THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN stable_id LIKE 'rubric-point-%' THEN 1 ELSE 0 END)
+                 FROM k1_rubric_points WHERE rubric_version_id=?1",
+                [new_rubric_version_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((point_count, reused_count, generated_count), (2, 1, 1));
+
+        let mapping_counts: (i64, i64, i64) = fixture
+            .conn
+            .query_row(
+                "SELECT COUNT(*),
+                        SUM(CASE WHEN mapping_action='reuse_existing' THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN mapping_action='new_point' THEN 1 ELSE 0 END)
+                 FROM exam_rubric_point_mappings_v2",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(mapping_counts, (2, 1, 1));
+        assert!(fixture
+            .conn
+            .execute(
+                "UPDATE exam_rubric_point_mappings_v2 SET created_by='other' WHERE id=1",
+                [],
+            )
+            .is_err());
+        let effects: (i64, i64, i64) = fixture
+            .conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM exam_grade_decisions_v2),
+                        (SELECT COUNT(*) FROM exam_grade_publications_v2),
+                        (SELECT COUNT(*) FROM learning_evidence)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(effects, (0, 0, 0));
+    }
+
+    #[test]
+    fn incomplete_or_duplicate_teacher_mapping_rolls_back_every_new_version() {
+        let mut fixture = fixture_with_candidate(
+            "short_answer",
+            serde_json::json!({
+                "schema_version": 1,
+                "reference_answer": "需要新的参考答案",
+                "rubric_points": [
+                    {"order_index":0,"canonical_text":"评分点一","max_score":0.5},
+                    {"order_index":1,"canonical_text":"评分点二","max_score":0.5}
+                ],
+            }),
+        );
+        let incomplete = adopt_conflicts_as_new_version_with_mappings(
+            &mut fixture.conn,
+            fixture.batch_id,
+            fixture.run_id,
+            "teacher",
+            &[RubricPointMappingInput {
+                assessment_item_id: 1,
+                candidate_order_index: 0,
+                action: RubricPointMappingAction::ReuseExisting,
+                previous_stable_id: Some("stable-rp".into()),
+            }],
+        )
+        .unwrap_err();
+        assert!(incomplete
+            .to_string()
+            .contains("必须覆盖上传答案的每一个评分点"));
+
+        let duplicate = adopt_conflicts_as_new_version_with_mappings(
+            &mut fixture.conn,
+            fixture.batch_id,
+            fixture.run_id,
+            "teacher",
+            &[
+                RubricPointMappingInput {
+                    assessment_item_id: 1,
+                    candidate_order_index: 0,
+                    action: RubricPointMappingAction::ReuseExisting,
+                    previous_stable_id: Some("stable-rp".into()),
+                },
+                RubricPointMappingInput {
+                    assessment_item_id: 1,
+                    candidate_order_index: 1,
+                    action: RubricPointMappingAction::ReuseExisting,
+                    previous_stable_id: Some("stable-rp".into()),
+                },
+            ],
+        )
+        .unwrap_err();
+        assert!(duplicate
+            .to_string()
+            .contains("同一个旧评分点不能对应多个新评分点"));
+
+        let counts: (i64, i64, i64, i64) = fixture
+            .conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM exam_assessment_versions_v2),
+                        (SELECT COUNT(*) FROM k1_rubric_versions),
+                        (SELECT COUNT(*) FROM exam_answer_source_adoptions_v2),
+                        (SELECT COUNT(*) FROM exam_rubric_point_mappings_v2)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (1, 1, 0, 0));
+    }
+
+    #[test]
+    fn teacher_can_retire_an_old_point_without_carrying_its_graph_links() {
+        let mut fixture = fixture_with_candidate(
+            "short_answer",
+            serde_json::json!({
+                "schema_version": 1,
+                "reference_answer": "新的参考答案",
+                "rubric_points": [{
+                    "order_index":0,
+                    "canonical_text":"完全新增的评分点",
+                    "max_score":1
+                }],
+            }),
+        );
+        let adopted = adopt_conflicts_as_new_version_with_mappings(
+            &mut fixture.conn,
+            fixture.batch_id,
+            fixture.run_id,
+            "teacher",
+            &[RubricPointMappingInput {
+                assessment_item_id: 1,
+                candidate_order_index: 0,
+                action: RubricPointMappingAction::NewPoint,
+                previous_stable_id: None,
+            }],
+        )
+        .unwrap();
+        let adoption = adopted.adoption.unwrap();
+        assert_eq!(adoption.new_rubric_point_count, 1);
+        assert_eq!(adoption.retired_rubric_point_count, 1);
+        assert_eq!(adoption.unlinked_new_rubric_point_count, 1);
+        assert_eq!(adoption.carried_knowledge_link_count, 0);
+        assert_eq!(adoption.carried_ability_link_count, 0);
+        assert_eq!(adoption.dropped_knowledge_link_count, 1);
+        assert_eq!(adoption.dropped_ability_link_count, 1);
+
+        let (new_link_set_id, new_rubric_version_id): (i64, i64) = fixture
+            .conn
+            .query_row(
+                "SELECT link_set_id,rubric_version_id FROM exam_assessment_items_v2
+                 WHERE assessment_version_id=?1",
+                [adoption.adopted_assessment_version_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let (knowledge_links, ability_links, new_points, mapping_rows): (i64, i64, i64, i64) =
+            fixture
+                .conn
+                .query_row(
+                    "SELECT
+                       (SELECT COUNT(*) FROM k1_knowledge_links WHERE link_set_id=?1),
+                       (SELECT COUNT(*) FROM k1_ability_links WHERE link_set_id=?1),
+                       (SELECT COUNT(*) FROM k1_rubric_points WHERE rubric_version_id=?2),
+                       (SELECT COUNT(*) FROM exam_rubric_point_mappings_v2)",
+                    (new_link_set_id, new_rubric_version_id),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+        assert_eq!(
+            (knowledge_links, ability_links, new_points, mapping_rows),
+            (0, 0, 1, 2)
+        );
+        let actions = fixture
+            .conn
+            .prepare(
+                "SELECT mapping_action FROM exam_rubric_point_mappings_v2 ORDER BY mapping_action",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(actions, vec!["new_point", "retire_existing"]);
     }
 
     #[test]
