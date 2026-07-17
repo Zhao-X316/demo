@@ -397,7 +397,7 @@ fn validate_geometry(input: &MaterializeAnswerSheetPageInput<'_>) -> CoreResult<
             || !(0.0..=1.0).contains(&anchor.confidence)
             || !keys.insert(anchor.key.trim().to_ascii_lowercase())
         {
-            return Err(CoreError::Invalid("答题卡检测锚点非法或重复".into()));
+            return Err(CoreError::Invalid("答题卡四角定位点非法或重复".into()));
         }
     }
     if keys
@@ -408,7 +408,7 @@ fn validate_geometry(input: &MaterializeAnswerSheetPageInput<'_>) -> CoreResult<
             "top_right".to_string(),
         ])
     {
-        return Err(CoreError::Invalid("答题卡必须检测到四角锚点".into()));
+        return Err(CoreError::Invalid("答题卡必须检测到四个页面角点".into()));
     }
     Ok(())
 }
@@ -486,6 +486,7 @@ pub fn materialize_in_transaction(
         "template_revision_id": input.template_revision_id,
         "matrix": input.template_to_source,
         "matrix_direction": "template_to_source",
+        "alignment_mode": definition.alignment_mode,
         "detected_anchors": input.detected_anchors,
     })
     .to_string();

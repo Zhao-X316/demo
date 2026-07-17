@@ -1,4 +1,4 @@
-//! 固定答题卡的一站式本地处理：四角校正、题区裁剪、结构落账和本地 OMR。
+//! 固定答题卡的一站式本地处理：四角定位、题区裁剪、结构落账和本地 OMR。
 //!
 //! 老师触发本命令表示接受“把已确认模板应用到当前已确认页面”；本地 OMR 结果仍只是
 //! observation/评分建议，必须继续进入既有老师终审和显式发布链路。
@@ -27,7 +27,7 @@ use suite_core::models::{ArtifactKind, PrivacyClass};
 use crate::exam_intake::{archive_bytes, register_artifact, ArchivedFile};
 use crate::objective_run::{self, BeginObjectiveRun};
 
-const MATERIALIZATION_VERSION: &str = "answer-sheet-materialization-v1";
+const MATERIALIZATION_VERSION: &str = "answer-sheet-materialization-v2";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -1,6 +1,6 @@
 //! 固定答题卡首张空白模板的 provider-neutral 识别合同。
 //!
-//! 视觉模型只能从老师选择的空白答题卡中提出四角锚点、题号和涂点格位候选；
+//! 视觉模型只能从老师选择的空白答题卡中提出定位方式、题号和涂点格位候选；
 //! 候选必须完整覆盖当前页全部客观题，并且只有老师一次确认后才会成为 active 模板。
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,9 +10,9 @@ use suite_core::domain::hashing;
 use suite_core::error::{CoreError, CoreResult};
 
 use crate::answer_sheet_recognition::{
-    AnswerSheetAnchor, AnswerSheetItemTemplate, AnswerSheetSubjectiveKind,
-    AnswerSheetSubjectiveRegionTemplate, AnswerSheetTemplateDefinition, LocalOmrPolicy,
-    ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION,
+    AnswerSheetAlignmentMode, AnswerSheetAnchor, AnswerSheetItemTemplate,
+    AnswerSheetSubjectiveKind, AnswerSheetSubjectiveRegionTemplate, AnswerSheetTemplateDefinition,
+    LocalOmrPolicy, ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION,
 };
 use crate::objective_recognition::ObjectiveQuestionType;
 
@@ -193,6 +193,8 @@ pub struct AnswerSheetTemplateRecognitionOutput {
     pub state: AnswerSheetTemplateRecognitionState,
     pub canvas_width: u32,
     pub canvas_height: u32,
+    #[serde(default)]
+    pub alignment_mode: AnswerSheetAlignmentMode,
     pub anchors: Vec<AnswerSheetAnchor>,
     pub items: Vec<AnswerSheetItemTemplate>,
     #[serde(default)]
@@ -312,6 +314,7 @@ impl AnswerSheetTemplateRecognitionOutput {
             canvas_height: self.canvas_height,
             blank_artifact_id: self.blank_artifact_id,
             blank_artifact_sha256: self.blank_artifact_sha256.clone(),
+            alignment_mode: self.alignment_mode,
             anchors: self.anchors.clone(),
             items: self.items.clone(),
             subjective_regions: self.subjective_regions.clone(),
@@ -450,6 +453,7 @@ mod tests {
             state: AnswerSheetTemplateRecognitionState::Ready,
             canvas_width: 1200,
             canvas_height: 1800,
+            alignment_mode: AnswerSheetAlignmentMode::PrintedAnchors,
             anchors: vec![
                 anchor("top_left", 0.02, 0.02),
                 anchor("top_right", 0.95, 0.02),
@@ -507,6 +511,21 @@ mod tests {
         let mut candidate = output(&request);
         candidate.items.clear();
         assert!(candidate.validate_against(&request).is_err());
+    }
+
+    #[test]
+    fn ready_candidate_can_use_page_contour_without_printed_anchors() {
+        let bytes = blank_image();
+        let hash = hashing::sha256_hex(&bytes);
+        let request = request(&bytes, &hash);
+        let mut candidate = output(&request);
+        candidate.alignment_mode = AnswerSheetAlignmentMode::PageContour;
+        candidate.anchors.clear();
+        candidate.validate_against(&request).unwrap();
+        assert_eq!(
+            candidate.definition().alignment_mode,
+            AnswerSheetAlignmentMode::PageContour
+        );
     }
 
     #[test]

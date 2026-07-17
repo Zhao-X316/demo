@@ -1737,7 +1737,7 @@ function FixedIntakeTab({
                 <div className="intake-quality-head">
                   <div>
                     <b>答题卡自动识别</b>
-                    <span>按页确认整套空白答题卡；以后同版卡片自动校正，客观格本机识别，主观区单独送手写识别。</span>
+                    <span>按页确认整套空白答题卡；有定位点就按定位点校正，没有定位点就识别纸张边缘，客观格本机识别，主观区单独送手写识别。</span>
                   </div>
                   <strong>
                     {!answerSheetTemplateStatusLoaded
@@ -1763,7 +1763,11 @@ function FixedIntakeTab({
                     {answerSheetTemplateRun?.output && (
                       <>
                         <div className="intake-analysis-summary">
-                          <span>定位锚点 {answerSheetTemplateRun.output.anchors.length}/4</span>
+                          <span>
+                            {answerSheetTemplateRun.output.alignment_mode === "page_contour"
+                              ? "纸张边缘定位"
+                              : `印刷定位点 ${answerSheetTemplateRun.output.anchors.length}/4`}
+                          </span>
                           <span>客观格 {answerSheetTemplateRun.output.items.length}</span>
                           <span>主观区 {answerSheetTemplateRun.output.subjective_regions.length}</span>
                           <span>可信度 {Math.round(answerSheetTemplateRun.output.confidence * 100)}%</span>

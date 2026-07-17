@@ -1,13 +1,14 @@
 //! 火山方舟空白答题卡模板候选适配器。
 //!
-//! 模型只提出四角锚点、题号与格位；输出还要通过 provider-neutral 合同校验，
+//! 模型只提出定位方式、题号与格位；输出还要通过 provider-neutral 合同校验，
 //! 且必须由老师确认一次后才能用于学生答题卡。
 
 use std::time::Duration;
 
 use base64::Engine;
 use module_exam::answer_sheet_recognition::{
-    AnswerSheetAnchor, AnswerSheetItemTemplate, AnswerSheetSubjectiveRegionTemplate, LocalOmrPolicy,
+    AnswerSheetAlignmentMode, AnswerSheetAnchor, AnswerSheetItemTemplate,
+    AnswerSheetSubjectiveRegionTemplate, LocalOmrPolicy,
 };
 use module_exam::answer_sheet_template_recognition::{
     AnswerSheetTemplateRecognitionErrorCode, AnswerSheetTemplateRecognitionFailure,
@@ -22,8 +23,8 @@ use crate::secrets::VolcanoCreds;
 use crate::vlm::{ARK_URL, DEFAULT_MODEL};
 
 const MODEL_VERSION: &str = "ark-chat-completions-v3";
-const CONFIG_VERSION: &str = "answer-sheet-template-v2";
-const RULE_VERSION: &str = "answer-sheet-template-json-v2";
+const CONFIG_VERSION: &str = "answer-sheet-template-v3";
+const RULE_VERSION: &str = "answer-sheet-template-json-v3";
 
 pub struct ArkAnswerSheetTemplateRecognizer {
     api_key: String,
@@ -194,6 +195,7 @@ impl AnswerSheetTemplateRecognizer for ArkAnswerSheetTemplateRecognizer {
             state: parsed.state,
             canvas_width: parsed.canvas_width,
             canvas_height: parsed.canvas_height,
+            alignment_mode: parsed.alignment_mode,
             anchors: parsed.anchors,
             items: parsed.items,
             subjective_regions: parsed.subjective_regions,
@@ -204,7 +206,7 @@ impl AnswerSheetTemplateRecognizer for ArkAnswerSheetTemplateRecognizer {
         output.validate_against(request).map_err(|_| {
             failure(
                 AnswerSheetTemplateRecognitionErrorCode::InvalidOutput,
-                "答题卡模板未通过题号、锚点和格位安全校验，已转入老师复核",
+                "答题卡模板未通过定位方式、题号和格位安全校验，已转入老师复核",
                 false,
             )
         })?;
@@ -217,6 +219,8 @@ struct ArkAnswerSheetTemplatePayload {
     state: AnswerSheetTemplateRecognitionState,
     canvas_width: u32,
     canvas_height: u32,
+    #[serde(default)]
+    alignment_mode: AnswerSheetAlignmentMode,
     anchors: Vec<AnswerSheetAnchor>,
     items: Vec<AnswerSheetItemTemplate>,
     #[serde(default)]
@@ -234,14 +238,15 @@ fn build_prompt(request: &AnswerSheetTemplateRecognitionRequest<'_>) -> String {
          当前页码：{}；模板版本：{}；当前页题目清单：{}。\n\
          只输出一个 JSON 对象，不要 markdown。字段必须为：\n\
          state: ready|needs_review|blocked；canvas_width、canvas_height 必须是空白原图像素尺寸；\n\
-         anchors: 四项，每项 {{key,expected:{{x,y,width,height}},search:{{x,y,width,height}}}}，key 必须且只能是 top_left/top_right/bottom_left/bottom_right；\n\
-         expected 是对应黑色定位块在空白原图上的 0~1 区域，search 是学生照片中寻找同一定位块的安全搜索区；\n\
+         alignment_mode: printed_anchors|page_contour。若空白卡有四个稳定黑色定位块，选 printed_anchors；没有可靠定位块但整张纸边缘清晰，选 page_contour；\n\
+         anchors: printed_anchors 时必须四项，每项 {{key,expected:{{x,y,width,height}},search:{{x,y,width,height}}}}，key 必须且只能是 top_left/top_right/bottom_left/bottom_right；page_contour 时必须为空数组；\n\
+         expected 是对应黑色定位块在空白原图上的 0~1 区域，search 是学生照片中寻找同一定位块的安全搜索区；纸张边缘定位由本机完成，不得虚构 anchors；\n\
          items: [{{assessment_item_id,region_index,question_type,region:{{x,y,width,height}},cells:[{{label,x,y,width,height}}]}}]；\n\
          question_type 为 single|multiple|true_false；region 按整页 0~1，cells 按各自 region 0~1；判断题标签必须且只能 TRUE/FALSE；\n\
          subjective_regions: [{{assessment_item_id,region_index,question_type,region:{{x,y,width,height}}}}]，question_type 只能为 fill_blank|short_answer；主观区不得出现在 items，也不得生成 cells；\n\
          policy 固定输出 {{blank_max_ratio:0.04,marked_min_ratio:0.14,pixel_delta_threshold:24,cell_inset_ratio:0.18}}；\n\
-         confidence: 0到1；issue_codes: 字符串数组。不得新增、遗漏或重复题目；找不到四个可靠黑色定位块、题号或格位时必须 needs_review/blocked；\n\
-         只有四角、全部题号和全部格位都清晰且各置信度不低于 0.95 时才能 ready。",
+         confidence: 0到1；issue_codes: 字符串数组。不得新增、遗漏或重复题目；两种定位方式都不可靠，或题号、格位不清晰时必须 needs_review/blocked；\n\
+         只有定位方式明确、全部题号和全部格位都清晰且各置信度不低于 0.95 时才能 ready。",
         request.page_no,
         request.template_version.trim(),
         items
@@ -318,6 +323,7 @@ mod tests {
         }];
         let payload = json!({
             "state":"ready","canvas_width":1200,"canvas_height":1800,
+            "alignment_mode":"printed_anchors",
             "anchors":[
                 {"key":"top_left","expected":{"x":0.02,"y":0.02,"width":0.03,"height":0.03},"search":{"x":0.0,"y":0.0,"width":0.1,"height":0.1}},
                 {"key":"top_right","expected":{"x":0.95,"y":0.02,"width":0.03,"height":0.03},"search":{"x":0.9,"y":0.0,"width":0.1,"height":0.1}},
@@ -344,5 +350,45 @@ mod tests {
         let output = recognizer.recognize(&request).unwrap();
         assert_eq!(output.state, AnswerSheetTemplateRecognitionState::Ready);
         assert_eq!(output.items.len(), 1);
+    }
+
+    #[test]
+    fn adapter_accepts_page_contour_without_fake_anchors() {
+        let mut image = Vec::new();
+        DynamicImage::new_rgb8(1200, 1800)
+            .write_to(
+                &mut std::io::Cursor::new(&mut image),
+                ImageOutputFormat::Jpeg(90),
+            )
+            .unwrap();
+        let hash = hashing::sha256_hex(&image);
+        let items = vec![AnswerSheetTemplateItemSpec {
+            assessment_item_id: 11,
+            order_index: 0,
+            question_type: AnswerSheetTemplateQuestionType::Single,
+        }];
+        let payload = json!({
+            "state":"ready","canvas_width":1200,"canvas_height":1800,
+            "alignment_mode":"page_contour","anchors":[],
+            "items":[{"assessment_item_id":11,"region_index":0,"question_type":"single","region":{"x":0.1,"y":0.2,"width":0.8,"height":0.08},"cells":[{"label":"A","x":0.1,"y":0.1,"width":0.1,"height":0.8},{"label":"B","x":0.3,"y":0.1,"width":0.1,"height":0.8}]}],
+            "subjective_regions":[],
+            "policy":{"blank_max_ratio":0.04,"marked_min_ratio":0.14,"pixel_delta_threshold":24,"cell_inset_ratio":0.18},
+            "confidence":0.99,"issue_codes":[]
+        });
+        let body = json!({"choices":[{"message":{"content":payload.to_string()}}]}).to_string();
+        let recognizer = ArkAnswerSheetTemplateRecognizer::for_test(serve_once(body));
+        let request = AnswerSheetTemplateRecognitionRequest {
+            assessment_version_id: 7,
+            page_no: 1,
+            template_version: "sheet-v1",
+            blank_artifact_id: 9,
+            blank_artifact_sha256: &hash,
+            mime_type: "image/jpeg",
+            image_bytes: &image,
+            items: &items,
+        };
+        let output = recognizer.recognize(&request).unwrap();
+        assert_eq!(output.alignment_mode, AnswerSheetAlignmentMode::PageContour);
+        assert!(output.anchors.is_empty());
     }
 }

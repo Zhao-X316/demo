@@ -1,10 +1,10 @@
 //! 固定答题卡模板与本地可复现 OMR。
 //!
-//! 答题卡不走普通卷整页 VLM：模板固定空白卡、锚点、题号和格位；页面配准完成后，
+//! 答题卡不走普通卷整页 VLM：模板固定空白卡、定位方式、题号和格位；页面配准完成后，
 //! 本识别器对空白模板裁剪和学生裁剪做像素差分。清晰结果只形成 objective
 //! observation；双涂、浅涂、擦除或模板不一致必须交老师复核。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, Rgb, RgbImage};
@@ -20,8 +20,18 @@ use crate::objective_recognition::{
 };
 
 pub const LEGACY_ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION: i64 = 1;
-pub const ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION: i64 = 2;
+pub const PREVIOUS_ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION: i64 = 2;
+pub const ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION: i64 = 3;
 pub const ANSWER_SHEET_ANCHOR_CONFIDENCE_THRESHOLD: f64 = 0.35;
+pub const ANSWER_SHEET_PAGE_CONTOUR_CONFIDENCE_THRESHOLD: f64 = 0.80;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnswerSheetAlignmentMode {
+    #[default]
+    PrintedAnchors,
+    PageContour,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SheetRect {
@@ -145,6 +155,8 @@ pub struct AnswerSheetTemplateDefinition {
     pub canvas_height: u32,
     pub blank_artifact_id: i64,
     pub blank_artifact_sha256: String,
+    #[serde(default)]
+    pub alignment_mode: AnswerSheetAlignmentMode,
     pub anchors: Vec<AnswerSheetAnchor>,
     pub items: Vec<AnswerSheetItemTemplate>,
     #[serde(default)]
@@ -156,7 +168,9 @@ impl AnswerSheetTemplateDefinition {
     pub fn validate(&self) -> CoreResult<()> {
         if !matches!(
             self.schema_version,
-            LEGACY_ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION | ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION
+            LEGACY_ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION
+                | PREVIOUS_ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION
+                | ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION
         ) || self.assessment_version_id <= 0
             || self.page_no <= 0
             || self.blank_artifact_id <= 0
@@ -177,6 +191,14 @@ impl AnswerSheetTemplateDefinition {
         validate_sha256(&self.blank_artifact_sha256)?;
         self.policy.validate()?;
 
+        if self.schema_version < ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION
+            && self.alignment_mode != AnswerSheetAlignmentMode::PrintedAnchors
+        {
+            return Err(CoreError::Invalid(
+                "旧版答题卡模板只能使用印刷定位点".into(),
+            ));
+        }
+
         let mut anchor_keys = BTreeSet::new();
         for anchor in &self.anchors {
             let key = anchor.key.trim().to_ascii_lowercase();
@@ -186,17 +208,21 @@ impl AnswerSheetTemplateDefinition {
             anchor.expected.validate("锚点标准区域")?;
             anchor.search.validate("锚点搜索区域")?;
         }
-        if anchor_keys
-            != BTreeSet::from([
-                "bottom_left".to_string(),
-                "bottom_right".to_string(),
-                "top_left".to_string(),
-                "top_right".to_string(),
-            ])
-        {
-            return Err(CoreError::Invalid(
-                "固定答题卡必须且只能包含四角锚点".into(),
-            ));
+        match self.alignment_mode {
+            AnswerSheetAlignmentMode::PrintedAnchors => {
+                if anchor_keys != corner_keys() {
+                    return Err(CoreError::Invalid(
+                        "印刷定位点答题卡必须且只能包含四角锚点".into(),
+                    ));
+                }
+            }
+            AnswerSheetAlignmentMode::PageContour => {
+                if !anchor_keys.is_empty() {
+                    return Err(CoreError::Invalid(
+                        "纸张边缘定位模板不能混入印刷锚点".into(),
+                    ));
+                }
+            }
         }
 
         let mut item_keys = BTreeSet::new();
@@ -305,9 +331,9 @@ pub fn validate_blank_template_canvas(
     Ok(())
 }
 
-/// 使用固定四角锚点把拍照答题卡校正到模板画布。
+/// 使用印刷四角定位点或纸张边缘把拍照答题卡校正到模板画布。
 ///
-/// 这里不猜题号或答案；锚点不足、顺序翻转或页面裁切都会直接失败，避免把正确涂点
+/// 这里不猜题号或答案；四角不足、顺序翻转或页面裁切都会直接失败，避免把正确涂点
 /// 映射到错误题号。
 pub fn align_answer_sheet_page(
     definition: &AnswerSheetTemplateDefinition,
@@ -324,17 +350,54 @@ pub fn align_answer_sheet_page(
             )
         })?;
     let gray = DynamicImage::ImageRgb8(source.clone()).into_luma8();
-    let mut detected = Vec::with_capacity(4);
-    let mut correspondences = Vec::with_capacity(4);
-    for anchor in &definition.anchors {
-        let point = detect_anchor(&gray, anchor)?;
-        let template_x =
-            (anchor.expected.x + anchor.expected.width / 2.0) * definition.canvas_width as f64;
-        let template_y =
-            (anchor.expected.y + anchor.expected.height / 2.0) * definition.canvas_height as f64;
-        correspondences.push((template_x, template_y, point.source_x, point.source_y));
-        detected.push(point);
-    }
+    let (detected, correspondences) = match definition.alignment_mode {
+        AnswerSheetAlignmentMode::PrintedAnchors => {
+            let mut detected = Vec::with_capacity(4);
+            let mut correspondences = Vec::with_capacity(4);
+            for anchor in &definition.anchors {
+                let point = detect_anchor(&gray, anchor)?;
+                let template_x = (anchor.expected.x + anchor.expected.width / 2.0)
+                    * definition.canvas_width as f64;
+                let template_y = (anchor.expected.y + anchor.expected.height / 2.0)
+                    * definition.canvas_height as f64;
+                correspondences.push((template_x, template_y, point.source_x, point.source_y));
+                detected.push(point);
+            }
+            (detected, correspondences)
+        }
+        AnswerSheetAlignmentMode::PageContour => {
+            let detected = detect_page_contour(&gray, definition)?;
+            let source_point = |key: &str| {
+                detected
+                    .iter()
+                    .find(|point| point.key == key)
+                    .map(|point| (point.source_x, point.source_y))
+            };
+            let Some(top_left) = source_point("top_left") else {
+                return Err(missing_anchor());
+            };
+            let Some(top_right) = source_point("top_right") else {
+                return Err(missing_anchor());
+            };
+            let Some(bottom_left) = source_point("bottom_left") else {
+                return Err(missing_anchor());
+            };
+            let Some(bottom_right) = source_point("bottom_right") else {
+                return Err(missing_anchor());
+            };
+            let max_x = definition.canvas_width as f64 - 0.5;
+            let max_y = definition.canvas_height as f64 - 0.5;
+            (
+                detected,
+                vec![
+                    (0.5, 0.5, top_left.0, top_left.1),
+                    (max_x, 0.5, top_right.0, top_right.1),
+                    (0.5, max_y, bottom_left.0, bottom_left.1),
+                    (max_x, max_y, bottom_right.0, bottom_right.1),
+                ],
+            )
+        }
+    };
     validate_detected_orientation(&detected)?;
     let matrix = solve_homography(&correspondences).ok_or_else(|| {
         failure(
@@ -377,6 +440,259 @@ pub fn align_answer_sheet_page(
         confidence,
         aligned_jpeg,
     })
+}
+
+fn corner_keys() -> BTreeSet<String> {
+    BTreeSet::from([
+        "bottom_left".to_string(),
+        "bottom_right".to_string(),
+        "top_left".to_string(),
+        "top_right".to_string(),
+    ])
+}
+
+fn detect_page_contour(
+    gray: &image::GrayImage,
+    definition: &AnswerSheetTemplateDefinition,
+) -> Result<Vec<DetectedAnswerSheetAnchor>, ObjectiveRecognitionFailure> {
+    let expected_aspect = definition.canvas_width as f64 / definition.canvas_height as f64;
+    let source_aspect = gray.width() as f64 / gray.height() as f64;
+    if relative_difference(source_aspect, expected_aspect) <= 0.06
+        && full_frame_page_support(gray) >= 0.72
+    {
+        return Ok(page_corner_points(
+            [
+                (0.5, 0.5),
+                (gray.width() as f64 - 0.5, 0.5),
+                (0.5, gray.height() as f64 - 0.5),
+                (gray.width() as f64 - 0.5, gray.height() as f64 - 0.5),
+            ],
+            0.90,
+        ));
+    }
+
+    let longest = gray.width().max(gray.height()).max(1);
+    let scale = (256.0 / longest as f64).min(1.0);
+    let small_width = ((gray.width() as f64 * scale).round() as u32).max(16);
+    let small_height = ((gray.height() as f64 * scale).round() as u32).max(16);
+    let small = image::imageops::resize(
+        gray,
+        small_width,
+        small_height,
+        image::imageops::FilterType::Triangle,
+    );
+    let border_luma = border_median(&small);
+    let center_luma = center_median(&small);
+    let contrast = f64::from(center_luma.saturating_sub(border_luma));
+    if contrast < 25.0 {
+        return Err(page_contour_failure());
+    }
+    let threshold = ((u16::from(border_luma) + u16::from(center_luma)) / 2).clamp(90, 235) as u8;
+    let component = largest_bright_component(&small, threshold).ok_or_else(page_contour_failure)?;
+    let total = u64::from(small_width) * u64::from(small_height);
+    let area_ratio = component.len() as f64 / total.max(1) as f64;
+    if !(0.30..=0.985).contains(&area_ratio) {
+        return Err(page_contour_failure());
+    }
+    let corners = component_extreme_corners(&component);
+    validate_page_quadrilateral(corners, small_width, small_height, expected_aspect)?;
+    let source_corners = corners.map(|(x, y)| {
+        (
+            ((x as f64 + 0.5) * gray.width() as f64 / small_width as f64 - 0.5)
+                .clamp(0.5, gray.width() as f64 - 0.5),
+            ((y as f64 + 0.5) * gray.height() as f64 / small_height as f64 - 0.5)
+                .clamp(0.5, gray.height() as f64 - 0.5),
+        )
+    });
+    let contour_aspect = average_quad_aspect(source_corners);
+    let aspect_score = (1.0 - relative_difference(contour_aspect, expected_aspect)).clamp(0.0, 1.0);
+    let confidence = (0.80 + (contrast / 255.0).min(0.10) + aspect_score * 0.10).min(0.99);
+    if confidence < ANSWER_SHEET_PAGE_CONTOUR_CONFIDENCE_THRESHOLD {
+        return Err(page_contour_failure());
+    }
+    Ok(page_corner_points(source_corners, confidence))
+}
+
+fn full_frame_page_support(gray: &image::GrayImage) -> f64 {
+    let band = (gray.width().min(gray.height()) / 40).max(2);
+    let mut bright = 0_u64;
+    let mut sampled = 0_u64;
+    for y in 0..gray.height() {
+        for x in 0..gray.width() {
+            if x < band
+                || y < band
+                || x >= gray.width().saturating_sub(band)
+                || y >= gray.height().saturating_sub(band)
+            {
+                sampled += 1;
+                if gray.get_pixel(x, y).0[0] >= 150 {
+                    bright += 1;
+                }
+            }
+        }
+    }
+    bright as f64 / sampled.max(1) as f64
+}
+
+fn border_median(gray: &image::GrayImage) -> u8 {
+    let band = (gray.width().min(gray.height()) / 24).max(2);
+    let mut values = Vec::new();
+    for y in 0..gray.height() {
+        for x in 0..gray.width() {
+            if x < band
+                || y < band
+                || x >= gray.width().saturating_sub(band)
+                || y >= gray.height().saturating_sub(band)
+            {
+                values.push(gray.get_pixel(x, y).0[0]);
+            }
+        }
+    }
+    median(&mut values)
+}
+
+fn center_median(gray: &image::GrayImage) -> u8 {
+    let mut values = Vec::new();
+    for y in gray.height() / 4..gray.height() * 3 / 4 {
+        for x in gray.width() / 4..gray.width() * 3 / 4 {
+            values.push(gray.get_pixel(x, y).0[0]);
+        }
+    }
+    median(&mut values)
+}
+
+fn median(values: &mut [u8]) -> u8 {
+    if values.is_empty() {
+        return 0;
+    }
+    let middle = values.len() / 2;
+    values.select_nth_unstable(middle).1.to_owned()
+}
+
+fn largest_bright_component(gray: &image::GrayImage, threshold: u8) -> Option<Vec<(u32, u32)>> {
+    let width = gray.width();
+    let height = gray.height();
+    let mut visited = vec![false; (width * height) as usize];
+    let mut largest = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            let index = (y * width + x) as usize;
+            if visited[index] || gray.get_pixel(x, y).0[0] < threshold {
+                continue;
+            }
+            visited[index] = true;
+            let mut queue = VecDeque::from([(x, y)]);
+            let mut component = Vec::new();
+            while let Some((current_x, current_y)) = queue.pop_front() {
+                component.push((current_x, current_y));
+                for (next_x, next_y) in neighbors(current_x, current_y, width, height) {
+                    let next_index = (next_y * width + next_x) as usize;
+                    if !visited[next_index] && gray.get_pixel(next_x, next_y).0[0] >= threshold {
+                        visited[next_index] = true;
+                        queue.push_back((next_x, next_y));
+                    }
+                }
+            }
+            if component.len() > largest.len() {
+                largest = component;
+            }
+        }
+    }
+    (!largest.is_empty()).then_some(largest)
+}
+
+fn neighbors(x: u32, y: u32, width: u32, height: u32) -> Vec<(u32, u32)> {
+    let mut result = Vec::with_capacity(4);
+    if x > 0 {
+        result.push((x - 1, y));
+    }
+    if x + 1 < width {
+        result.push((x + 1, y));
+    }
+    if y > 0 {
+        result.push((x, y - 1));
+    }
+    if y + 1 < height {
+        result.push((x, y + 1));
+    }
+    result
+}
+
+fn component_extreme_corners(component: &[(u32, u32)]) -> [(u32, u32); 4] {
+    let top_left = *component.iter().min_by_key(|(x, y)| x + y).unwrap();
+    let top_right = *component
+        .iter()
+        .max_by_key(|(x, y)| i64::from(*x) - i64::from(*y))
+        .unwrap();
+    let bottom_left = *component
+        .iter()
+        .min_by_key(|(x, y)| i64::from(*x) - i64::from(*y))
+        .unwrap();
+    let bottom_right = *component.iter().max_by_key(|(x, y)| x + y).unwrap();
+    [top_left, top_right, bottom_left, bottom_right]
+}
+
+fn validate_page_quadrilateral(
+    corners: [(u32, u32); 4],
+    width: u32,
+    height: u32,
+    expected_aspect: f64,
+) -> Result<(), ObjectiveRecognitionFailure> {
+    let points = corners.map(|(x, y)| (x as f64, y as f64));
+    if BTreeSet::from(corners).len() != 4
+        || points[0].0 >= points[1].0
+        || points[2].0 >= points[3].0
+        || points[0].1 >= points[2].1
+        || points[1].1 >= points[3].1
+    {
+        return Err(page_contour_failure());
+    }
+    let min_width = width as f64 * 0.35;
+    let min_height = height as f64 * 0.35;
+    if distance(points[0], points[1]) < min_width
+        || distance(points[2], points[3]) < min_width
+        || distance(points[0], points[2]) < min_height
+        || distance(points[1], points[3]) < min_height
+        || relative_difference(average_quad_aspect(points), expected_aspect) > 0.55
+    {
+        return Err(page_contour_failure());
+    }
+    Ok(())
+}
+
+fn average_quad_aspect(points: [(f64, f64); 4]) -> f64 {
+    let width = (distance(points[0], points[1]) + distance(points[2], points[3])) / 2.0;
+    let height = (distance(points[0], points[2]) + distance(points[1], points[3])) / 2.0;
+    width / height.max(1.0)
+}
+
+fn distance(left: (f64, f64), right: (f64, f64)) -> f64 {
+    ((left.0 - right.0).powi(2) + (left.1 - right.1).powi(2)).sqrt()
+}
+
+fn relative_difference(left: f64, right: f64) -> f64 {
+    (left - right).abs() / right.abs().max(1e-9)
+}
+
+fn page_corner_points(corners: [(f64, f64); 4], confidence: f64) -> Vec<DetectedAnswerSheetAnchor> {
+    ["top_left", "top_right", "bottom_left", "bottom_right"]
+        .into_iter()
+        .zip(corners)
+        .map(|(key, (source_x, source_y))| DetectedAnswerSheetAnchor {
+            key: key.into(),
+            source_x,
+            source_y,
+            confidence,
+        })
+        .collect()
+}
+
+fn page_contour_failure() -> ObjectiveRecognitionFailure {
+    failure(
+        ObjectiveRecognitionErrorCode::TemplateMismatch,
+        "未可靠识别答题卡纸张边缘，请在深色平面重新拍摄或改用带定位点答题卡",
+        false,
+    )
 }
 
 fn detect_anchor(
@@ -924,6 +1240,7 @@ mod tests {
             canvas_height: 200,
             blank_artifact_id: 1,
             blank_artifact_sha256: "a".repeat(64),
+            alignment_mode: AnswerSheetAlignmentMode::PrintedAnchors,
             anchors: vec![
                 anchor("top_left", 0.05, 0.05, 0.0, 0.0),
                 anchor("top_right", 0.90, 0.05, 0.75, 0.0),
@@ -997,6 +1314,45 @@ mod tests {
     }
 
     #[test]
+    fn legacy_json_defaults_to_printed_anchor_alignment() {
+        let mut value = serde_json::to_value(valid_template()).unwrap();
+        value["schema_version"] = serde_json::json!(PREVIOUS_ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION);
+        value.as_object_mut().unwrap().remove("alignment_mode");
+        let definition: AnswerSheetTemplateDefinition = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            definition.alignment_mode,
+            AnswerSheetAlignmentMode::PrintedAnchors
+        );
+        definition.validate().unwrap();
+    }
+
+    #[test]
+    fn current_template_can_use_page_contour_without_fake_anchors() {
+        let mut definition = valid_template();
+        definition.schema_version = ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION;
+        definition.alignment_mode = AnswerSheetAlignmentMode::PageContour;
+        definition.anchors.clear();
+        definition.validate().unwrap();
+
+        definition.anchors.push(AnswerSheetAnchor {
+            key: "top_left".into(),
+            expected: SheetRect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.05,
+                height: 0.05,
+            },
+            search: SheetRect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.1,
+                height: 0.1,
+            },
+        });
+        assert!(definition.validate().is_err());
+    }
+
+    #[test]
     fn legacy_template_cannot_hide_a_subjective_region() {
         let mut definition = valid_template();
         definition.subjective_regions = vec![AnswerSheetSubjectiveRegionTemplate {
@@ -1038,5 +1394,70 @@ mod tests {
             result.template_to_source,
             [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
         );
+    }
+
+    #[test]
+    fn page_contour_aligns_a_sheet_on_a_dark_background() {
+        let mut definition = valid_template();
+        definition.schema_version = ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION;
+        definition.alignment_mode = AnswerSheetAlignmentMode::PageContour;
+        definition.anchors.clear();
+        let mut source = RgbImage::from_pixel(300, 300, Rgb([28, 30, 32]));
+        let polygon = [(45.0, 30.0), (260.0, 45.0), (270.0, 250.0), (30.0, 265.0)];
+        for y in 0..source.height() {
+            for x in 0..source.width() {
+                if inside_convex_polygon(x as f64 + 0.5, y as f64 + 0.5, &polygon) {
+                    source.put_pixel(x, y, Rgb([248, 248, 246]));
+                }
+            }
+        }
+        for y in 120..126 {
+            for x in 90..210 {
+                source.put_pixel(x, y, Rgb([35, 35, 35]));
+            }
+        }
+        let mut bytes = Vec::new();
+        JpegEncoder::new_with_quality(&mut bytes, 95)
+            .encode_image(&source)
+            .unwrap();
+        let result = align_answer_sheet_page(&definition, &bytes).unwrap();
+        let aligned = image::load_from_memory(&result.aligned_jpeg).unwrap();
+        assert_eq!((aligned.width(), aligned.height()), (200, 200));
+        assert_eq!(result.detected_anchors.len(), 4);
+        assert!(result.confidence >= ANSWER_SHEET_PAGE_CONTOUR_CONFIDENCE_THRESHOLD);
+    }
+
+    #[test]
+    fn page_contour_rejects_an_ambiguous_low_contrast_photo() {
+        let mut definition = valid_template();
+        definition.schema_version = ANSWER_SHEET_TEMPLATE_SCHEMA_VERSION;
+        definition.alignment_mode = AnswerSheetAlignmentMode::PageContour;
+        definition.anchors.clear();
+        let source = RgbImage::from_pixel(300, 250, Rgb([180, 180, 180]));
+        let mut bytes = Vec::new();
+        JpegEncoder::new_with_quality(&mut bytes, 95)
+            .encode_image(&source)
+            .unwrap();
+        let failure = align_answer_sheet_page(&definition, &bytes).unwrap_err();
+        assert!(failure.safe_message.contains("深色平面"));
+    }
+
+    fn inside_convex_polygon(x: f64, y: f64, polygon: &[(f64, f64); 4]) -> bool {
+        let mut sign = 0.0_f64;
+        for index in 0..polygon.len() {
+            let current = polygon[index];
+            let next = polygon[(index + 1) % polygon.len()];
+            let cross =
+                (next.0 - current.0) * (y - current.1) - (next.1 - current.1) * (x - current.0);
+            if cross.abs() < 1e-9 {
+                continue;
+            }
+            if sign == 0.0 {
+                sign = cross.signum();
+            } else if cross.signum() != sign {
+                return false;
+            }
+        }
+        true
     }
 }

@@ -11,8 +11,8 @@ use super::papers::{
     self, NewIngestBatch, NewIngestPage, NewPageMatchRevision, NewPageQualityRevision,
 };
 use crate::answer_sheet_recognition::{
-    AnswerSheetAnchor, AnswerSheetItemTemplate, AnswerSheetTemplateDefinition,
-    DetectedAnswerSheetAnchor, LocalOmrPolicy, SheetRect,
+    AnswerSheetAlignmentMode, AnswerSheetAnchor, AnswerSheetItemTemplate,
+    AnswerSheetTemplateDefinition, DetectedAnswerSheetAnchor, LocalOmrPolicy, SheetRect,
 };
 use crate::objective_recognition::{ObjectiveMarkCell, ObjectiveQuestionType};
 
@@ -265,6 +265,7 @@ fn setup() -> Fixture {
         canvas_height: 1400,
         blank_artifact_id: blank.id,
         blank_artifact_sha256: blank_hash,
+        alignment_mode: AnswerSheetAlignmentMode::PrintedAnchors,
         anchors: vec![
             AnswerSheetAnchor {
                 key: "top_left".into(),
@@ -382,6 +383,9 @@ fn materialization_is_atomic_idempotent_and_has_no_grading_effects() {
     assert_eq!(first.regions.len(), 1);
     assert_eq!(first.routes.len(), 1);
     assert_eq!(first.routes[0].recognition_route, "objective_omr");
+    let transform: serde_json::Value =
+        serde_json::from_str(&first.alignment.transform_json).unwrap();
+    assert_eq!(transform["alignment_mode"], "printed_anchors");
     let counts: (i64, i64, i64, i64, i64, i64) = fixture
         .conn
         .query_row(

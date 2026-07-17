@@ -710,6 +710,7 @@ export interface AnswerSheetTemplateRunResult {
     page_no: number;
     canvas_width: number;
     canvas_height: number;
+    alignment_mode: "printed_anchors" | "page_contour";
     anchors: Array<{ key: string }>;
     items: Array<{
       assessment_item_id: number;

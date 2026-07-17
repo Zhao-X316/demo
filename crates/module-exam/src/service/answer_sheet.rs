@@ -638,6 +638,8 @@ mod tests {
             canvas_height: 1400,
             blank_artifact_id: artifact_id,
             blank_artifact_sha256: hash,
+            alignment_mode:
+                crate::answer_sheet_recognition::AnswerSheetAlignmentMode::PrintedAnchors,
             anchors: vec![
                 AnswerSheetAnchor {
                     key: "top_left".into(),
