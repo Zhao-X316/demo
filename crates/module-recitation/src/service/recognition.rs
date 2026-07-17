@@ -1,9 +1,10 @@
 //! ASR 状态机与失败后的人工操作。网络调用留在 Tauri 外壳，本服务只持有短事务。
 
 use chrono::{FixedOffset, Utc};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use suite_core::db::repo::{submissions, tasks, verdicts};
+use suite_core::db::repo::{ai_runs, submissions, tasks, verdicts};
+use suite_core::domain::time;
 use suite_core::error::{CoreError, CoreResult};
 use suite_core::models::{ModuleKey, TaskStatus};
 
@@ -83,11 +84,41 @@ pub fn mark_failed(conn: &Connection, submission_id: i64, message: &str) -> Core
 pub fn recover_stale_processing(conn: &Connection) -> CoreResult<usize> {
     let processing = submissions::list_processing(conn, MODULE)?;
     for submission in &processing {
+        let transaction = conn.unchecked_transaction()?;
+        let ai_run_id = transaction
+            .query_row(
+                "SELECT id FROM ai_runs
+                 WHERE run_type='asr'
+                   AND source_module='recitation'
+                   AND business_ref_type='submission'
+                   AND business_ref_id=?1
+                   AND status='processing'
+                 ORDER BY id DESC LIMIT 1",
+                [submission.id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        if let Some(ai_run_id) = ai_run_id {
+            let error_meta = serde_json::json!({
+                "schema_version": 1,
+                "error_code": "interrupted",
+                "error_message": "应用上次在识别过程中退出，已恢复为可重试失败",
+                "retryable": true
+            })
+            .to_string();
+            ai_runs::finalize_failed(
+                &transaction,
+                ai_run_id,
+                &error_meta,
+                &time::utc_now_rfc3339(),
+            )?;
+        }
         mark_failed(
-            conn,
+            &transaction,
             submission.id,
             "应用上次在识别过程中退出，已恢复为可重试失败",
         )?;
+        transaction.commit()?;
     }
     Ok(processing.len())
 }
@@ -143,6 +174,7 @@ pub fn void_unconfirmed(conn: &Connection, submission_id: i64) -> CoreResult<boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use suite_core::db::repo::ai_runs::NewAiRun;
     use suite_core::db::repo::submissions::NewSubmission;
     use suite_core::db::repo::tasks::NewTask;
     use suite_core::db::repo::students::{upsert as upsert_student, StudentInput};
@@ -196,12 +228,36 @@ mod tests {
         assert_eq!(first.attempts, 1);
 
         claim(&conn, submission_id).unwrap();
+        let run = ai_runs::create_or_get(
+            &conn,
+            &NewAiRun {
+                idempotency_key: "recognition-recovery-asr",
+                run_type: "asr",
+                source_module: "recitation",
+                business_ref_type: "submission",
+                business_ref_id: &submission_id.to_string(),
+                input_artifact_id: None,
+                provider: "fixture",
+                model_name: "fixture",
+                model_version: "1",
+                config_version: "1",
+                prompt_or_rule_version: "1",
+                input_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                retry_of_ai_run_id: None,
+            },
+        )
+        .unwrap();
+        ai_runs::start(&conn, run.id, "2026-07-17T08:00:00.000Z", None).unwrap();
         assert_eq!(recover_stale_processing(&conn).unwrap(), 1);
         let recovered = submissions::get(&conn, submission_id).unwrap().unwrap();
         let meta = parse_failure_meta(recovered.recognize_meta.as_deref()).unwrap();
         assert_eq!(meta.error_code, "interrupted");
         assert!(meta.retryable);
         assert_eq!(meta.attempts, 2);
+        assert_eq!(
+            ai_runs::get_by_id(&conn, run.id).unwrap().unwrap().status,
+            suite_core::models::AiRunStatus::Failed
+        );
         let count: i64 = conn
             .query_row("SELECT count(*) FROM submissions", [], |row| row.get(0))
             .unwrap();

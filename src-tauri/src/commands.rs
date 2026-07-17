@@ -6,7 +6,9 @@ use tauri::{AppHandle, State};
 
 use module_recitation::config::RecitationConfig;
 use module_recitation::db::contents::{self, ContentInput, RecContent};
-use module_recitation::service::{import, matching, recognition, scoring, tasks as task_svc};
+use module_recitation::service::{
+    ai_pipeline, import, matching, recognition, scoring, structured_scoring, tasks as task_svc,
+};
 use suite_core::db::repo::students::{self, StudentInput};
 use suite_core::db::repo::{classes, file_ledger, submissions, tasks, verdicts};
 use suite_core::models::{Class, ModuleKey, Student, Submission, TaskKind, TaskStatus, Verdict};
@@ -905,6 +907,105 @@ pub struct AutonameDto {
 /// 内容匹配阈值（覆盖率%）：低于此值视为未能识别内容。
 const MATCH_MIN: f64 = 50.0;
 
+async fn run_recitation_asr(
+    state: &State<'_, AppState>,
+    submission_id: i64,
+    audio_path: &str,
+    input_hash: &str,
+    creds: &VolcanoCreds,
+    preclaimed: bool,
+) -> R<crate::asr::AsrOutput> {
+    let descriptor = ai_pipeline::AsrRunDescriptor {
+        provider: "volcano",
+        model_name: "bigmodel-recording-asr",
+        model_version: crate::asr::resource_id(creds),
+        config_version: "punc-itn-utterances-v1",
+        prompt_or_rule_version: "recitation-asr-output-v1",
+    };
+    let begin = {
+        let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+        ai_pipeline::begin_asr_run(&conn, submission_id, input_hash, &descriptor, preclaimed)
+            .map_err(e)?
+    };
+    let (ai_run_id, request_id) = match begin {
+        ai_pipeline::BeginAsrRun::Cached { transcript } => {
+            let words = ai_pipeline::transcript_words(&transcript).map_err(e)?;
+            return Ok(crate::asr::AsrOutput {
+                text: transcript.raw_transcript,
+                words,
+                duration_ms: transcript.duration_ms.max(0) as u64,
+            });
+        }
+        ai_pipeline::BeginAsrRun::Execute {
+            ai_run_id,
+            request_id,
+        } => (ai_run_id, request_id),
+    };
+
+    let tmp = std::env::temp_dir();
+    let transcoded = crate::audio::transcode_to_wav16k(audio_path, &tmp);
+    let asr_path = transcoded
+        .as_ref()
+        .and_then(|path| path.to_str())
+        .unwrap_or(audio_path)
+        .to_string();
+    let recognized = crate::asr::recognize(creds, &asr_path, &request_id).await;
+    if let Some(path) = transcoded.as_ref() {
+        let _ = std::fs::remove_file(path);
+    }
+
+    let mut output = match recognized {
+        Ok(output) => output,
+        Err(error) => {
+            let message = format!("识别失败: {error}");
+            return match state.db.lock() {
+                Ok(conn) => {
+                    match ai_pipeline::finish_asr_failure(&conn, ai_run_id, submission_id, &message)
+                    {
+                        Ok(()) => Err(message),
+                        Err(persist_error) => {
+                            Err(format!("{message}；失败状态写入异常: {persist_error}"))
+                        }
+                    }
+                }
+                Err(_) => Err(format!("{message}；数据库忙，失败状态未能写入")),
+            };
+        }
+    };
+    if output.duration_ms == 0 {
+        if let Some(duration_ms) = crate::audio::ffprobe_duration_ms(audio_path) {
+            output.duration_ms = duration_ms;
+        }
+    }
+    let normalized = suite_core::domain::normalize::normalize(
+        &output.text,
+        &suite_core::domain::normalize::NormalizeCfg::default(),
+    );
+    let finalization = {
+        let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+        ai_pipeline::finish_asr_success(
+            &conn,
+            ai_run_id,
+            &ai_pipeline::FinishAsrSuccessInput {
+                submission_id,
+                raw_transcript: &output.text,
+                normalized_transcript: &normalized,
+                normalization_version: "recitation-normalize-v1",
+                words: &output.words,
+                duration_ms: output.duration_ms as i64,
+            },
+        )
+    };
+    if let Err(error) = finalization {
+        let message = format!("识别结果账本写入失败: {error}");
+        if let Ok(conn) = state.db.lock() {
+            let _ = ai_pipeline::finish_asr_failure(&conn, ai_run_id, submission_id, &message);
+        }
+        return Err(message);
+    }
+    Ok(output)
+}
+
 /// 分析录音 → 识别学生/内容 → 自动重命名为 `日期_学号_姓名_内容编号` → 落库评分。
 /// 录音内容约定为「姓名 + 日期 + 背诵内容」。日期暂用当天（后续可解析口述日期）。
 #[tauri::command]
@@ -1007,25 +1108,12 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
             }
         };
 
-        // 转码 + ASR（异步段，不持锁）
-        let tmp = std::env::temp_dir();
-        let transcoded = crate::audio::transcode_to_wav16k(&archived_path, &tmp);
-        let asr_path = transcoded
-            .as_ref()
-            .and_then(|x| x.to_str())
-            .unwrap_or(&archived_path)
-            .to_string();
-        let asr = crate::asr::recognize(creds, &asr_path, &hash).await;
-        if let Some(t) = transcoded {
-            let _ = std::fs::remove_file(t);
-        }
-        let asr = match asr {
+        // ASR 网络调用在锁外执行；运行账本与 submission 只在前后短事务中写入。
+        let asr = match run_recitation_asr(&state, tracking_id, &archived_path, &hash, creds, true)
+            .await
+        {
             Ok(a) => a,
-            Err(err) => {
-                let message = format!("识别失败: {err}");
-                if let Ok(conn) = state.db.lock() {
-                    let _ = recognition::mark_failed(&conn, tracking_id, &message);
-                }
+            Err(message) => {
                 out.push(fail(message));
                 continue;
             }
@@ -1066,7 +1154,11 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
                         continue;
                     }
                 };
-                let (new_name, detail) = if reused {
+                let structured_warning =
+                    structured_scoring::record_score_if_ready(&conn, tracking_id, &scfg)
+                        .err()
+                        .map(|error| format!("逐点评分待重试：{error}"));
+                let (new_name, mut detail) = if reused {
                     (None, format!("重新分析既有记录 · 匹配度 {score:.0}%"))
                 } else {
                     let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("m4a");
@@ -1094,6 +1186,9 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
                     };
                     (Some(name), detail)
                 };
+                if let Some(warning) = structured_warning {
+                    detail.push_str(&format!("；{warning}"));
+                }
                 out.push(AutonameDto {
                     file: p.clone(),
                     status: if reused { "rescored".into() } else { "scored".into() },
@@ -1279,6 +1374,8 @@ pub struct ScoreOutcomeDto {
     quality: String,
     text: String,
     next: String,
+    structured_score_run_id: Option<i64>,
+    structured_warning: Option<String>,
 }
 
 fn persist_asr_failure(state: &State<'_, AppState>, submission_id: i64, message: &str) -> String {
@@ -1294,39 +1391,25 @@ fn persist_asr_failure(state: &State<'_, AppState>, submission_id: i64, message:
 /// 对一条提交跑火山 ASR 并评分（异步）。识别文本与词级时间戳回写后入评分编排。
 #[tauri::command]
 pub async fn asr_and_score(state: State<'_, AppState>, submission_id: i64) -> R<ScoreOutcomeDto> {
-    // 短事务抢占 processing；不可跨 await 持锁。
-    let (audio_path, req_id) = {
+    let (audio_path, input_hash) = {
         let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
         let sub = submissions::get(&conn, submission_id)
             .map_err(e)?
             .ok_or_else(|| "提交不存在".to_string())?;
-        recognition::claim(&conn, submission_id).map_err(e)?;
         (playback_path(&sub), sub.file_hash.clone())
     };
     let creds = secrets::load(&state.data_dir)
         .map_err(|err| persist_asr_failure(&state, submission_id, &err.to_string()))?;
 
-    // 可选 ffmpeg 转码（提升火山兼容性），失败则用原文件
-    let tmp = std::env::temp_dir();
-    let transcoded = crate::audio::transcode_to_wav16k(&audio_path, &tmp);
-    let asr_path = transcoded
-        .as_ref()
-        .and_then(|p| p.to_str())
-        .unwrap_or(&audio_path)
-        .to_string();
-
-    // 异步段：调用火山
-    let recognized = crate::asr::recognize(&creds, &asr_path, &req_id).await;
-    if let Some(path) = transcoded.as_ref() {
-        let _ = std::fs::remove_file(path);
-    }
-    let mut out = recognized
-        .map_err(|err| persist_asr_failure(&state, submission_id, &err))?;
-    if out.duration_ms == 0 {
-        if let Some(d) = crate::audio::ffprobe_duration_ms(&audio_path) {
-            out.duration_ms = d;
-        }
-    }
+    let out = run_recitation_asr(
+        &state,
+        submission_id,
+        &audio_path,
+        &input_hash,
+        &creds,
+        false,
+    )
+    .await?;
     // 同步段：回写识别 + 评分
     let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     let cfg = RecitationConfig::load(&conn).map_err(e)?.to_score_cfg();
@@ -1345,6 +1428,11 @@ pub async fn asr_and_score(state: State<'_, AppState>, submission_id: i64) -> R<
             return Err(message);
         }
     };
+    let (structured_score_run_id, structured_warning) =
+        match structured_scoring::record_score_if_ready(&conn, submission_id, &cfg) {
+            Ok(score) => (score.map(|value| value.id), None),
+            Err(error) => (None, Some(format!("逐点评分待重试：{error}"))),
+        };
     Ok(ScoreOutcomeDto {
         verdict_id: r.verdict_id,
         accuracy: r.accuracy,
@@ -1353,6 +1441,8 @@ pub async fn asr_and_score(state: State<'_, AppState>, submission_id: i64) -> R<
         quality: r.quality,
         text: out.text,
         next: format!("{:?}", r.next),
+        structured_score_run_id,
+        structured_warning,
     })
 }
 

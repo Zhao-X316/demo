@@ -32,6 +32,14 @@ pub struct AsrOutput {
     pub duration_ms: u64,
 }
 
+pub fn resource_id(creds: &VolcanoCreds) -> &str {
+    if creds.cluster.is_empty() {
+        DEFAULT_RESOURCE
+    } else {
+        creds.cluster.as_str()
+    }
+}
+
 pub async fn recognize(
     creds: &VolcanoCreds,
     audio_path: &str,
@@ -48,7 +56,7 @@ pub async fn recognize(
         .and_then(|e| e.to_str())
         .unwrap_or("wav")
         .to_lowercase();
-    let resource = if creds.cluster.is_empty() { DEFAULT_RESOURCE } else { creds.cluster.as_str() };
+    let resource = resource_id(creds);
 
     if resource == TURBO_RESOURCE {
         recognize_flash(creds, &b64, &format, resource, request_id).await

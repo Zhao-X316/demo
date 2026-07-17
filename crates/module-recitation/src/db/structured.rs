@@ -283,6 +283,27 @@ pub fn get_rubric(
         .optional()?)
 }
 
+pub fn current_confirmed_rubric_for_content(
+    conn: &Connection,
+    content_id: i64,
+) -> CoreResult<Option<RecRubricVersion>> {
+    let rubric_cols = RUBRIC_COLS
+        .split(',')
+        .map(|column| format!("rubric.{column}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT {rubric_cols}
+         FROM rec_rubric_versions rubric
+         JOIN rec_answer_versions answer ON answer.id=rubric.answer_version_id
+         JOIN rec_contents content
+           ON content.id=answer.content_id
+          AND content.answer_version=answer.answer_version
+         WHERE content.id=?1 AND rubric.status='confirmed'"
+    );
+    Ok(conn.query_row(&sql, [content_id], rubric_row).optional()?)
+}
+
 pub fn list_rubric_points(
     conn: &Connection,
     rubric_version_id: i64,
@@ -622,8 +643,20 @@ pub fn get_transcript_by_ai_run(
         .optional()?)
 }
 
-/// 将 succeeded ASR run 物化为不可变 transcript。重复物化同一 run 返回原行。
-pub fn record_transcript_from_ai_run(
+pub fn active_transcript_for_submission(
+    conn: &Connection,
+    submission_id: i64,
+) -> CoreResult<Option<RecTranscript>> {
+    let sql = format!(
+        "SELECT {TRANSCRIPT_COLS} FROM rec_transcripts
+         WHERE submission_id=?1 AND state='active'"
+    );
+    Ok(conn
+        .query_row(&sql, [submission_id], transcript_row)
+        .optional()?)
+}
+
+pub(crate) fn record_transcript_from_ai_run_inner(
     conn: &Connection,
     ai_run_id: i64,
 ) -> CoreResult<RecTranscript> {
@@ -656,19 +689,18 @@ pub fn record_transcript_from_ai_run(
         .clone()
         .unwrap_or_else(time::utc_now_rfc3339);
 
-    let transaction = conn.unchecked_transaction()?;
-    transaction.execute(
+    conn.execute(
         "UPDATE rec_score_runs SET state='superseded'
          WHERE submission_id=?1 AND state='active'",
         [output.submission_id],
     )?;
-    transaction.execute(
+    conn.execute(
         "UPDATE rec_transcripts SET state='superseded'
          WHERE submission_id=?1 AND state='active'",
         [output.submission_id],
     )?;
     let public_id = ids::new_public_id();
-    transaction.execute(
+    conn.execute(
         "INSERT INTO rec_transcripts
           (public_id,submission_id,asr_ai_run_id,raw_transcript,normalized_transcript,
            normalization_version,word_segments_json,duration_ms,output_hash,state,created_at)
@@ -686,11 +718,21 @@ pub fn record_transcript_from_ai_run(
             created_at,
         ],
     )?;
-    let transcript_id = transaction.last_insert_rowid();
-    transaction.commit()?;
+    let transcript_id = conn.last_insert_rowid();
     let sql = format!("SELECT {TRANSCRIPT_COLS} FROM rec_transcripts WHERE id=?1");
     conn.query_row(&sql, [transcript_id], transcript_row)
         .map_err(Into::into)
+}
+
+/// 将 succeeded ASR run 物化为不可变 transcript。重复物化同一 run 返回原行。
+pub fn record_transcript_from_ai_run(
+    conn: &Connection,
+    ai_run_id: i64,
+) -> CoreResult<RecTranscript> {
+    let transaction = conn.unchecked_transaction()?;
+    let transcript = record_transcript_from_ai_run_inner(&transaction, ai_run_id)?;
+    transaction.commit()?;
+    Ok(transcript)
 }
 
 #[derive(Debug, Deserialize)]
@@ -720,9 +762,10 @@ pub fn get_score_by_ai_run(conn: &Connection, ai_run_id: i64) -> CoreResult<Opti
     Ok(conn.query_row(&sql, [ai_run_id], score_row).optional()?)
 }
 
-/// 将 succeeded recitation_score run 物化为机器建议与逐点结果。
-/// 不写 verdict，不触发老师终审，也不生成学习证据。
-pub fn record_score_from_ai_run(conn: &Connection, ai_run_id: i64) -> CoreResult<RecScoreRun> {
+pub(crate) fn record_score_from_ai_run_inner(
+    conn: &Connection,
+    ai_run_id: i64,
+) -> CoreResult<RecScoreRun> {
     if let Some(existing) = get_score_by_ai_run(conn, ai_run_id)? {
         return Ok(existing);
     }
@@ -790,14 +833,13 @@ pub fn record_score_from_ai_run(conn: &Connection, ai_run_id: i64) -> CoreResult
         .clone()
         .unwrap_or_else(time::utc_now_rfc3339);
 
-    let transaction = conn.unchecked_transaction()?;
-    transaction.execute(
+    conn.execute(
         "UPDATE rec_score_runs SET state='superseded'
          WHERE submission_id=?1 AND state='active'",
         [output.submission_id],
     )?;
     let public_id = ids::new_public_id();
-    transaction.execute(
+    conn.execute(
         "INSERT INTO rec_score_runs
           (public_id,submission_id,transcript_id,rubric_version_id,score_ai_run_id,
            overall_suggestion,accuracy_json,fluency_json,confidence,output_hash,state,created_at)
@@ -816,11 +858,11 @@ pub fn record_score_from_ai_run(conn: &Connection, ai_run_id: i64) -> CoreResult
             created_at,
         ],
     )?;
-    let score_id = transaction.last_insert_rowid();
+    let score_id = conn.last_insert_rowid();
     for point in output.point_results {
         let evidence_json = serde_json::to_string(&point.evidence_spans)
             .map_err(|error| CoreError::Invalid(format!("证据时间段序列化失败: {error}")))?;
-        transaction.execute(
+        conn.execute(
             "INSERT INTO rec_point_results
               (public_id,score_run_id,rubric_point_id,machine_state,confidence,
                evidence_spans_json,reason,created_at)
@@ -837,10 +879,18 @@ pub fn record_score_from_ai_run(conn: &Connection, ai_run_id: i64) -> CoreResult
             ],
         )?;
     }
-    transaction.commit()?;
     let sql = format!("SELECT {SCORE_COLS} FROM rec_score_runs WHERE id=?1");
     conn.query_row(&sql, [score_id], score_row)
         .map_err(Into::into)
+}
+
+/// 将 succeeded recitation_score run 物化为机器建议与逐点结果。
+/// 不写 verdict，不触发老师终审，也不生成学习证据。
+pub fn record_score_from_ai_run(conn: &Connection, ai_run_id: i64) -> CoreResult<RecScoreRun> {
+    let transaction = conn.unchecked_transaction()?;
+    let score = record_score_from_ai_run_inner(&transaction, ai_run_id)?;
+    transaction.commit()?;
+    Ok(score)
 }
 
 #[cfg(test)]

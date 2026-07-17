@@ -8,6 +8,8 @@ export interface ScoreOutcome {
   quality: string;
   text: string;
   next: string;
+  structured_score_run_id?: number | null;
+  structured_warning?: string | null;
 }
 
 export const asrAndScore = (submission_id: number) =>
