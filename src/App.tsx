@@ -8,6 +8,7 @@ import Settings from "./pages/Settings";
 import Exam from "./pages/Exam";
 import ClassDashboard from "./pages/ClassDashboard";
 import LearningInsights from "./pages/LearningInsights";
+import QuestionBank from "./pages/QuestionBank";
 import { AppModule, DashboardTargetView } from "./api/classDashboard";
 
 type Module = AppModule;
@@ -20,6 +21,7 @@ type View =
   | "records"
   | "settings"
   | "exam"
+  | "questionBank"
   | "learning";
 
 const NAV: { key: View; icon: string; label: string }[] = [
@@ -35,6 +37,7 @@ const NAV: { key: View; icon: string; label: string }[] = [
 const EXAM_NAV: { key: View; icon: string; label: string }[] = [
   { key: "dashboard", icon: "▦", label: "班级概览" },
   { key: "exam", icon: "✎", label: "题目批改" },
+  { key: "questionBank", icon: "▤", label: "题库组卷" },
   { key: "students", icon: "◍", label: "学生" },
   { key: "settings", icon: "⚙", label: "设置" },
 ];
@@ -103,6 +106,7 @@ export default function App() {
         {view === "records" && <Records />}
         {view === "settings" && <Settings />}
         {view === "exam" && <Exam />}
+        {view === "questionBank" && <QuestionBank onOpenExam={() => setView("exam")} />}
         {view === "learning" && (
           <LearningInsights
             onOpenExam={() => {

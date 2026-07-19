@@ -18,6 +18,7 @@ mod dictation_run;
 mod exam_commands;
 mod exam_intake;
 mod learning_commands;
+mod knowledge_commands;
 mod objective_provider;
 mod objective_run;
 mod office_answers;
@@ -132,6 +133,10 @@ fn main() {
             learning_commands::confirm_class_action,
             learning_commands::list_class_action_drafts,
             learning_commands::materialize_class_action,
+            knowledge_commands::k1_blueprint_options,
+            knowledge_commands::k1_blueprint_preview,
+            knowledge_commands::k1_blueprint_confirm,
+            knowledge_commands::k1_blueprint_list,
             exam_commands::kp_list,
             exam_commands::kp_create,
             exam_commands::kp_rename,

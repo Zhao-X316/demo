@@ -111,6 +111,16 @@ pub struct NewMultiItemTargetedAssessment<'a> {
     pub items: &'a [NewTargetedAssessmentItem<'a>],
 }
 
+pub struct NewClassAssessment<'a> {
+    pub title: &'a str,
+    pub class_id: i64,
+    pub assessment_context: &'a str,
+    pub evidence_policy: &'a str,
+    pub template_version: &'a str,
+    pub created_by: &'a str,
+    pub items: &'a [NewTargetedAssessmentItem<'a>],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attempt {
     pub id: i64,
@@ -840,6 +850,148 @@ pub fn create_confirmed_multi_item_targeted_in_transaction(
             ),
         )?;
     }
+    let mut hash_items = Vec::with_capacity(input.items.len());
+    for (order_index, item) in input.items.iter().enumerate() {
+        let created = add_assessment_item(
+            conn,
+            assessment_version_id,
+            &NewAssessmentItem {
+                question_version_id: item.question_version_id,
+                answer_key_version_id: item.answer_key_version_id,
+                rubric_version_id: item.rubric_version_id,
+                link_set_id: item.link_set_id,
+                order_index: order_index as i64,
+                score: item.score,
+                option_order_json: item.option_order_json,
+                presentation_snapshot_json: item.presentation_snapshot_json,
+            },
+        )?;
+        hash_items.push(ItemHashInput {
+            item_id: created.id,
+            question_version_id: created.question_version_id,
+            answer_key_version_id: created.answer_key_version_id,
+            rubric_version_id: created.rubric_version_id,
+            link_set_id: created.link_set_id,
+            order_index: created.order_index,
+            score_millis: (created.score * 1000.0).round() as i64,
+        });
+    }
+    let bytes = serde_json::to_vec(&hash_items)
+        .map_err(|error| CoreError::Parse(format!("item set hash 序列化失败：{error}")))?;
+    let item_set_hash = hashing::sha256_hex(&bytes);
+    conn.execute(
+        "UPDATE exam_assessment_versions_v2
+         SET item_set_hash=?1,state='confirmed',confirmed_by=?2,confirmed_at=?3
+         WHERE id=?4 AND state='draft'",
+        (
+            &item_set_hash,
+            input.created_by.trim(),
+            &now,
+            assessment_version_id,
+        ),
+    )?;
+    conn.execute(
+        "UPDATE exam_assessments_v2 SET state='active',updated_at=?1
+         WHERE id=?2 AND state='draft'",
+        (&now, assessment_id),
+    )?;
+    Ok(AssessmentDraft {
+        assessment_id,
+        assessment_public_id,
+        assessment_version_id,
+        assessment_version_public_id,
+    })
+}
+
+/// 在调用方事务中创建面向全班、多题的已确认作业。
+///
+/// K1-4 组卷蓝图使用此入口冻结题目、答案、rubric 和知识链接版本。
+/// 本函数不创建 attempt、不发布成绩，也不自行提交事务。
+pub fn create_confirmed_class_assessment_in_transaction(
+    conn: &Connection,
+    input: &NewClassAssessment<'_>,
+) -> CoreResult<AssessmentDraft> {
+    required(input.title, "作业名称")?;
+    required(input.created_by, "创建人")?;
+    required(input.template_version, "作业模板版本")?;
+    if !matches!(
+        input.assessment_context,
+        "classwork" | "homework" | "quiz" | "exam" | "open_book" | "correction" | "demo"
+    ) {
+        return Err(CoreError::Invalid("作业场景非法".into()));
+    }
+    if !matches!(
+        input.evidence_policy,
+        "include" | "exclude" | "include_low_weight" | "progress_only"
+    ) {
+        return Err(CoreError::Invalid("证据策略非法".into()));
+    }
+    if input.items.is_empty() || input.items.len() > 50 {
+        return Err(CoreError::Invalid("题目数量必须在 1 至 50 道之间".into()));
+    }
+    let class_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM classes WHERE id=?1)",
+        [input.class_id],
+        |row| row.get(0),
+    )?;
+    if !class_exists {
+        return Err(CoreError::NotFound(format!("class#{}", input.class_id)));
+    }
+    let mut question_ids = std::collections::BTreeSet::new();
+    for item in input.items {
+        if !question_ids.insert(item.question_version_id) {
+            return Err(CoreError::Invalid(
+                "同一作业不能重复加入同一题目版本".into(),
+            ));
+        }
+        validate_schema_object(item.presentation_snapshot_json, "题目呈现快照")?;
+        if let Some(json) = item.option_order_json {
+            validate_schema_object(json, "选项顺序")?;
+        }
+        if !item.score.is_finite() || item.score <= 0.0 {
+            return Err(CoreError::Invalid("作业题目分值非法".into()));
+        }
+        validate_assessment_item_refs(
+            conn,
+            item.question_version_id,
+            item.answer_key_version_id,
+            item.rubric_version_id,
+            item.link_set_id,
+            item.score,
+        )?;
+    }
+
+    let assessment_public_id = ids::new_public_id();
+    let assessment_version_public_id = ids::new_public_id();
+    let now = time::utc_now_rfc3339();
+    conn.execute(
+        "INSERT INTO exam_assessments_v2
+          (public_id,title,class_id,assessment_context,evidence_policy,state,
+           audience_kind,created_by,created_at,updated_at)
+         VALUES (?1,?2,?3,?4,?5,'draft','class',?6,?7,?7)",
+        (
+            &assessment_public_id,
+            input.title.trim(),
+            input.class_id,
+            input.assessment_context,
+            input.evidence_policy,
+            input.created_by.trim(),
+            &now,
+        ),
+    )?;
+    let assessment_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO exam_assessment_versions_v2
+          (public_id,assessment_id,revision,template_version,state,created_at)
+         VALUES (?1,?2,1,?3,'draft',?4)",
+        (
+            &assessment_version_public_id,
+            assessment_id,
+            input.template_version,
+            &now,
+        ),
+    )?;
+    let assessment_version_id = conn.last_insert_rowid();
     let mut hash_items = Vec::with_capacity(input.items.len());
     for (order_index, item) in input.items.iter().enumerate() {
         let created = add_assessment_item(
