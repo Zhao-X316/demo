@@ -37,7 +37,7 @@ const NAV: { key: View; icon: string; label: string }[] = [
 const EXAM_NAV: { key: View; icon: string; label: string }[] = [
   { key: "dashboard", icon: "▦", label: "班级概览" },
   { key: "exam", icon: "✎", label: "题目批改" },
-  { key: "questionBank", icon: "▤", label: "题库组卷" },
+  { key: "questionBank", icon: "▤", label: "题目与题库" },
   { key: "students", icon: "◍", label: "学生" },
   { key: "settings", icon: "⚙", label: "设置" },
 ];

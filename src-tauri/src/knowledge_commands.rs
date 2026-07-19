@@ -4,6 +4,10 @@ use module_exam::service::blueprint_assembly::{
     self, BlueprintAssembly, BlueprintOptions, BlueprintPreview, BlueprintPreviewRequest,
     BlueprintQuestionTypeTarget, ConfirmBlueprintRequest,
 };
+use module_knowledge::db::search::{
+    self, DuplicateReviewDecision, QuestionSearchRequest, QuestionSearchResponse,
+    ReviewDuplicateRequest,
+};
 use serde::Deserialize;
 use tauri::State;
 
@@ -37,6 +41,16 @@ pub struct ConfirmBlueprintInput {
     preview: BlueprintPreviewInput,
     expected_preview_hash: String,
     selected_question_version_public_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewDuplicateInput {
+    request_key: String,
+    left_question_version_public_id: String,
+    right_question_version_public_id: String,
+    decision: String,
+    note: Option<String>,
 }
 
 impl From<BlueprintPreviewInput> for BlueprintPreviewRequest {
@@ -104,4 +118,35 @@ pub fn k1_blueprint_list(
     let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     blueprint_assembly::list_blueprint_assemblies(&connection, class_id, limit.unwrap_or(20))
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn k1_question_search(
+    state: State<'_, AppState>,
+    input: QuestionSearchRequest,
+) -> Result<QuestionSearchResponse, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    search::search_questions(&connection, LOCAL_TEACHER_ACTOR_ID, &input)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn k1_duplicate_review(
+    state: State<'_, AppState>,
+    input: ReviewDuplicateInput,
+) -> Result<DuplicateReviewDecision, String> {
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    search::review_duplicate(
+        &mut connection,
+        LOCAL_TEACHER_ACTOR_ID,
+        &ReviewDuplicateRequest {
+            request_key: input.request_key,
+            left_question_version_public_id: input.left_question_version_public_id,
+            right_question_version_public_id: input.right_question_version_public_id,
+            decision: input.decision,
+            note: input.note,
+            decided_by: LOCAL_TEACHER_ACTOR_ID.into(),
+        },
+    )
+    .map_err(|error| error.to_string())
 }

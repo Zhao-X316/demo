@@ -713,10 +713,45 @@ code { background: #EEF0F3; padding: 1px 5px; border-radius: 4px; font-size: 12p
 .blueprint-history-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 18px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); font-size: 12px; }
 .blueprint-history-row > div { display: flex; flex-direction: column; gap: 3px; }
 .blueprint-history-row > div span, .blueprint-history-row time { color: var(--muted); font-size: 11px; }
+.question-bank-tabs { margin-top: 14px; }
+.question-search-panel { margin-top: 14px; }
+.question-search-main { display: grid; grid-template-columns: minmax(260px, 1.8fr) repeat(3, minmax(120px, .75fr)) auto; gap: 10px; align-items: end; }
+.question-search-main .field { margin: 0; }
+.question-search-main input, .question-search-main select,
+.question-search-advanced select { width: 100%; padding: 8px 9px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--panel); }
+.question-search-main > button { min-height: 36px; }
+.question-search-advanced { margin-top: 13px; padding-top: 11px; border-top: 1px solid var(--line); }
+.question-search-advanced summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.question-search-advanced > div { display: grid; grid-template-columns: repeat(3, minmax(150px, 1fr)) auto; gap: 10px; align-items: end; margin-top: 11px; }
+.question-search-advanced .field { margin: 0; }
+.question-search-check { display: flex; align-items: center; gap: 7px; min-height: 36px; color: var(--text-2); font-size: 12px; }
+.question-search-summary { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 13px; padding: 9px 11px; border-radius: 7px; background: var(--bg-sub); }
+.question-search-summary b { font-size: 12.5px; }
+.question-search-summary span { color: var(--muted); font-size: 11px; text-align: right; }
+.question-search-results { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.question-search-card { padding: 14px 15px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); }
+.question-search-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.question-search-card-head > div { display: flex; flex-wrap: wrap; gap: 5px; }
+.question-search-card-head strong { color: var(--brand); font-size: 12px; }
+.question-search-card h3 { margin: 10px 0 6px; font-size: 14px; line-height: 1.55; }
+.question-search-card > p { margin: 0 0 8px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.question-search-options { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 9px; }
+.question-search-options span { padding: 4px 7px; border-radius: 5px; background: var(--bg-sub); color: var(--text-2); font-size: 11.5px; }
+.duplicate-candidates { margin-top: 11px; padding-top: 10px; border-top: 1px dashed var(--line-strong); }
+.duplicate-candidates > b { font-size: 12px; }
+.duplicate-candidate-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center; margin-top: 8px; padding: 9px 10px; border-radius: 7px; background: var(--warn-bg); }
+.duplicate-candidate-row p { margin: 5px 0 0; color: var(--text-2); font-size: 12px; line-height: 1.5; }
+.duplicate-candidate-row > div:last-child { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.duplicate-candidate-row button { font-size: 11.5px; }
 @media (max-width: 900px) {
   .blueprint-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .blueprint-type-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .blueprint-live { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .question-search-main { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .question-search-keyword { grid-column: 1 / -1; }
+  .question-search-advanced > div { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .duplicate-candidate-row { grid-template-columns: 1fr; }
+  .duplicate-candidate-row > div:last-child { justify-content: flex-start; }
 }
 
 /* ───── M2 题目批改 ───── */

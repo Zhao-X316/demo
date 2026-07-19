@@ -137,6 +137,8 @@ fn main() {
             knowledge_commands::k1_blueprint_preview,
             knowledge_commands::k1_blueprint_confirm,
             knowledge_commands::k1_blueprint_list,
+            knowledge_commands::k1_question_search,
+            knowledge_commands::k1_duplicate_review,
             exam_commands::kp_list,
             exam_commands::kp_create,
             exam_commands::kp_rename,

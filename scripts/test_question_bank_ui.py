@@ -11,6 +11,7 @@ from playwright.sync_api import expect, sync_playwright
 MOCK_SCRIPT = r"""
 window.__blueprintCalls = [];
 window.__assemblies = [];
+window.__duplicateDecision = null;
 window.__TAURI_INTERNALS__ = {
   transformCallback: () => 1,
   unregisterCallback: () => undefined,
@@ -53,6 +54,81 @@ window.__TAURI_INTERNALS__ = {
     if (cmd === "list_class_teaching_events"
         || cmd === "list_class_teaching_inputs"
         || cmd === "list_class_action_drafts") return [];
+    if (cmd === "k1_question_search") {
+      const candidate = {
+        question_version_public_id: "question-2",
+        stem: "鸦片战争开始的时间是？",
+        match_kind: "similar",
+        similarity: 0.91,
+        decision: window.__duplicateDecision,
+        decision_note: null,
+        decision_revision: window.__duplicateDecision ? 1 : null
+      };
+      return {
+        schema_version: 1,
+        rule_version: "k1-structured-search-v1",
+        calculated_at: "2026-07-19T12:00:00Z",
+        total: 2,
+        limit: 50,
+        offset: 0,
+        boundary_note: "只显示我的当前题目和已发布官方题；相似结果只供老师归类，不会自动合并或改写历史作业。",
+        items: [
+          {
+            question_public_id: "identity-1",
+            question_version_public_id: "question-1",
+            revision: 1,
+            owner_scope: "personal",
+            owner_label: "我的题库",
+            question_type: "single",
+            stem: "鸦片战争爆发于哪一年？",
+            material_text: null,
+            max_score: 1,
+            quality_level: "L3",
+            state: "published",
+            options: [{ label: "A", content: "1840年" }, { label: "B", content: "1842年" }],
+            knowledge_nodes: [{ public_id: "knowledge-1", title: "鸦片战争爆发时间", relation_type: "direct_assessment" }],
+            ability_dimensions: [{ public_id: "ability-1", title: "事实识记与提取", evidence_strength: 0.5, response_mode: "recognition" }],
+            assessment_usage_count: 2,
+            duplicate_candidates: [candidate]
+          },
+          {
+            question_public_id: "identity-2",
+            question_version_public_id: "question-2",
+            revision: 1,
+            owner_scope: "official",
+            owner_label: "官方精选",
+            question_type: "single",
+            stem: "鸦片战争开始的时间是？",
+            material_text: null,
+            max_score: 1,
+            quality_level: "L3",
+            state: "published",
+            options: [{ label: "A", content: "1840年" }, { label: "B", content: "1842年" }],
+            knowledge_nodes: [{ public_id: "knowledge-1", title: "鸦片战争爆发时间", relation_type: "direct_assessment" }],
+            ability_dimensions: [],
+            assessment_usage_count: 1,
+            duplicate_candidates: []
+          }
+        ]
+      };
+    }
+    if (cmd === "k1_duplicate_review") {
+      window.__duplicateDecision = args.input.decision;
+      return {
+        public_id: "decision-1",
+        left_question_version_public_id: "question-1",
+        right_question_version_public_id: "question-2",
+        revision: 1,
+        match_kind: "similar",
+        similarity: 0.91,
+        decision: args.input.decision,
+        note: null,
+        decided_by: "local_teacher",
+        decided_at: "2026-07-19T12:01:00Z",
+        state: "active",
+        identity_changed: false
+      };
+    }
     if (cmd === "k1_blueprint_options") {
       return {
         classes: [{ id: 1, name: "八年级一班", term: "2026秋" }],
@@ -196,9 +272,25 @@ def test_question_bank(base_url: str) -> None:
         page.wait_for_load_state("networkidle")
 
         page.locator(".mod-row").filter(has_text="改作业").click()
-        page.get_by_role("button", name="题库组卷").click()
-        expect(page.get_by_role("heading", name="题库组卷")).to_be_visible()
-        expect(page.get_by_text("选范围和题型", exact=False)).to_be_visible()
+        page.get_by_role("button", name="题目与题库").click()
+        expect(page.get_by_role("heading", name="题目与知识库")).to_be_visible()
+        expect(page.get_by_role("button", name="找题与查重")).to_have_class("tab active")
+        expect(page.get_by_text("找到 2 道题", exact=True)).to_be_visible()
+        expect(page.locator(".question-search-card")).to_have_count(2)
+        expect(page.get_by_text("疑似同题变式 · 91%", exact=True)).to_be_visible()
+        page.get_by_role("button", name="标记为同题变式（仅归类，不合并）").click()
+        expect(page.get_by_text("已标记为同题变式；两道题仍保持独立", exact=False)).to_be_visible()
+        expect(page.get_by_text("老师已归为同题变式 · 91%", exact=True)).to_be_visible()
+        duplicate_calls = page.evaluate(
+            """window.__blueprintCalls.filter((item) => item.cmd === "k1_duplicate_review")"""
+        )
+        assert duplicate_calls[0]["args"]["input"]["decision"] == "same_family"
+        assert duplicate_calls[0]["args"]["input"]["leftQuestionVersionPublicId"] == "question-1"
+        assert duplicate_calls[0]["args"]["input"]["rightQuestionVersionPublicId"] == "question-2"
+        page.screenshot(path="/tmp/jiaofu-question-search.png", full_page=True)
+
+        page.get_by_role("button", name="按蓝图组卷").click()
+        expect(page.get_by_text("1. 这次要练什么", exact=True)).to_be_visible()
 
         page.locator(".blueprint-fields select").nth(2).select_option("lesson-1")
         page.locator(".blueprint-type-row input").nth(0).fill("2")
