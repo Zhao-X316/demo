@@ -176,6 +176,10 @@ static MIGRATIONS: &[Migration] = &[
         id: "exam_0037",
         sql: include_str!("../migrations/0037_question_impact_grade_resolutions.sql"),
     },
+    Migration {
+        id: "exam_0038",
+        sql: include_str!("../migrations/0038_assessment_default_versions.sql"),
+    },
 ];
 
 /// 模块迁移（供外壳/测试在 core 迁移之后运行）。

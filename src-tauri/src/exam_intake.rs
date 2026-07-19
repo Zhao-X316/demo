@@ -46,6 +46,8 @@ pub struct FixedIntakeOption {
     pub revision: i64,
     pub template_version: Option<String>,
     pub item_count: i64,
+    pub is_default: bool,
+    pub default_selection_public_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -678,12 +680,33 @@ pub(crate) fn register_artifact(
 
 pub fn list_options(conn: &Connection) -> CoreResult<Vec<FixedIntakeOption>> {
     let mut stmt = conn.prepare(
-        "SELECT c.id,c.name,a.id,v.id,a.title,v.revision,v.template_version,COUNT(i.id)
+        "WITH selected_defaults AS (
+           SELECT selection.assessment_id,selection.selected_assessment_version_id,
+                  selection.public_id
+           FROM exam_assessment_default_version_selections_v2 selection
+           WHERE selection.revision=(
+             SELECT MAX(latest.revision)
+             FROM exam_assessment_default_version_selections_v2 latest
+             WHERE latest.assessment_id=selection.assessment_id
+           )
+         )
+         SELECT c.id,c.name,a.id,v.id,a.title,v.revision,v.template_version,COUNT(i.id),
+                v.id=COALESCE(
+                  selected_defaults.selected_assessment_version_id,
+                  (SELECT latest_version.id
+                   FROM exam_assessment_versions_v2 latest_version
+                   WHERE latest_version.assessment_id=a.id
+                     AND latest_version.state='confirmed'
+                   ORDER BY latest_version.revision DESC,latest_version.id DESC
+                   LIMIT 1)
+                ),
+                selected_defaults.public_id
          FROM exam_assessment_versions_v2 v
          JOIN exam_assessments_v2 a ON a.id=v.assessment_id AND a.state='active'
          JOIN classes c ON c.id=a.class_id
          JOIN exam_assessment_items_v2 i ON i.assessment_version_id=v.id AND i.state='active'
          JOIN k1_question_versions q ON q.id=i.question_version_id
+         LEFT JOIN selected_defaults ON selected_defaults.assessment_id=a.id
          WHERE v.state='confirmed'
            AND q.question_type IN ('single','multiple','true_false','fill_blank','short_answer')
            AND NOT EXISTS (
@@ -694,9 +717,11 @@ pub fn list_options(conn: &Connection) -> CoreResult<Vec<FixedIntakeOption>> {
                  'single','multiple','true_false','fill_blank','short_answer'
                )
            )
-         GROUP BY c.id,c.name,a.id,v.id,a.title,v.revision,v.template_version
+         GROUP BY c.id,c.name,a.id,v.id,a.title,v.revision,v.template_version,
+                  selected_defaults.selected_assessment_version_id,
+                  selected_defaults.public_id
          HAVING COUNT(i.id)>0
-         ORDER BY c.id,a.id,v.revision DESC",
+         ORDER BY c.id,a.id,9 DESC,v.revision DESC",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(FixedIntakeOption {
@@ -708,6 +733,8 @@ pub fn list_options(conn: &Connection) -> CoreResult<Vec<FixedIntakeOption>> {
             revision: row.get(5)?,
             template_version: row.get(6)?,
             item_count: row.get(7)?,
+            is_default: row.get(8)?,
+            default_selection_public_id: row.get(9)?,
         })
     })?;
     let mut result = Vec::new();
@@ -1598,6 +1625,73 @@ mod tests {
         assert_eq!(options.len(), 1);
         assert_eq!(options[0].class_name, "八年级一班");
         assert_eq!(options[0].item_count, 1);
+        assert!(options[0].is_default);
+        assert_eq!(options[0].default_selection_public_id, None);
+    }
+
+    #[test]
+    fn explicit_future_default_is_listed_before_later_non_default_branch() {
+        let conn = seed();
+        let hash = "b".repeat(64);
+        conn.execute_batch(&format!(
+            r#"INSERT INTO k1_answer_key_versions
+                 (public_id,question_version_id,revision,answer_json,state,created_at,confirmed_by,confirmed_at)
+               VALUES ('answer-v2',1,2,'{{"schema_version":1,"correct":false}}','confirmed',
+                       '2026-07-19T08:00:00.000Z','teacher','2026-07-19T08:00:00.000Z');
+               INSERT INTO k1_rubric_versions
+                 (public_id,question_version_id,revision,max_score,state,created_at,confirmed_by,confirmed_at)
+               VALUES ('rubric-v2',1,2,1,'confirmed','2026-07-19T08:00:00.000Z',
+                       'teacher','2026-07-19T08:00:00.000Z');
+               INSERT INTO k1_link_sets
+                 (public_id,question_version_id,knowledge_map_id,revision,state,created_at,confirmed_by,confirmed_at)
+               VALUES ('link-v2',1,1,2,'confirmed','2026-07-19T08:00:00.000Z',
+                       'teacher','2026-07-19T08:00:00.000Z');
+               INSERT INTO exam_question_version_impact_plans_v2
+                 (public_id,request_key,request_hash,question_version_id,
+                  target_answer_key_version_id,target_rubric_version_id,target_link_set_id,
+                  expected_preview_hash,action,impact_json,planned_by,planned_at)
+               VALUES ('plan','plan-key','{hash}',1,2,2,2,'{hash}','future_only',
+                       '{{"schemaVersion":1}}','teacher','2026-07-19T08:00:00.000Z');
+               INSERT INTO exam_assessment_versions_v2
+                 (public_id,assessment_id,revision,item_set_hash,template_version,state,
+                  supersedes_version_id,created_at,confirmed_by,confirmed_at)
+               VALUES ('assessment-v2',1,2,'{hash}','fixed-template-v1','confirmed',1,
+                       '2026-07-19T08:00:00.000Z','teacher','2026-07-19T08:00:00.000Z');
+               INSERT INTO exam_assessment_items_v2
+                 (public_id,assessment_version_id,question_version_id,answer_key_version_id,
+                  rubric_version_id,link_set_id,order_index,score,presentation_snapshot_json,
+                  state,created_at)
+               VALUES ('item-v2',2,1,2,2,2,0,1,'{{"schema_version":1}}','active',
+                       '2026-07-19T08:00:00.000Z');
+               INSERT INTO exam_assessment_default_version_selections_v2
+                 (public_id,request_key,request_hash,assessment_id,revision,
+                  previous_assessment_version_id,selected_assessment_version_id,
+                  source_impact_plan_id,selected_by,selected_at)
+               VALUES ('selection-v1','selection-key','{hash}',1,1,1,2,1,'teacher',
+                       '2026-07-19T08:00:00.000Z');
+               INSERT INTO exam_assessment_versions_v2
+                 (public_id,assessment_id,revision,item_set_hash,template_version,state,
+                  supersedes_version_id,created_at,confirmed_by,confirmed_at)
+               VALUES ('assessment-v3',1,3,'{hash}','fixed-template-v1','confirmed',2,
+                       '2026-07-19T09:00:00.000Z','teacher','2026-07-19T09:00:00.000Z');
+               INSERT INTO exam_assessment_items_v2
+                 (public_id,assessment_version_id,question_version_id,answer_key_version_id,
+                  rubric_version_id,link_set_id,order_index,score,presentation_snapshot_json,
+                  state,created_at)
+               VALUES ('item-v3',3,1,2,2,2,0,1,'{{"schema_version":1}}','active',
+                       '2026-07-19T09:00:00.000Z');"#
+        ))
+        .unwrap();
+        let options = list_options(&conn).unwrap();
+        assert_eq!(options.len(), 3);
+        assert_eq!(options[0].assessment_version_id, 2);
+        assert!(options[0].is_default);
+        assert_eq!(
+            options[0].default_selection_public_id.as_deref(),
+            Some("selection-v1")
+        );
+        assert!(!options[1].is_default);
+        assert_eq!(options[1].assessment_version_id, 3);
     }
 
     #[cfg(target_os = "macos")]

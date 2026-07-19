@@ -12,11 +12,12 @@ use module_exam::service::question_candidate_review::{
     PromoteCandidateRequest,
 };
 use module_exam::service::question_performance::{
-    self, ConfirmQuestionImpactPlanRequest, PrepareQuestionImpactReviewCasesRequest,
-    PrepareQuestionImpactReviewCasesResult, PublishQuestionImpactReviewCaseRequest,
-    PublishQuestionImpactReviewCaseResult, QuestionImpactPlan, QuestionImpactReviewCaseCatalog,
-    QuestionPerformanceCatalog, QuestionVersionImpactPreview,
-    ResolveQuestionImpactReviewCaseRequest, ResolveQuestionImpactReviewCaseResult,
+    self, AssessmentDefaultUpgrade, ConfirmQuestionImpactPlanRequest,
+    PrepareQuestionImpactReviewCasesRequest, PrepareQuestionImpactReviewCasesResult,
+    PublishQuestionImpactReviewCaseRequest, PublishQuestionImpactReviewCaseResult,
+    QuestionImpactPlan, QuestionImpactReviewCaseCatalog, QuestionPerformanceCatalog,
+    QuestionVersionImpactPreview, ResolveQuestionImpactReviewCaseRequest,
+    ResolveQuestionImpactReviewCaseResult, UpgradeAssessmentDefaultRequest,
 };
 use module_knowledge::db::answer_sources::{
     self, AnswerMatchReview, AnswerSourceInboxItem, AnswerTargetSet, ConfirmAnswerMatchRequest,
@@ -336,6 +337,20 @@ pub fn k1_question_impact_publish(
     let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     question_performance::publish_question_impact_review_case(
         &connection,
+        LOCAL_TEACHER_ACTOR_ID,
+        &input,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn k1_question_impact_upgrade_assessment(
+    state: State<'_, AppState>,
+    input: UpgradeAssessmentDefaultRequest,
+) -> Result<AssessmentDefaultUpgrade, String> {
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    question_performance::upgrade_assessment_default_from_impact(
+        &mut connection,
         LOCAL_TEACHER_ACTOR_ID,
         &input,
     )

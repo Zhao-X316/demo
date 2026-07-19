@@ -20,8 +20,8 @@ pub const QUESTION_PERFORMANCE_SCHEMA_VERSION: i64 = 1;
 pub const QUESTION_PERFORMANCE_RULE_VERSION: &str = "k1-current-publication-performance-v1";
 pub const QUESTION_IMPACT_RULE_VERSION: &str = "k1-version-impact-plan-v1";
 pub const QUESTION_IMPACT_REVIEW_RULE_VERSION: &str = "k1-version-impact-review-case-v1";
-pub const QUESTION_IMPACT_RESOLUTION_RULE_VERSION: &str =
-    "k1-version-impact-teacher-resolution-v1";
+pub const QUESTION_IMPACT_RESOLUTION_RULE_VERSION: &str = "k1-version-impact-teacher-resolution-v1";
+pub const ASSESSMENT_DEFAULT_UPGRADE_RULE_VERSION: &str = "m2-assessment-future-default-upgrade-v1";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,6 +85,7 @@ pub struct QuestionImpactRow {
     pub assessment_title: String,
     pub class_name: String,
     pub assessment_version_public_id: String,
+    pub assessment_version_revision: i64,
     pub assessment_item_public_id: String,
     pub source_answer_key_version_public_id: String,
     pub source_rubric_version_public_id: String,
@@ -96,6 +97,7 @@ pub struct QuestionImpactRow {
     pub published_attempt_count: i64,
     pub active_learning_evidence_count: i64,
     pub profile_snapshot_count: i64,
+    pub is_current_default: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +143,37 @@ pub struct QuestionImpactPlan {
     pub planned_by: String,
     pub planned_at: String,
     pub changes_assessment_binding: bool,
+    pub changes_grade: bool,
+    pub changes_publication: bool,
+    pub changes_learning_evidence: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpgradeAssessmentDefaultRequest {
+    pub request_key: String,
+    pub plan_public_id: String,
+    pub source_assessment_version_public_id: String,
+    pub expected_current_default_version_public_id: String,
+    pub upgraded_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssessmentDefaultUpgrade {
+    pub selection_public_id: String,
+    pub plan_public_id: String,
+    pub assessment_public_id: String,
+    pub assessment_title: String,
+    pub source_assessment_version_public_id: String,
+    pub source_revision: i64,
+    pub default_assessment_version_public_id: String,
+    pub default_revision: i64,
+    pub upgraded_item_count: i64,
+    pub selected_by: String,
+    pub selected_at: String,
+    pub default_for_future_intake: bool,
+    pub changes_historical_attempts: bool,
     pub changes_grade: bool,
     pub changes_publication: bool,
     pub changes_learning_evidence: bool,
@@ -777,7 +810,7 @@ pub fn preview_question_version_impact(
         load_target(conn, owner_id, question_version_public_id)?;
     let mut statement = conn.prepare(
         "SELECT assessment.public_id,assessment.title,class.name,
-                assessment_version.public_id,item.public_id,
+                assessment_version.public_id,assessment_version.revision,item.public_id,
                 answer.public_id,rubric.public_id,links.public_id,
                 item.answer_key_version_id<>?2,
                 item.rubric_version_id<>?3,
@@ -808,6 +841,20 @@ pub fn preview_question_version_impact(
                  JOIN profile_evidence_links profile_link
                    ON profile_link.learning_evidence_id=evidence.id
                  WHERE decision.assessment_item_id=item.id)
+                ,
+                assessment_version.id=COALESCE(
+                  (SELECT default_selection.selected_assessment_version_id
+                   FROM exam_assessment_default_version_selections_v2 default_selection
+                   WHERE default_selection.assessment_id=assessment.id
+                   ORDER BY default_selection.revision DESC,default_selection.id DESC
+                   LIMIT 1),
+                  (SELECT latest_version.id
+                   FROM exam_assessment_versions_v2 latest_version
+                   WHERE latest_version.assessment_id=assessment.id
+                     AND latest_version.state='confirmed'
+                   ORDER BY latest_version.revision DESC,latest_version.id DESC
+                   LIMIT 1)
+                )
          FROM exam_assessment_items_v2 item
          JOIN exam_assessment_versions_v2 assessment_version
            ON assessment_version.id=item.assessment_version_id
@@ -836,17 +883,19 @@ pub fn preview_question_version_impact(
                 assessment_title: row.get(1)?,
                 class_name: row.get(2)?,
                 assessment_version_public_id: row.get(3)?,
-                assessment_item_public_id: row.get(4)?,
-                source_answer_key_version_public_id: row.get(5)?,
-                source_rubric_version_public_id: row.get(6)?,
-                source_link_set_public_id: row.get(7)?,
-                answer_changed: row.get(8)?,
-                rubric_changed: row.get(9)?,
-                link_changed: row.get(10)?,
-                unpublished_attempt_count: row.get(11)?,
-                published_attempt_count: row.get(12)?,
-                active_learning_evidence_count: row.get(13)?,
-                profile_snapshot_count: row.get(14)?,
+                assessment_version_revision: row.get(4)?,
+                assessment_item_public_id: row.get(5)?,
+                source_answer_key_version_public_id: row.get(6)?,
+                source_rubric_version_public_id: row.get(7)?,
+                source_link_set_public_id: row.get(8)?,
+                answer_changed: row.get(9)?,
+                rubric_changed: row.get(10)?,
+                link_changed: row.get(11)?,
+                unpublished_attempt_count: row.get(12)?,
+                published_attempt_count: row.get(13)?,
+                active_learning_evidence_count: row.get(14)?,
+                profile_snapshot_count: row.get(15)?,
+                is_current_default: row.get(16)?,
             })
         },
     )?;
@@ -2277,6 +2326,474 @@ pub fn prepare_question_impact_review_cases(
     })
 }
 
+#[derive(Serialize)]
+struct DefaultUpgradeItemHashInput {
+    item_id: i64,
+    question_version_id: i64,
+    answer_key_version_id: i64,
+    rubric_version_id: i64,
+    link_set_id: i64,
+    order_index: i64,
+    score_millis: i64,
+}
+
+struct DefaultUpgradeSourceItem {
+    question_version_id: i64,
+    answer_key_version_id: i64,
+    rubric_version_id: i64,
+    link_set_id: i64,
+    order_index: i64,
+    score: f64,
+    option_order_json: Option<String>,
+    presentation_snapshot_json: String,
+}
+
+struct AssessmentDefaultUpgradeScope {
+    plan_id: i64,
+    plan_question_version_id: i64,
+    target_answer_key_version_id: i64,
+    target_rubric_version_id: i64,
+    target_link_set_id: i64,
+    impact_json: String,
+    planned_by: String,
+    assessment_id: i64,
+    assessment_public_id: String,
+    assessment_created_by: String,
+    source_version_id: i64,
+    source_revision: i64,
+    source_state: String,
+    template_version: Option<String>,
+}
+
+fn current_assessment_default(conn: &Connection, assessment_id: i64) -> CoreResult<(i64, String)> {
+    conn.query_row(
+        "SELECT version.id,version.public_id
+         FROM exam_assessment_versions_v2 version
+         WHERE version.id=COALESCE(
+           (SELECT selection.selected_assessment_version_id
+            FROM exam_assessment_default_version_selections_v2 selection
+            WHERE selection.assessment_id=?1
+            ORDER BY selection.revision DESC,selection.id DESC
+            LIMIT 1),
+           (SELECT latest.id
+            FROM exam_assessment_versions_v2 latest
+            WHERE latest.assessment_id=?1 AND latest.state='confirmed'
+            ORDER BY latest.revision DESC,latest.id DESC
+            LIMIT 1)
+         )",
+        [assessment_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()?
+    .ok_or_else(|| CoreError::Invalid("作业没有可用于未来上传的已确认版本".into()))
+}
+
+fn assessment_default_upgrade_by_id(
+    conn: &Connection,
+    selection_id: i64,
+) -> CoreResult<AssessmentDefaultUpgrade> {
+    conn.query_row(
+        "SELECT selection.public_id,plan.public_id,assessment.public_id,assessment.title,
+                previous.public_id,previous.revision,selected.public_id,selected.revision,
+                (SELECT COUNT(*) FROM exam_assessment_items_v2 item
+                 WHERE item.assessment_version_id=selected.id
+                   AND item.question_version_id=plan.question_version_id
+                   AND item.answer_key_version_id=plan.target_answer_key_version_id
+                   AND item.rubric_version_id=plan.target_rubric_version_id
+                   AND item.link_set_id=plan.target_link_set_id
+                   AND item.state='active'),
+                selection.selected_by,selection.selected_at
+         FROM exam_assessment_default_version_selections_v2 selection
+         JOIN exam_question_version_impact_plans_v2 plan
+           ON plan.id=selection.source_impact_plan_id
+         JOIN exam_assessments_v2 assessment ON assessment.id=selection.assessment_id
+         JOIN exam_assessment_versions_v2 previous
+           ON previous.id=selection.previous_assessment_version_id
+         JOIN exam_assessment_versions_v2 selected
+           ON selected.id=selection.selected_assessment_version_id
+         WHERE selection.id=?1",
+        [selection_id],
+        |row| {
+            Ok(AssessmentDefaultUpgrade {
+                selection_public_id: row.get(0)?,
+                plan_public_id: row.get(1)?,
+                assessment_public_id: row.get(2)?,
+                assessment_title: row.get(3)?,
+                source_assessment_version_public_id: row.get(4)?,
+                source_revision: row.get(5)?,
+                default_assessment_version_public_id: row.get(6)?,
+                default_revision: row.get(7)?,
+                upgraded_item_count: row.get(8)?,
+                selected_by: row.get(9)?,
+                selected_at: row.get(10)?,
+                default_for_future_intake: true,
+                changes_historical_attempts: false,
+                changes_grade: false,
+                changes_publication: false,
+                changes_learning_evidence: false,
+            })
+        },
+    )
+    .map_err(Into::into)
+}
+
+pub fn upgrade_assessment_default_from_impact(
+    conn: &mut Connection,
+    owner_id: &str,
+    request: &UpgradeAssessmentDefaultRequest,
+) -> CoreResult<AssessmentDefaultUpgrade> {
+    required(owner_id, "题库老师")?;
+    required(&request.request_key, "请求键")?;
+    required(&request.plan_public_id, "影响计划")?;
+    required(&request.source_assessment_version_public_id, "来源作业版本")?;
+    required(
+        &request.expected_current_default_version_public_id,
+        "预期当前默认版本",
+    )?;
+    required(&request.upgraded_by, "升级老师")?;
+    if request.upgraded_by.trim() != owner_id.trim() {
+        return Err(CoreError::Invalid(
+            "只能以当前老师身份升级未来作业版本".into(),
+        ));
+    }
+    let request_hash = hashing::sha256_hex(
+        &serde_json::to_vec(&serde_json::json!({
+            "schema_version": QUESTION_PERFORMANCE_SCHEMA_VERSION,
+            "rule_version": ASSESSMENT_DEFAULT_UPGRADE_RULE_VERSION,
+            "plan_public_id": request.plan_public_id.trim(),
+            "source_assessment_version_public_id":
+                request.source_assessment_version_public_id.trim(),
+            "expected_current_default_version_public_id":
+                request.expected_current_default_version_public_id.trim(),
+            "upgraded_by": request.upgraded_by.trim()
+        }))
+        .map_err(|error| CoreError::Parse(format!("未来默认版本请求序列化失败：{error}")))?,
+    );
+    if let Some((selection_id, existing_hash)) = conn
+        .query_row(
+            "SELECT id,request_hash
+             FROM exam_assessment_default_version_selections_v2
+             WHERE request_key=?1",
+            [request.request_key.trim()],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?
+    {
+        if existing_hash != request_hash {
+            return Err(CoreError::Invalid(
+                "同一请求键对应不同的未来默认版本升级".into(),
+            ));
+        }
+        return assessment_default_upgrade_by_id(conn, selection_id);
+    }
+
+    let scope = conn
+        .query_row(
+            "SELECT plan.id,plan.question_version_id,plan.target_answer_key_version_id,
+                    plan.target_rubric_version_id,plan.target_link_set_id,plan.impact_json,
+                    plan.planned_by,assessment.id,assessment.public_id,
+                    assessment.created_by,source.id,source.revision,source.state,
+                    source.template_version
+             FROM exam_question_version_impact_plans_v2 plan
+             JOIN exam_assessment_versions_v2 source
+               ON source.public_id=?2
+             JOIN exam_assessments_v2 assessment ON assessment.id=source.assessment_id
+             WHERE plan.public_id=?1",
+            params![
+                request.plan_public_id.trim(),
+                request.source_assessment_version_public_id.trim()
+            ],
+            |row| {
+                Ok(AssessmentDefaultUpgradeScope {
+                    plan_id: row.get(0)?,
+                    plan_question_version_id: row.get(1)?,
+                    target_answer_key_version_id: row.get(2)?,
+                    target_rubric_version_id: row.get(3)?,
+                    target_link_set_id: row.get(4)?,
+                    impact_json: row.get(5)?,
+                    planned_by: row.get(6)?,
+                    assessment_id: row.get(7)?,
+                    assessment_public_id: row.get(8)?,
+                    assessment_created_by: row.get(9)?,
+                    source_version_id: row.get(10)?,
+                    source_revision: row.get(11)?,
+                    source_state: row.get(12)?,
+                    template_version: row.get(13)?,
+                })
+            },
+        )
+        .optional()?
+        .ok_or_else(|| CoreError::NotFound("未找到影响计划或来源作业版本".into()))?;
+    let AssessmentDefaultUpgradeScope {
+        plan_id,
+        plan_question_version_id,
+        target_answer_key_version_id,
+        target_rubric_version_id,
+        target_link_set_id,
+        impact_json,
+        planned_by,
+        assessment_id,
+        assessment_public_id,
+        assessment_created_by,
+        source_version_id,
+        source_revision,
+        source_state,
+        template_version,
+    } = scope;
+    if planned_by != owner_id.trim() || assessment_created_by != owner_id.trim() {
+        return Err(CoreError::Invalid("影响计划或作业不属于当前老师".into()));
+    }
+    if source_state != "confirmed" {
+        return Err(CoreError::Invalid(
+            "只能从已确认作业版本派生未来版本".into(),
+        ));
+    }
+    let frozen_impact: Value = serde_json::from_str(&impact_json)
+        .map_err(|error| CoreError::Parse(format!("影响计划快照无法读取：{error}")))?;
+    let source_was_reviewed = frozen_impact
+        .get("rows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|row| {
+            row.get("assessmentVersionPublicId").and_then(Value::as_str)
+                == Some(request.source_assessment_version_public_id.trim())
+        });
+    if !source_was_reviewed {
+        return Err(CoreError::Invalid(
+            "来源作业版本不在已冻结的影响范围内".into(),
+        ));
+    }
+    let (current_default_id, current_default_public_id) =
+        current_assessment_default(conn, assessment_id)?;
+    if current_default_public_id != request.expected_current_default_version_public_id.trim()
+        || current_default_id != source_version_id
+    {
+        return Err(CoreError::Invalid(
+            "未来默认作业版本已变化，请刷新影响预览后重试".into(),
+        ));
+    }
+    let affected_item_count: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM exam_assessment_items_v2 item
+         WHERE item.assessment_version_id=?1
+           AND item.question_version_id=?2
+           AND item.state='active'
+           AND (item.answer_key_version_id<>?3
+                OR item.rubric_version_id<>?4
+                OR item.link_set_id<>?5)",
+        params![
+            source_version_id,
+            plan_question_version_id,
+            target_answer_key_version_id,
+            target_rubric_version_id,
+            target_link_set_id
+        ],
+        |row| row.get(0),
+    )?;
+    if affected_item_count != 1 {
+        return Err(CoreError::Invalid(
+            "当前默认作业版本不再包含唯一的待升级题目".into(),
+        ));
+    }
+
+    let mut statement = conn.prepare(
+        "SELECT question_version_id,answer_key_version_id,rubric_version_id,link_set_id,
+                order_index,score,option_order_json,presentation_snapshot_json
+         FROM exam_assessment_items_v2
+         WHERE assessment_version_id=?1 AND state='active'
+         ORDER BY order_index,id",
+    )?;
+    let source_items = statement
+        .query_map([source_version_id], |row| {
+            Ok(DefaultUpgradeSourceItem {
+                question_version_id: row.get(0)?,
+                answer_key_version_id: row.get(1)?,
+                rubric_version_id: row.get(2)?,
+                link_set_id: row.get(3)?,
+                order_index: row.get(4)?,
+                score: row.get(5)?,
+                option_order_json: row.get(6)?,
+                presentation_snapshot_json: row.get(7)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    if source_items.is_empty() {
+        return Err(CoreError::Invalid("来源作业版本没有有效题目".into()));
+    }
+
+    let now = time::utc_now_rfc3339();
+    let selection_public_id = ids::new_public_id();
+    let selected_version_public_id = ids::new_public_id();
+    let tx = conn.transaction()?;
+    let selected_revision: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(revision),0)+1
+         FROM exam_assessment_versions_v2 WHERE assessment_id=?1",
+        [assessment_id],
+        |row| row.get(0),
+    )?;
+    tx.execute(
+        "INSERT INTO exam_assessment_versions_v2
+         (public_id,assessment_id,revision,template_version,state,
+          supersedes_version_id,created_at)
+         VALUES (?1,?2,?3,?4,'draft',?5,?6)",
+        params![
+            &selected_version_public_id,
+            assessment_id,
+            selected_revision,
+            template_version.as_deref(),
+            source_version_id,
+            &now
+        ],
+    )?;
+    let selected_version_id = tx.last_insert_rowid();
+    let mut hash_items = Vec::with_capacity(source_items.len());
+    let mut upgraded_item_count = 0_i64;
+    for item in source_items {
+        let (answer_key_version_id, rubric_version_id, link_set_id) =
+            if item.question_version_id == plan_question_version_id {
+                upgraded_item_count += 1;
+                (
+                    target_answer_key_version_id,
+                    target_rubric_version_id,
+                    target_link_set_id,
+                )
+            } else {
+                (
+                    item.answer_key_version_id,
+                    item.rubric_version_id,
+                    item.link_set_id,
+                )
+            };
+        tx.execute(
+            "INSERT INTO exam_assessment_items_v2
+             (public_id,assessment_version_id,question_version_id,answer_key_version_id,
+              rubric_version_id,link_set_id,order_index,score,option_order_json,
+              presentation_snapshot_json,state,created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'active',?11)",
+            params![
+                ids::new_public_id(),
+                selected_version_id,
+                item.question_version_id,
+                answer_key_version_id,
+                rubric_version_id,
+                link_set_id,
+                item.order_index,
+                item.score,
+                item.option_order_json.as_deref(),
+                &item.presentation_snapshot_json,
+                &now
+            ],
+        )?;
+        hash_items.push(DefaultUpgradeItemHashInput {
+            item_id: tx.last_insert_rowid(),
+            question_version_id: item.question_version_id,
+            answer_key_version_id,
+            rubric_version_id,
+            link_set_id,
+            order_index: item.order_index,
+            score_millis: (item.score * 1000.0).round() as i64,
+        });
+    }
+    if upgraded_item_count != 1 {
+        return Err(CoreError::Invalid("升级题目数量发生变化，已回滚".into()));
+    }
+    let item_set_hash = hashing::sha256_hex(
+        &serde_json::to_vec(&hash_items)
+            .map_err(|error| CoreError::Parse(format!("未来作业版本 hash 失败：{error}")))?,
+    );
+    tx.execute(
+        "UPDATE exam_assessment_versions_v2
+         SET item_set_hash=?1,state='confirmed',confirmed_by=?2,confirmed_at=?3
+         WHERE id=?4 AND state='draft'",
+        params![
+            &item_set_hash,
+            request.upgraded_by.trim(),
+            &now,
+            selected_version_id
+        ],
+    )?;
+    let selection_revision: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(revision),0)+1
+         FROM exam_assessment_default_version_selections_v2
+         WHERE assessment_id=?1",
+        [assessment_id],
+        |row| row.get(0),
+    )?;
+    tx.execute(
+        "INSERT INTO exam_assessment_default_version_selections_v2
+         (public_id,request_key,request_hash,assessment_id,revision,
+          previous_assessment_version_id,selected_assessment_version_id,
+          source_impact_plan_id,selected_by,selected_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        params![
+            &selection_public_id,
+            request.request_key.trim(),
+            &request_hash,
+            assessment_id,
+            selection_revision,
+            source_version_id,
+            selected_version_id,
+            plan_id,
+            request.upgraded_by.trim(),
+            &now
+        ],
+    )?;
+    let selection_id = tx.last_insert_rowid();
+    tx.execute(
+        "UPDATE exam_assessments_v2 SET updated_at=?1 WHERE id=?2",
+        params![&now, assessment_id],
+    )?;
+    let payload = serde_json::json!({
+        "schema_version": QUESTION_PERFORMANCE_SCHEMA_VERSION,
+        "rule_version": ASSESSMENT_DEFAULT_UPGRADE_RULE_VERSION,
+        "assessment_public_id": assessment_public_id,
+        "source_assessment_version_public_id":
+            request.source_assessment_version_public_id.trim(),
+        "source_revision": source_revision,
+        "selected_assessment_version_public_id": selected_version_public_id,
+        "selected_revision": selected_revision,
+        "upgraded_item_count": upgraded_item_count,
+        "default_for_future_intake": true,
+        "changes_historical_attempts": false,
+        "changes_grade": false,
+        "changes_publication": false,
+        "changes_learning_evidence": false
+    })
+    .to_string();
+    outbox::create_event(
+        &tx,
+        &NewOutboxEvent {
+            idempotency_key: &format!("{}:outbox", request.request_key.trim()),
+            event_type: "exam.assessment.future_default_upgraded",
+            event_version: 1,
+            aggregate_type: "exam_assessment_default_version_selection",
+            aggregate_id: &selection_public_id,
+            aggregate_revision: selection_revision,
+            payload_json: &payload,
+            occurred_at: &now,
+        },
+    )?;
+    audit::append(
+        &tx,
+        &NewAuditEvent {
+            idempotency_key: &format!("{}:audit", request.request_key.trim()),
+            actor_type: AuditActorType::Teacher,
+            actor_id: Some(request.upgraded_by.trim()),
+            action: "exam.assessment.future_default_upgraded",
+            object_type: "exam_assessment_default_version_selection",
+            object_id: &selection_public_id,
+            object_revision: Some(selection_revision),
+            note: Some("仅切换未来上传默认版本；历史作答、成绩、发布和学习证据均未改动"),
+            meta_json: Some(&payload),
+            occurred_at: &now,
+        },
+    )?;
+    tx.commit()?;
+    assessment_default_upgrade_by_id(conn, selection_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3124,5 +3641,222 @@ mod tests {
             )
             .unwrap();
         assert_eq!(case_count, 0);
+    }
+
+    #[test]
+    fn future_default_upgrade_clones_version_without_rebinding_history() {
+        let mut fixture = fixture();
+        let preview = preview_question_version_impact(
+            &fixture.conn,
+            "local_teacher",
+            &fixture.question_version_public_id,
+        )
+        .unwrap();
+        assert!(preview.rows[0].is_current_default);
+        assert_eq!(preview.rows[0].assessment_version_revision, 1);
+        let plan = confirm_question_impact_plan(
+            &mut fixture.conn,
+            "local_teacher",
+            &ConfirmQuestionImpactPlanRequest {
+                request_key: "future-default-plan".into(),
+                question_version_public_id: fixture.question_version_public_id.clone(),
+                expected_preview_hash: preview.preview_hash,
+                action: "future_only".into(),
+                planned_by: "local_teacher".into(),
+            },
+        )
+        .unwrap();
+        let before: (i64, i64, i64, i64, i64, i64, i64) = fixture
+            .conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM exam_attempts_v2),
+                   (SELECT COUNT(*) FROM exam_grade_decisions_v2),
+                   (SELECT COUNT(*) FROM exam_grade_publications_v2),
+                   (SELECT COUNT(*) FROM learning_evidence),
+                   (SELECT COUNT(*) FROM exam_assessment_versions_v2),
+                   (SELECT COUNT(*) FROM exam_assessment_items_v2),
+                   (SELECT COUNT(*) FROM exam_assessment_default_version_selections_v2)",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let request = UpgradeAssessmentDefaultRequest {
+            request_key: "future-default-upgrade".into(),
+            plan_public_id: plan.public_id,
+            source_assessment_version_public_id: "assessment-version-1".into(),
+            expected_current_default_version_public_id: "assessment-version-1".into(),
+            upgraded_by: "local_teacher".into(),
+        };
+        let upgraded =
+            upgrade_assessment_default_from_impact(&mut fixture.conn, "local_teacher", &request)
+                .unwrap();
+        assert_eq!(upgraded.source_revision, 1);
+        assert_eq!(upgraded.default_revision, 2);
+        assert_eq!(upgraded.upgraded_item_count, 1);
+        assert!(upgraded.default_for_future_intake);
+        assert!(!upgraded.changes_historical_attempts);
+        assert!(!upgraded.changes_grade);
+        assert!(!upgraded.changes_publication);
+        assert!(!upgraded.changes_learning_evidence);
+        let after: (i64, i64, i64, i64, i64, i64, i64) = fixture
+            .conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM exam_attempts_v2),
+                   (SELECT COUNT(*) FROM exam_grade_decisions_v2),
+                   (SELECT COUNT(*) FROM exam_grade_publications_v2),
+                   (SELECT COUNT(*) FROM learning_evidence),
+                   (SELECT COUNT(*) FROM exam_assessment_versions_v2),
+                   (SELECT COUNT(*) FROM exam_assessment_items_v2),
+                   (SELECT COUNT(*) FROM exam_assessment_default_version_selections_v2)",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(before.0, after.0);
+        assert_eq!(before.1, after.1);
+        assert_eq!(before.2, after.2);
+        assert_eq!(before.3, after.3);
+        assert_eq!(after.4, before.4 + 1);
+        assert_eq!(after.5, before.5 + 1);
+        assert_eq!(after.6, before.6 + 1);
+        let history_versions: i64 = fixture
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM exam_attempts_v2
+                 WHERE assessment_version_id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(history_versions, 2);
+        let default_binding: (String, i64, i64, i64) = fixture
+            .conn
+            .query_row(
+                "SELECT version.public_id,item.answer_key_version_id,
+                        item.rubric_version_id,item.link_set_id
+                 FROM exam_assessment_current_defaults_v2 current
+                 JOIN exam_assessment_versions_v2 version
+                   ON version.id=current.assessment_version_id
+                 JOIN exam_assessment_items_v2 item
+                   ON item.assessment_version_id=version.id
+                 WHERE current.assessment_id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            default_binding.0,
+            upgraded.default_assessment_version_public_id
+        );
+        let targets: (i64, i64, i64) = fixture
+            .conn
+            .query_row(
+                "SELECT target_answer_key_version_id,target_rubric_version_id,target_link_set_id
+                 FROM exam_question_version_impact_plans_v2
+                 WHERE public_id=?1",
+                [&request.plan_public_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (default_binding.1, default_binding.2, default_binding.3),
+            targets
+        );
+        let repeated =
+            upgrade_assessment_default_from_impact(&mut fixture.conn, "local_teacher", &request)
+                .unwrap();
+        assert_eq!(repeated.selection_public_id, upgraded.selection_public_id);
+        assert_eq!(repeated.default_revision, 2);
+        assert!(fixture
+            .conn
+            .execute(
+                "UPDATE exam_assessment_default_version_selections_v2
+                 SET selected_by='other' WHERE public_id=?1",
+                [&upgraded.selection_public_id],
+            )
+            .is_err());
+        assert!(fixture
+            .conn
+            .execute(
+                "DELETE FROM exam_assessment_default_version_selections_v2
+                 WHERE public_id=?1",
+                [&upgraded.selection_public_id],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn future_default_upgrade_rejects_stale_or_unreviewed_source() {
+        let mut fixture = fixture();
+        let preview = preview_question_version_impact(
+            &fixture.conn,
+            "local_teacher",
+            &fixture.question_version_public_id,
+        )
+        .unwrap();
+        let plan = confirm_question_impact_plan(
+            &mut fixture.conn,
+            "local_teacher",
+            &ConfirmQuestionImpactPlanRequest {
+                request_key: "future-default-stale-plan".into(),
+                question_version_public_id: fixture.question_version_public_id.clone(),
+                expected_preview_hash: preview.preview_hash,
+                action: "future_only".into(),
+                planned_by: "local_teacher".into(),
+            },
+        )
+        .unwrap();
+        let first = UpgradeAssessmentDefaultRequest {
+            request_key: "future-default-first".into(),
+            plan_public_id: plan.public_id.clone(),
+            source_assessment_version_public_id: "assessment-version-1".into(),
+            expected_current_default_version_public_id: "assessment-version-1".into(),
+            upgraded_by: "local_teacher".into(),
+        };
+        upgrade_assessment_default_from_impact(&mut fixture.conn, "local_teacher", &first).unwrap();
+        let stale = UpgradeAssessmentDefaultRequest {
+            request_key: "future-default-stale".into(),
+            plan_public_id: plan.public_id,
+            source_assessment_version_public_id: "assessment-version-1".into(),
+            expected_current_default_version_public_id: "assessment-version-1".into(),
+            upgraded_by: "local_teacher".into(),
+        };
+        assert!(
+            upgrade_assessment_default_from_impact(&mut fixture.conn, "local_teacher", &stale)
+                .is_err()
+        );
+        let counts: (i64, i64) = fixture
+            .conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM exam_assessment_versions_v2),
+                   (SELECT COUNT(*) FROM exam_assessment_default_version_selections_v2)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (2, 1));
     }
 }

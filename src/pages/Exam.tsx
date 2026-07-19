@@ -1407,7 +1407,8 @@ function FixedIntakeTab({
                 }}>
                   {assessmentOptions.map((option) => (
                     <option key={option.assessmentVersionId} value={option.assessmentVersionId}>
-                      {option.assessmentTitle} · {option.itemCount} 题
+                      {option.isDefault ? "默认 · " : ""}
+                      {option.assessmentTitle} · 第 {option.revision} 版 · {option.itemCount} 题
                     </option>
                   ))}
                 </select>

@@ -287,6 +287,8 @@ export interface FixedIntakeOption {
   revision: number;
   templateVersion: string | null;
   itemCount: number;
+  isDefault: boolean;
+  defaultSelectionPublicId: string | null;
 }
 
 export interface FixedIntakeRequest {

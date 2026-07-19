@@ -865,6 +865,7 @@ export interface QuestionImpactRow {
   assessmentTitle: string;
   className: string;
   assessmentVersionPublicId: string;
+  assessmentVersionRevision: number;
   assessmentItemPublicId: string;
   sourceAnswerKeyVersionPublicId: string;
   sourceRubricVersionPublicId: string;
@@ -876,6 +877,7 @@ export interface QuestionImpactRow {
   publishedAttemptCount: number;
   activeLearningEvidenceCount: number;
   profileSnapshotCount: number;
+  isCurrentDefault: boolean;
 }
 
 export interface QuestionVersionImpactPreview {
@@ -920,6 +922,33 @@ export interface QuestionImpactPlan {
   plannedBy: string;
   plannedAt: string;
   changesAssessmentBinding: false;
+  changesGrade: false;
+  changesPublication: false;
+  changesLearningEvidence: false;
+}
+
+export interface UpgradeAssessmentDefaultInput {
+  requestKey: string;
+  planPublicId: string;
+  sourceAssessmentVersionPublicId: string;
+  expectedCurrentDefaultVersionPublicId: string;
+  upgradedBy: "local_teacher";
+}
+
+export interface AssessmentDefaultUpgrade {
+  selectionPublicId: string;
+  planPublicId: string;
+  assessmentPublicId: string;
+  assessmentTitle: string;
+  sourceAssessmentVersionPublicId: string;
+  sourceRevision: number;
+  defaultAssessmentVersionPublicId: string;
+  defaultRevision: number;
+  upgradedItemCount: number;
+  selectedBy: string;
+  selectedAt: string;
+  defaultForFutureIntake: true;
+  changesHistoricalAttempts: false;
   changesGrade: false;
   changesPublication: false;
   changesLearningEvidence: false;
@@ -1095,5 +1124,13 @@ export const publishQuestionImpactCase = (
 ) =>
   call<PublishQuestionImpactReviewCaseResult>(
     "k1_question_impact_publish",
+    { input },
+  );
+
+export const upgradeAssessmentDefaultFromImpact = (
+  input: UpgradeAssessmentDefaultInput,
+) =>
+  call<AssessmentDefaultUpgrade>(
+    "k1_question_impact_upgrade_assessment",
     { input },
   );

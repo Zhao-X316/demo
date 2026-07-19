@@ -26,6 +26,7 @@ import {
   QuestionImpactAction,
   QuestionImpactPlan,
   QuestionImpactReviewCase,
+  AssessmentDefaultUpgrade,
   QuestionPerformanceCatalog,
   QuestionPerformanceItem,
   QuestionVersionImpactPreview,
@@ -60,6 +61,7 @@ import {
   prepareQuestionImpactCases,
   publishQuestionImpactCase,
   resolveQuestionImpactCase,
+  upgradeAssessmentDefaultFromImpact,
 } from "../api/knowledge";
 
 const TYPE_LABEL: Record<K1QuestionType, string> = {
@@ -2464,6 +2466,7 @@ function QuestionPerformancePanel({ onOpenExam }: { onOpenExam: () => void }) {
   const [preview, setPreview] = useState<QuestionVersionImpactPreview | null>(null);
   const [action, setAction] = useState<QuestionImpactAction>("future_only");
   const [plan, setPlan] = useState<QuestionImpactPlan | null>(null);
+  const [defaultUpgrades, setDefaultUpgrades] = useState<Record<string, AssessmentDefaultUpgrade>>({});
   const [reviewCases, setReviewCases] = useState<QuestionImpactReviewCase[]>([]);
   const [caseBoundary, setCaseBoundary] = useState("");
   const [loading, setLoading] = useState(true);
@@ -2490,6 +2493,7 @@ function QuestionPerformancePanel({ onOpenExam }: { onOpenExam: () => void }) {
     setSelected(item);
     setPreview(null);
     setPlan(null);
+    setDefaultUpgrades({});
     setReviewCases([]);
     setCaseBoundary("");
     setAction("future_only");
@@ -2606,6 +2610,30 @@ function QuestionPerformancePanel({ onOpenExam }: { onOpenExam: () => void }) {
     }
   };
 
+  const upgradeFutureDefault = async (row: QuestionVersionImpactPreview["rows"][number]) => {
+    if (!plan || !row.isCurrentDefault) return;
+    setWorking(true);
+    setError("");
+    try {
+      const upgraded = await upgradeAssessmentDefaultFromImpact({
+        requestKey: `${newImpactRequestKey()}-future-default`,
+        planPublicId: plan.publicId,
+        sourceAssessmentVersionPublicId: row.assessmentVersionPublicId,
+        expectedCurrentDefaultVersionPublicId: row.assessmentVersionPublicId,
+        upgradedBy: "local_teacher",
+      });
+      setDefaultUpgrades((current) => ({
+        ...current,
+        [row.assessmentVersionPublicId]: upgraded,
+      }));
+      await refresh();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setWorking(false);
+    }
+  };
+
   return (
     <div className="question-performance-page">
       {error && <div className="error">{error}</div>}
@@ -2687,6 +2715,7 @@ function QuestionPerformancePanel({ onOpenExam }: { onOpenExam: () => void }) {
               setSelected(null);
               setPreview(null);
               setPlan(null);
+              setDefaultUpgrades({});
               setReviewCases([]);
               setCaseBoundary("");
             }}>关闭</button>
@@ -2710,7 +2739,10 @@ function QuestionPerformancePanel({ onOpenExam }: { onOpenExam: () => void }) {
                   <article key={row.assessmentItemPublicId}>
                     <div>
                       <b>{row.assessmentTitle}</b>
-                      <span>{row.className} · 变化：{changeLabels(row)}</span>
+                      <span>
+                        {row.className} · 作业第 {row.assessmentVersionRevision} 版
+                        {" · "}变化：{changeLabels(row)}
+                      </span>
                     </div>
                     <div>
                       <span>未发布 {row.unpublishedAttemptCount}</span>
@@ -2718,6 +2750,29 @@ function QuestionPerformancePanel({ onOpenExam }: { onOpenExam: () => void }) {
                       <span>证据 {row.activeLearningEvidenceCount}</span>
                       <span>图谱 {row.profileSnapshotCount}</span>
                     </div>
+                    {plan && row.isCurrentDefault && (
+                      defaultUpgrades[row.assessmentVersionPublicId] ? (
+                        <div className="impact-default-result" data-testid="impact-default-upgraded">
+                          <b>
+                            未来上传默认第{" "}
+                            {defaultUpgrades[row.assessmentVersionPublicId].defaultRevision} 版
+                          </b>
+                          <span>旧作业仍保留第 {row.assessmentVersionRevision} 版</span>
+                        </div>
+                      ) : (
+                        <button
+                          className="primary"
+                          data-testid="impact-upgrade-default"
+                          disabled={working}
+                          onClick={() => upgradeFutureDefault(row)}
+                        >
+                          生成新版并用于以后上传
+                        </button>
+                      )
+                    )}
+                    {plan && !row.isCurrentDefault && (
+                      <span className="tag subtle">历史版本保留，不切换</span>
+                    )}
                   </article>
                 ))}
               </div>
@@ -2756,6 +2811,11 @@ function QuestionPerformancePanel({ onOpenExam }: { onOpenExam: () => void }) {
                   <div className="ok-banner">
                     已冻结处理计划，共 {plan.taskCount} 条待办；本次没有修改任何成绩和学习证据。
                   </div>
+                  {preview.rows.some((row) => row.isCurrentDefault) && (
+                    <div className="hint">
+                      还需对当前默认作业点击“生成新版并用于以后上传”；系统不会把历史作业重绑到新版。
+                    </div>
+                  )}
                   {plan.taskCount > 0 && reviewCases.length === 0 && (
                     <div className="impact-prepare-row">
                       <div>

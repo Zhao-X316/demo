@@ -96,6 +96,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [],
         |row| row.get(0),
     )?;
+    let default_selection_table_count: i64 = copy.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type='table' AND name='exam_assessment_default_version_selections_v2'",
+        [],
+        |row| row.get(0),
+    )?;
+    let default_selection_view_count: i64 = copy.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type='view' AND name='exam_assessment_current_defaults_v2'",
+        [],
+        |row| row.get(0),
+    )?;
+    let default_selection_trigger_count: i64 = copy.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type='trigger' AND name LIKE 'trg_exam_assessment_default_selection_%'",
+        [],
+        |row| row.get(0),
+    )?;
+    let default_selection_business_rows: i64 = copy.query_row(
+        "SELECT COUNT(*) FROM exam_assessment_default_version_selections_v2",
+        [],
+        |row| row.get(0),
+    )?;
 
     println!("source_migrations={before_count}");
     println!("copy_migrations={after_count}");
@@ -107,5 +130,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("review_case_table_count={review_case_table_count}");
     println!("review_case_trigger_count={review_case_trigger_count}");
     println!("review_case_business_rows={review_case_business_rows}");
+    println!("default_selection_table_count={default_selection_table_count}");
+    println!("default_selection_view_count={default_selection_view_count}");
+    println!("default_selection_trigger_count={default_selection_trigger_count}");
+    println!("default_selection_business_rows={default_selection_business_rows}");
     Ok(())
 }
