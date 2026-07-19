@@ -12,9 +12,19 @@ use module_knowledge::db::search::{
     self, DuplicateReviewDecision, QuestionSearchRequest, QuestionSearchResponse,
     ReviewDuplicateRequest,
 };
+use module_knowledge::db::source_documents::{
+    self, CorrectedSourceQuestion, DiscardSourceDraftRequest, ReviewSourceDraftRequest,
+    SourceDraftReview, SourceInboxItem,
+};
+use module_knowledge::source_import::{SourceOptionDraft, SourceQuestionRecognizer};
 use serde::Deserialize;
 use tauri::State;
 
+use crate::knowledge_source_provider::ArkSourceQuestionRecognizer;
+use crate::knowledge_source_run::{
+    self, BeginSourceRun, ImportSourceRequest, SourceImportAnalysisResult,
+};
+use crate::secrets;
 use crate::state::AppState;
 
 const LOCAL_TEACHER_ACTOR_ID: &str = "local_teacher";
@@ -54,6 +64,43 @@ pub struct ReviewDuplicateInput {
     left_question_version_public_id: String,
     right_question_version_public_id: String,
     decision: String,
+    note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceOptionInput {
+    label: String,
+    content: String,
+    order_index: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorrectedSourceQuestionInput {
+    question_type: String,
+    stem: String,
+    material_text: Option<String>,
+    max_score: f64,
+    options: Vec<SourceOptionInput>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptSourceDraftInput {
+    request_key: String,
+    draft_public_id: String,
+    expected_content_hash: String,
+    corrected: Option<CorrectedSourceQuestionInput>,
+    note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscardSourceDraftInput {
+    request_key: String,
+    draft_public_id: String,
+    expected_content_hash: String,
     note: Option<String>,
 }
 
@@ -193,4 +240,129 @@ pub fn k1_candidate_discard(
     let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     question_candidate_review::discard_candidate(&mut connection, LOCAL_TEACHER_ACTOR_ID, &input)
         .map_err(|error| error.to_string())
+}
+
+/// 一键导入空白卷或电子题目文件并提取题面。
+///
+/// 本地解析、PDF 渲染和外部调用均不持 SQLite 锁；来源先归档为 teaching_content。
+/// 成功结果只进入独立来源草稿箱，不创建答案、作业或正式可批改题。
+#[tauri::command]
+pub async fn k1_source_import_analyze(
+    state: State<'_, AppState>,
+    input: ImportSourceRequest,
+) -> Result<SourceImportAnalysisResult, String> {
+    let prepared = knowledge_source_run::prepare_source(&input.path, &input.source_type)
+        .map_err(|error| error.to_string())?;
+    let document = {
+        let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+        knowledge_source_run::persist_source(
+            &mut connection,
+            &state.data_dir,
+            &prepared,
+            &input.source_type,
+            &input.request_key,
+        )
+        .map_err(|error| error.to_string())?
+    };
+    let extraction_input = std::sync::Arc::new(prepared.extraction_input(&document));
+    let creds = secrets::load(&state.data_dir).map_err(|error| error.to_string())?;
+    let recognizer = ArkSourceQuestionRecognizer::from_creds(&creds);
+    let begin = {
+        let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+        knowledge_source_run::begin(
+            &connection,
+            &extraction_input,
+            &recognizer,
+            &input.request_key,
+            document.source_artifact_id,
+        )
+        .map_err(|error| error.to_string())?
+    };
+    let ai_run_id = match begin {
+        BeginSourceRun::Completed { ai_run_id } => ai_run_id,
+        BeginSourceRun::Execute { ai_run_id } => {
+            let worker_input = std::sync::Arc::clone(&extraction_input);
+            let result =
+                tauri::async_runtime::spawn_blocking(move || recognizer.recognize(&worker_input))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(suite_core::error::CoreError::Invalid(
+                            "题目提取任务意外中断，来源已保留，可稍后重试".into(),
+                        ))
+                    });
+            let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+            knowledge_source_run::finish(&connection, &extraction_input, ai_run_id, result)
+                .map_err(|error| error.to_string())?;
+            ai_run_id
+        }
+    };
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    knowledge_source_run::materialize_result(&mut connection, document, ai_run_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn k1_source_inbox(
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+) -> Result<Vec<SourceInboxItem>, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    source_documents::list_source_inbox(&connection, LOCAL_TEACHER_ACTOR_ID, limit.unwrap_or(50))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn k1_source_accept(
+    state: State<'_, AppState>,
+    input: AcceptSourceDraftInput,
+) -> Result<SourceDraftReview, String> {
+    let corrected = input.corrected.map(|question| CorrectedSourceQuestion {
+        question_type: question.question_type,
+        stem: question.stem,
+        material_text: question.material_text,
+        max_score: question.max_score,
+        options: question
+            .options
+            .into_iter()
+            .map(|option| SourceOptionDraft {
+                label: option.label,
+                content: option.content,
+                order_index: option.order_index,
+            })
+            .collect(),
+    });
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    source_documents::accept_source_draft(
+        &mut connection,
+        LOCAL_TEACHER_ACTOR_ID,
+        &ReviewSourceDraftRequest {
+            request_key: input.request_key,
+            draft_public_id: input.draft_public_id,
+            expected_content_hash: input.expected_content_hash,
+            corrected,
+            reviewed_by: LOCAL_TEACHER_ACTOR_ID.into(),
+            note: input.note,
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn k1_source_discard(
+    state: State<'_, AppState>,
+    input: DiscardSourceDraftInput,
+) -> Result<SourceDraftReview, String> {
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    source_documents::discard_source_draft(
+        &mut connection,
+        LOCAL_TEACHER_ACTOR_ID,
+        &DiscardSourceDraftRequest {
+            request_key: input.request_key,
+            draft_public_id: input.draft_public_id,
+            expected_content_hash: input.expected_content_hash,
+            reviewed_by: LOCAL_TEACHER_ACTOR_ID.into(),
+            note: input.note,
+        },
+    )
+    .map_err(|error| error.to_string())
 }

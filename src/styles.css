@@ -714,6 +714,33 @@ code { background: #EEF0F3; padding: 1px 5px; border-radius: 4px; font-size: 12p
 .blueprint-history-row > div { display: flex; flex-direction: column; gap: 3px; }
 .blueprint-history-row > div span, .blueprint-history-row time { color: var(--muted); font-size: 11px; }
 .question-bank-tabs { margin-top: 14px; }
+.source-import-hero { margin-top: 14px; }
+.source-import-flow { display: flex; flex-direction: column; gap: 12px; }
+.source-type-choice { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+.source-type-choice > button { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; padding: 11px 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--panel); color: var(--text-2); text-align: left; }
+.source-type-choice > button.active { border-color: var(--brand-line); background: var(--brand-weak); color: var(--brand); }
+.source-type-choice b { font-size: 13px; }
+.source-type-choice span { color: var(--muted); font-size: 11px; }
+.source-file-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 11px; align-items: center; padding: 11px 12px; border: 1px dashed var(--line-strong); border-radius: 8px; background: var(--bg-sub); }
+.source-file-row > div { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.source-file-row b { overflow: hidden; font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
+.source-file-row span { color: var(--muted); font-size: 10.5px; line-height: 1.45; }
+.source-inbox-summary { margin-top: 12px; }
+.source-document-list { display: flex; flex-direction: column; }
+.source-document-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 0; border-top: 1px solid var(--line); }
+.source-document-row:first-child { border-top: 0; }
+.source-document-row > div { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.source-document-row b { font-size: 12.5px; }
+.source-document-row span { color: var(--muted); font-size: 11px; }
+.source-empty { padding: 18px 0 6px; text-align: center; }
+.source-review-layout { display: grid; grid-template-columns: minmax(240px, .65fr) minmax(0, 1.35fr); gap: 12px; align-items: start; margin-top: 12px; }
+.source-review-list { display: flex; max-height: 640px; flex-direction: column; gap: 7px; overflow: auto; padding: 9px; }
+.source-review-list > button { display: flex; flex-direction: column; gap: 4px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--text-2); text-align: left; }
+.source-review-list > button:hover { border-color: var(--line-strong); }
+.source-review-list > button.active { border-color: var(--brand-line); background: var(--brand-weak); }
+.source-review-list span, .source-review-list small { color: var(--muted); font-size: 10.5px; }
+.source-review-list b { overflow: hidden; font-size: 12px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
+.source-review-editor textarea, .source-review-editor input, .source-review-editor select { width: 100%; }
 .question-search-panel { margin-top: 14px; }
 .question-search-main { display: grid; grid-template-columns: minmax(260px, 1.8fr) repeat(3, minmax(120px, .75fr)) auto; gap: 10px; align-items: end; }
 .question-search-main .field { margin: 0; }
@@ -767,12 +794,14 @@ code { background: #EEF0F3; padding: 1px 5px; border-radius: 4px; font-size: 12p
   .blueprint-type-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .blueprint-live { align-items: flex-start; flex-direction: column; gap: 4px; }
   .question-search-main { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .source-review-layout { grid-template-columns: 1fr; }
   .question-search-keyword { grid-column: 1 / -1; }
   .question-search-advanced > div { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .duplicate-candidate-row { grid-template-columns: 1fr; }
   .duplicate-candidate-row > div:last-child { justify-content: flex-start; }
   .candidate-review-layout { grid-template-columns: 1fr; }
   .candidate-review-actions { align-items: stretch; flex-direction: column; }
+  .source-file-row { grid-template-columns: 1fr; }
 }
 
 /* ───── M2 题目批改 ───── */
