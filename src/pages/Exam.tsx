@@ -41,6 +41,7 @@ import {
   examAnswerSheetCorrectSubjectiveTranscription,
   examAnswerSheetGradeShortAnswer,
   examAnswerSheetPromoteAcceptedAnswer,
+  examAnswerSheetPromoteRubricEvidence,
   examAnswerSheetSubjectiveAccept,
   examAnswerSheetSubjectiveCorrect,
   examAnswerSheetSubjectiveCorrectComponents,
@@ -272,6 +273,31 @@ function teacherComponentResults(raw: string | null) {
         resultStatus: typeof component.result_status === "string" ? component.result_status : "incorrect",
         evidenceText: typeof component.evidence_text === "string" ? component.evidence_text : "",
         teacherNote: typeof component.teacher_note === "string" ? component.teacher_note : "",
+      }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function rubricEvidencePromotions(raw: string | null) {
+  if (!raw) return [];
+  try {
+    const value = JSON.parse(raw) as Record<string, unknown>;
+    if (!Array.isArray(value.promotions)) return [];
+    return value.promotions.flatMap((rawPromotion) => {
+      if (!rawPromotion || typeof rawPromotion !== "object" || Array.isArray(rawPromotion)) return [];
+      const promotion = rawPromotion as Record<string, unknown>;
+      return [{
+        promotionId: typeof promotion.promotion_id === "number" ? promotion.promotion_id : 0,
+        sourcePublicId: typeof promotion.source_public_id === "string" ? promotion.source_public_id : "",
+        stableId: typeof promotion.rubric_point_stable_id === "string"
+          ? promotion.rubric_point_stable_id
+          : "",
+        evidenceText: typeof promotion.evidence_text === "string" ? promotion.evidence_text : "",
+        adoptedAssessmentVersionId: typeof promotion.adopted_assessment_version_id === "number"
+          ? promotion.adopted_assessment_version_id
+          : 0,
       }];
     });
   } catch {
@@ -2517,6 +2543,38 @@ function SubjectiveReviewTab({
     }
   }
 
+  async function promoteRubricEvidence(
+    row: SubjectiveWorkbenchRow,
+    component: ReturnType<typeof teacherComponentResults>[number],
+  ) {
+    if (row.grade_decision_id == null || !component.evidenceText.trim()) {
+      onError("请先逐评分点确认得分并引用学生作答原文");
+      return;
+    }
+    if (!window.confirm(
+      `确认把“${component.evidenceText}”加入“${component.stableId}”的未来评分点示例？\n\n系统会创建新的评分规则、链接集与作业版本；本次得分、已发布成绩和历史记录均不会改变。`,
+    )) return;
+    setBusy(true);
+    try {
+      const result = await examAnswerSheetPromoteRubricEvidence(
+        row.grade_decision_id,
+        component.sourcePublicId,
+      );
+      const prefix = result.outcome === "created_new_version"
+        ? "已创建新评分规则"
+        : result.outcome === "already_promoted"
+          ? "该表述此前已加入评分规则"
+          : "最新评分规则已包含该表述";
+      onDone(
+        `${prefix}：${result.evidence_text}；沿用 ${result.carried_knowledge_link_count} 条知识链接和 ${result.carried_ability_link_count} 条能力链接，当前成绩保持不变`,
+      );
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function publishAttempt(attemptId: number, studentName: string) {
     if (!window.confirm(`确认发布 ${studentName} 的本次答题卡成绩？只采用当前老师终审 revision。`)) return;
     setBusy(true);
@@ -2589,6 +2647,7 @@ function SubjectiveReviewTab({
             ? answerSlots.map((slot) => ({ ...slot, sourceType: "answer_slot" as const }))
             : rubricPoints.map((point) => ({ ...point, sourceType: "rubric_point" as const }));
           const confirmedComponents = teacherComponentResults(row.teacher_components_json);
+          const promotedRubricEvidence = rubricEvidencePromotions(row.rubric_evidence_promotions_json);
           return (
             <article className={row.current_suggestion_confirmed ? "objective-review-row confirmed" : "objective-review-row"} key={row.suggestion_id}>
               <div className="objective-student">
@@ -2612,6 +2671,7 @@ function SubjectiveReviewTab({
                   <span>建议得分 <b>{row.suggested_score == null ? "—" : `${row.suggested_score} / ${row.max_score}`}</b></span>
                   {row.current_suggestion_confirmed && <span>老师终审 <b>{row.teacher_score} 分 · {row.confirmation_level === "teacher_corrected" ? "人工修正" : "接受建议"}</b></span>}
                   {row.accepted_answer_promotion_id != null && <span>答案库 <b>已加入未来可接受写法</b></span>}
+                  {promotedRubricEvidence.length > 0 && <span>评分规则 <b>已沉淀 {promotedRubricEvidence.length} 条老师确认表述</b></span>}
                 </div>
               </div>
               {row.question_type === "short_answer" && (
@@ -2643,18 +2703,33 @@ function SubjectiveReviewTab({
               )}
               {confirmedComponents.length > 0 && (
                 <div className="short-answer-analysis teacher-components">
-                  {confirmedComponents.map((component) => (
-                    <div className={`short-answer-point ${component.resultStatus}`} key={component.sourcePublicId}>
-                      <div>
-                        <b>{componentSpecs.find((item) => item.sourcePublicId === component.sourcePublicId)?.canonicalText || component.stableId}</b>
-                        <span>老师逐项确认 · {component.teacherScore} / {component.maxScore} 分</span>
+                  {confirmedComponents.map((component) => {
+                    const promotion = promotedRubricEvidence.find(
+                      (item) => item.sourcePublicId === component.sourcePublicId,
+                    );
+                    return (
+                      <div className={`short-answer-point ${component.resultStatus}`} key={component.sourcePublicId}>
+                        <div>
+                          <b>{componentSpecs.find((item) => item.sourcePublicId === component.sourcePublicId)?.canonicalText || component.stableId}</b>
+                          <span>老师逐项确认 · {component.teacherScore} / {component.maxScore} 分</span>
+                        </div>
+                        {component.evidenceText
+                          ? <q>{component.evidenceText}</q>
+                          : <em>本项未给分，无需填写作答证据</em>}
+                        {component.teacherNote && <p>{component.teacherNote}</p>}
+                        {row.question_type === "short_answer"
+                          && component.teacherScore > 0
+                          && component.evidenceText
+                          && (promotion
+                            ? <span className="tag pass">已加入未来评分规则</span>
+                            : (
+                              <button disabled={busy} onClick={() => void promoteRubricEvidence(row, component)}>
+                                加入未来评分点示例
+                              </button>
+                            ))}
                       </div>
-                      {component.evidenceText
-                        ? <q>{component.evidenceText}</q>
-                        : <em>本项未给分，无需填写作答证据</em>}
-                      {component.teacherNote && <p>{component.teacherNote}</p>}
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
               <div className="objective-actions">

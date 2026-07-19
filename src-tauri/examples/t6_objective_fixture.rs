@@ -608,7 +608,9 @@ fn inspect_fixture(data_dir: &Path, phase: &str) -> AppResult<FixtureReport> {
         ));
     }
     let db_path = data_dir.join("data.db");
-    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    // FTS5 的 integrity_check 需要可写句柄；路径已由隔离夹具目录和 marker 守卫，
+    // 并且不授予 SQLITE_OPEN_CREATE。
+    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     let workbench = list_objective_workbench(&conn, None, 500)?;
     let integrity_check: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
     let foreign_key_violations = count(&conn, "SELECT COUNT(*) FROM pragma_foreign_key_check")?;
@@ -690,7 +692,13 @@ fn verify_fixture(data_dir: &Path, phase: &str) -> AppResult<FixtureReport> {
         report.migration_count == expected_migrations,
         format!("夹具必须包含全部 {expected_migrations} 个迁移"),
     )?;
-    expect(report.integrity_check == "ok", "integrity_check 必须为 ok")?;
+    expect(
+        report.integrity_check == "ok",
+        format!(
+            "integrity_check 必须为 ok，实际为：{}",
+            report.integrity_check
+        ),
+    )?;
     expect(report.foreign_key_violations == 0, "夹具不能包含外键违规")?;
     expect(report.workbench_rows == 6, "工作台必须显示 6 条题区证据")?;
     expect(report.attempts == 6, "工作台必须显示 6 份整卷")?;

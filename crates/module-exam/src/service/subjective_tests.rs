@@ -1390,6 +1390,170 @@ fn teacher_corrected_short_answer_points_publish_rubric_evidence() {
 }
 
 #[test]
+fn teacher_can_promote_short_answer_evidence_to_future_rubric_without_regrading_history() {
+    let mut fixture = setup();
+    fixture.region_id = add_short_answer_region(&mut fixture);
+    fixture
+        .conn
+        .execute_batch(
+            "INSERT INTO k1_knowledge_nodes
+               (public_id,stable_id,knowledge_map_id,code,title,order_index,state,created_at)
+             VALUES ('knowledge-rubric-promotion','westernization-institution',1,'K-RP',
+                     '洋务运动制度局限',1,'active','2026-07-16T09:00:00.000Z');
+             INSERT INTO k1_ability_dimensions
+               (public_id,stable_id,subject_id,revision,code,title,state,created_at)
+             VALUES ('ability-rubric-promotion','historical-explanation',1,1,'A-RP',
+                     '历史解释','active','2026-07-16T09:00:00.000Z');
+             INSERT INTO k1_knowledge_links
+               (public_id,link_set_id,source_type,source_public_id,knowledge_node_id,
+                relation_type,confirmation_level,verified_by,verified_at,created_at)
+             VALUES ('knowledge-link-rubric-promotion',2,'rubric_point',
+                     'rubric-point-short',1,'rubric_basis','teacher_confirmed','teacher',
+                     '2026-07-16T09:00:00.000Z','2026-07-16T09:00:00.000Z');
+             INSERT INTO k1_ability_links
+               (public_id,link_set_id,source_type,source_public_id,ability_dimension_id,
+                evidence_strength,response_mode,confirmation_level,verified_by,verified_at,
+                created_at)
+             VALUES ('ability-link-rubric-promotion',2,'rubric_point',
+                     'rubric-point-short',1,0.8,'structured_response',
+                     'teacher_confirmed','teacher','2026-07-16T09:00:00.000Z',
+                     '2026-07-16T09:00:00.000Z');",
+        )
+        .unwrap();
+    let run_id = successful_run(
+        &mut fixture,
+        "subjective-ocr-rubric-promotion",
+        "只学习技术，没有改变封建制度",
+    );
+    subjective::record_ocr_ai_run_transcription(&mut fixture.conn, run_id).unwrap();
+    let row = subjective::list_subjective_workbench(&fixture.conn, Some(1), 10)
+        .unwrap()
+        .rows
+        .into_iter()
+        .find(|row| row.question_type == "short_answer")
+        .unwrap();
+    let decision = subjective::correct_subjective_components(
+        &fixture.conn,
+        row.suggestion_id,
+        &[subjective::SubjectiveComponentGradeInput {
+            source_type: "rubric_point".into(),
+            source_public_id: "rubric-point-short".into(),
+            teacher_score: 4.0,
+            evidence_text: Some("只学习技术".into()),
+            teacher_note: Some("属于制度局限的合理表述".into()),
+        }],
+        "查看原图后确认该表述可给分",
+        "teacher",
+    )
+    .unwrap();
+
+    let promoted = subjective::promote_short_answer_rubric_evidence(
+        &mut fixture.conn,
+        decision.id,
+        "rubric-point-short",
+        "teacher",
+    )
+    .unwrap();
+    assert_eq!(promoted.outcome, "created_new_version");
+    assert_eq!(promoted.evidence_text, "只学习技术");
+    assert_eq!(promoted.adopted_assessment_revision, 2);
+    assert_eq!(promoted.carried_knowledge_link_count, 1);
+    assert_eq!(promoted.carried_ability_link_count, 1);
+    assert!(promoted.current_grade_unchanged);
+    assert!(promoted.current_publication_unchanged);
+
+    let old_allowed: Option<String> = fixture
+        .conn
+        .query_row(
+            "SELECT allowed_paraphrases_json FROM k1_rubric_points WHERE id=2",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(old_allowed.is_none());
+    let (new_public_id, new_allowed): (String, String) = fixture
+        .conn
+        .query_row(
+            "SELECT public_id,allowed_paraphrases_json
+             FROM k1_rubric_points
+             WHERE rubric_version_id=?1 AND stable_id='institution'",
+            [promoted.adopted_rubric_version_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_ne!(new_public_id, "rubric-point-short");
+    assert!(new_allowed.contains("只学习技术"));
+    let carried_sources: (String, String) = fixture
+        .conn
+        .query_row(
+            "SELECT
+               (SELECT source_public_id FROM k1_knowledge_links
+                WHERE link_set_id=?1),
+               (SELECT source_public_id FROM k1_ability_links
+                WHERE link_set_id=?1)",
+            [promoted.adopted_link_set_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(carried_sources, (new_public_id.clone(), new_public_id));
+    let unchanged: (i64, f64, i64, i64) = fixture
+        .conn
+        .query_row(
+            "SELECT attempt.assessment_version_id,decision.teacher_score,
+                    (SELECT COUNT(*) FROM exam_grade_publications_v2),
+                    (SELECT COUNT(*) FROM learning_evidence)
+             FROM exam_grade_decisions_v2 decision
+             JOIN exam_attempts_v2 attempt ON attempt.id=decision.attempt_id
+             WHERE decision.id=?1 AND decision.state='active'",
+            [decision.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(unchanged, (1, 4.0, 0, 0));
+    let workbench = subjective::list_subjective_workbench(&fixture.conn, Some(1), 10).unwrap();
+    let promoted_row = workbench
+        .rows
+        .into_iter()
+        .find(|row| row.question_type == "short_answer")
+        .unwrap();
+    assert!(promoted_row
+        .rubric_evidence_promotions_json
+        .contains("只学习技术"));
+
+    let repeated = subjective::promote_short_answer_rubric_evidence(
+        &mut fixture.conn,
+        decision.id,
+        "rubric-point-short",
+        "teacher",
+    )
+    .unwrap();
+    assert_eq!(repeated.outcome, "already_promoted");
+    assert_eq!(repeated.promotion_id, promoted.promotion_id);
+    let promotion_id = promoted.promotion_id.unwrap();
+    let update_error = fixture
+        .conn
+        .execute(
+            "UPDATE exam_rubric_evidence_promotions_v2
+             SET evidence_text='改写' WHERE id=?1",
+            [promotion_id],
+        )
+        .unwrap_err();
+    assert!(update_error
+        .to_string()
+        .contains("M2_RUBRIC_EVIDENCE_PROMOTION_IMMUTABLE"));
+    let delete_error = fixture
+        .conn
+        .execute(
+            "DELETE FROM exam_rubric_evidence_promotions_v2 WHERE id=?1",
+            [promotion_id],
+        )
+        .unwrap_err();
+    assert!(delete_error
+        .to_string()
+        .contains("M2_RUBRIC_EVIDENCE_PROMOTION_IMMUTABLE"));
+}
+
+#[test]
 fn answer_grade_run_becomes_audited_point_suggestion_only_after_teacher_accepts() {
     let mut fixture = setup();
     fixture.region_id = add_short_answer_region(&mut fixture);

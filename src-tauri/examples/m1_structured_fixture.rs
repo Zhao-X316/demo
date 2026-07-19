@@ -495,7 +495,9 @@ fn inspect_fixture(data_dir: &Path, phase: &str) -> AppResult<FixtureReport> {
     }
     let conn = Connection::open_with_flags(
         data_dir.join("data.db"),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        // FTS5 的 integrity_check 会运行内部索引验证并需要可写句柄；这里仍然
+        // 不允许创建数据库，且路径已由隔离夹具目录守卫。
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     conn.pragma_update(None, "foreign_keys", true)?;
     let integrity_check =
@@ -652,7 +654,13 @@ fn verify_fixture(data_dir: &Path, phase: &str) -> AppResult<FixtureReport> {
         report.migration_count == expected_migrations,
         format!("夹具必须包含全部 {expected_migrations} 个迁移"),
     )?;
-    expect(report.integrity_check == "ok", "integrity_check 必须为 ok")?;
+    expect(
+        report.integrity_check == "ok",
+        format!(
+            "integrity_check 必须为 ok，实际为：{}",
+            report.integrity_check
+        ),
+    )?;
     expect(report.foreign_key_violations == 0, "夹具不能包含外键违规")?;
     expect(
         report.students == 3

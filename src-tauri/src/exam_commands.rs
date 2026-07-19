@@ -41,8 +41,8 @@ use module_exam::service::objective::{
 use module_exam::service::ordinary_question_sync::{self, OrdinaryQuestionSyncSummary};
 use module_exam::service::ordinary_structure::OrdinaryStructureConfirmationResult;
 use module_exam::service::subjective::{
-    AcceptedAnswerPromotionResult, ShortAnswerGradeAnalysis, SubjectiveComponentGradeInput,
-    SubjectiveTranscriptionRevision, SubjectiveWorkbench,
+    AcceptedAnswerPromotionResult, RubricEvidencePromotionResult, ShortAnswerGradeAnalysis,
+    SubjectiveComponentGradeInput, SubjectiveTranscriptionRevision, SubjectiveWorkbench,
 };
 use module_exam::service::subjective_links::{
     SubjectiveLinkEditResult, SubjectiveLinkEditor, SubjectiveSourceLinkInput,
@@ -983,6 +983,23 @@ pub fn exam_answer_sheet_promote_accepted_answer(
     module_exam::service::subjective::promote_fill_accepted_answer(
         &mut conn,
         grade_decision_id,
+        LOCAL_TEACHER_ACTOR,
+    )
+    .map_err(e)
+}
+
+/// 老师把逐点评分中确认过的学生表述加入未来评分点规则；历史成绩保持不变。
+#[tauri::command]
+pub fn exam_answer_sheet_promote_rubric_evidence(
+    state: State<'_, AppState>,
+    grade_decision_id: i64,
+    source_public_id: String,
+) -> R<RubricEvidencePromotionResult> {
+    let mut conn = lock(&state)?;
+    module_exam::service::subjective::promote_short_answer_rubric_evidence(
+        &mut conn,
+        grade_decision_id,
+        &source_public_id,
         LOCAL_TEACHER_ACTOR,
     )
     .map_err(e)

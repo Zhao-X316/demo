@@ -118,6 +118,21 @@ export interface AcceptedAnswerPromotionResult {
   current_publication_unchanged: boolean;
 }
 
+export interface RubricEvidencePromotionResult {
+  outcome: "created_new_version" | "already_promoted" | "already_available";
+  promotion_id: number | null;
+  rubric_point_stable_id: string;
+  evidence_text: string;
+  adopted_assessment_version_id: number;
+  adopted_assessment_revision: number;
+  adopted_rubric_version_id: number;
+  adopted_link_set_id: number;
+  carried_knowledge_link_count: number;
+  carried_ability_link_count: number;
+  current_grade_unchanged: boolean;
+  current_publication_unchanged: boolean;
+}
+
 export interface SubjectiveKnowledgeOption {
   id: number;
   public_id: string;
@@ -682,6 +697,7 @@ export interface SubjectiveWorkbenchRow {
   teacher_components_json: string;
   accepted_answer_promotion_id: number | null;
   accepted_answer_promoted_at: string | null;
+  rubric_evidence_promotions_json: string;
 }
 
 export interface SubjectiveComponentGradeInput {
@@ -1147,6 +1163,14 @@ export const examAnswerSheetPromoteAcceptedAnswer = (grade_decision_id: number) 
   call<AcceptedAnswerPromotionResult>("exam_answer_sheet_promote_accepted_answer", {
     gradeDecisionId: grade_decision_id,
   });
+
+export const examAnswerSheetPromoteRubricEvidence = (
+  grade_decision_id: number,
+  source_public_id: string,
+) => call<RubricEvidencePromotionResult>("exam_answer_sheet_promote_rubric_evidence", {
+  gradeDecisionId: grade_decision_id,
+  sourcePublicId: source_public_id,
+});
 
 export const examSubjectiveLinkEditor = (assessment_item_id: number) =>
   call<SubjectiveLinkEditor>("exam_subjective_link_editor", {
