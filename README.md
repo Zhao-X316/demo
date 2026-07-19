@@ -10,13 +10,15 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 
 > 2026-07-16：独立分支 `codex/t2-artifacts` 已完成 T2～T6、B3a0、B3a1 普通卷纵切、B3a2 固定答题卡首建/复用与多页模板集、M2-C0 固定格式默写正式终审，以及答案图片/TXT/PDF/DOCX/XLSX 结构化、冲突预检和“采用上传答案与评分点，另存新版本”。答题卡现在要求每个实际页码的模板全部确认且题目逐项覆盖后才允许处理；客观格进入本地 OMR，填空/简答主观区先形成答案隔离、追加式手写 OCR 转写，再进入独立主观题工作台。填空题只按老师已确认答案做确定性精确匹配；简答题按确认 rubric 逐点输出覆盖、部分覆盖、遗漏、矛盾或不确定，得分建议必须引用学生答案原文。老师接受机器建议或逐槽/逐评分点人工修正后形成 grade decision，逐项人工修正必须完整覆盖当前答案槽位或评分点并由系统自动汇总总分；整题总分兼容入口不伪造逐项证据。成绩仍须整份显式发布。老师可把人工确认的填空写法沉淀为未来答案版本，并按填空槽位/简答评分点确认未来知识与能力链接；当前成绩、发布和既有证据不被重绑。默写继续走独立 policy/rubric 语义。普通试卷、答题卡和默写共用按文件自然顺序、页面重复周期、起始学号与缺交名单的归组外壳，但使用独立识别算法。三类材料已具备合成黄金集、hash-only 单会话报告、老师人工基线/AI 辅助复核耗时合同，以及把真实数据闸门、数据权利证据、机器影子结果和老师报告绑定到同一会话的 hash-only 总验收包；真实脱敏材料/provider 阈值与真实老师影子试点仍未完成，合成结果不得宣称生产准确率或减负比例。未 tag、合并、推送或发布。
 
+> 2026-07-18：M1.1 已完成结构化 rubric/评分点、ASR 与评分 run、老师逐点评审、评分点首用、疑点区间跳播、风险快捷终审、历史证据回看及隔离 `.app` G01～G05/重启核验。M1.2-1（`9f1f530`）已把老师确认的总体、流畅度和逐点评审投影为共享 `learning_evidence`，与 `decision_effects`/point review 同事务生成或回滚，并同步写 outbox/audit；草稿知识映射不会进入正式图谱。隔离 HOME 重启后 active evidence/outbox/audit 各 16 条。下一包是跨日期 retention；真实 provider、学生录音、老师耗时仍未验证。未 tag、合并、推送或发布。
+
 | 部分 | 状态 | 说明 |
 |------|------|------|
 | `crates/core` 共享内核 | ✅ 实现 + 单测 | 错误/实体/能力抽象(ports)/纯算法(归一化·拼音容错·相似度·正确率门控·间隔重复·hash) |
 | `crates/core` DB 层 | ✅ T2 共享契约 | 迁移框架、通用仓储、`artifacts/ai_runs/background_jobs/learning_evidence/outbox/audit`；任务、提交、判定、复习卡与 effect 账本支持事务/改判/漂移保护 |
 | `crates/core` 复习引擎 | ✅ 实现 + 单测 | `services/review`：pass/lapse 分账；补做通过从 stage 1 重启且保留 lapse |
-| `crates/module-recitation` M1 域 | ✅ 实现 + 单测 | 文件名解析、熟练度 A/B/C、评分编排、识别 ports、rec_contents 仓储 |
-| `crates/module-recitation` M1 服务 | ✅ 实现 + 单测 | import 去重/归档、ASR 可恢复状态机、机器建议、老师终审、补背/到期复习/日切、双向改判 |
+| `crates/module-recitation` M1 域 | ✅ M1.1 + M1.2-1 | 文件名解析、结构化 rubric/评分点、不可变 transcript/AI run、熟练度与评分编排、老师逐点评审、共享学习证据投影 |
+| `crates/module-recitation` M1 服务 | ✅ 实现 + 单测 | import 去重/归档、ASR 可恢复状态机、机器建议、老师总体/逐点终审、补背/到期复习/日切、双向改判，以及 effect/review/evidence 同事务回滚 |
 | `crates/module-knowledge` K1 | 🟡 T3 兼容底座 | 教材/知识/考点/能力稳定版本，题目/答案/rubric/link 不可变版本，C0～L4 质量闸门与旧表显式映射；导入、搜索和 UI 尚未接入 |
 | `crates/module-exam` M2 | 🟡 A1 + B0/B1 + M2.5 + B2 + B3a1/B3a2/B3a5/B3c3 + M2-C0 | 普通卷、固定答题卡多页模板集/客观主观分流、答题卡主观区追加式 OCR、填空确定性建议、简答逐评分点建议与老师主观题工作台、逐槽/逐评分点人工终审账本、固定默写正式链、五类答案版本链、评分点结构变化映射、未来答案/知识/能力版本均已落；三材料黄金合同、真实闸门、受限数据权利演练、hash-only 影子会话、老师耗时观察合同和统一试点证据总包已落。真实脱敏样本/provider 阈值和真实老师影子试点仍缺 |
 | Tauri 应用外壳 `src-tauri` | ✅ 实现 + 独立检查 | DB+迁移、M1 终审，以及 T6 工作台/接受建议/人工记分/严格批量/显式发布、T6.1b 固定卷上传归档/PDF 真拆页、Ark 题区识别 run 和答题卡主观区答案隔离手写 OCR；在线备份恢复、按 hash 归档、凭据掩码与最小 asset scope |
@@ -32,7 +34,7 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 | 音频回放 | ✅ app-managed archive | 按 hash 归档；原文件改名、重启和数据库恢复后仍可回放，原路径只兜底 |
 | ffmpeg 转码/时长探测 | ✅ 可选集成 | 装了 ffmpeg 则转 16k 单声道 wav + 探测时长，否则降级 |
 
-当前已验证：module-exam **162 tests**、workspace **291 tests**、Tauri 应用 **50 tests**（另有客观夹具 2、主观夹具 3）、两套 Clippy `-D warnings`、Tauri test/check、前端 build、老师影子报告与试点总验收包的 CLI/幂等/拒绝覆盖语义和 `git diff --check` 全通过；exam 迁移已到 `exam_0027`。新增回归证明 OCR 后只形成建议且不会自动写成绩；高置信填空精确命中可由老师接受，分歧可人工记分并要求依据；简答题只有老师接受逐点评分分析后才能按确认链接形成正式证据，人工只改总分时保持 fail-closed；任何 grade decision 都不会自动发布或提前生成学习证据。总验收包只接受真实受限模式，并要求三类机器数据集、老师抽样范围、会话和全部上游 hash 一致；它只表示证据可进入阈值复核，绝不授权发布。真实答题卡/默写/答案文件、真实 provider、阈值、真实老师并行耗时和真实脱敏数据演练仍未验证，正式库未写入。
+当前已验证：module-exam **182 tests**、module-knowledge **6 tests**、module-profile **23 tests**、module-recitation **78 tests** + e2e **1 test**、module-wrongbook **21 tests**、suite-core **74 tests**，workspace 合计 **385 tests**；Tauri 应用 **51 tests**（另有客观/主观/M1 独立夹具），两套 Clippy `-D warnings`、Tauri check、前端 build 和 `git diff --check` 全通过。M1.2 隔离 `.app` 已完成 53 条迁移、3 条总体终审、4 条逐点评审、16 条正式 evidence/outbox/audit 和同 HOME 重启核验；OCR 后只形成建议且不会自动写成绩，M1 机器评分也不会绕过老师终审形成正式证据。真实答题卡/默写/答案文件、真实 provider、阈值、真实老师并行耗时和真实脱敏数据演练仍未验证，正式库未写入。
 
 > 这些结果不等于授权发布。异模型复核、tag、合并和安装包发布仍需单独放行。
 
