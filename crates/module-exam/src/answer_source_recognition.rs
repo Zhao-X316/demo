@@ -348,6 +348,87 @@ fn validate_ready_short_answer(item: &AnswerSourceItemSpec, candidate: &Value) -
     Ok(())
 }
 
+fn validate_ready_objective_or_fill(
+    item: &AnswerSourceItemSpec,
+    candidate: &Value,
+) -> CoreResult<()> {
+    match item.question_type {
+        AnswerSourceQuestionType::Single | AnswerSourceQuestionType::Multiple => {
+            let labels = candidate
+                .get("correct_labels")
+                .and_then(Value::as_array)
+                .ok_or_else(|| CoreError::Invalid("ready 选择题必须包含正确选项数组".into()))?;
+            let labels = labels
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|label| !label.is_empty())
+                        .ok_or_else(|| CoreError::Invalid("正确选项含空值或非字符串".into()))
+                })
+                .collect::<CoreResult<Vec<_>>>()?;
+            let unique = labels.iter().collect::<BTreeSet<_>>();
+            if labels.is_empty()
+                || labels.len() != unique.len()
+                || (item.question_type == AnswerSourceQuestionType::Single && labels.len() != 1)
+            {
+                return Err(CoreError::Invalid(
+                    "ready 单选必须恰有一个正确项，多选项不得为空或重复".into(),
+                ));
+            }
+        }
+        AnswerSourceQuestionType::TrueFalse => {
+            if candidate.get("correct").and_then(Value::as_bool).is_none() {
+                return Err(CoreError::Invalid(
+                    "ready 判断题必须明确 correct 布尔值".into(),
+                ));
+            }
+        }
+        AnswerSourceQuestionType::FillBlank => {
+            let slots = candidate
+                .get("slots")
+                .and_then(Value::as_array)
+                .filter(|slots| !slots.is_empty())
+                .ok_or_else(|| CoreError::Invalid("ready 填空题必须包含答案槽位".into()))?;
+            let mut orders = BTreeSet::new();
+            let mut total = 0.0;
+            for slot in slots {
+                let order = slot
+                    .get("order_index")
+                    .and_then(Value::as_i64)
+                    .filter(|order| *order >= 0 && orders.insert(*order))
+                    .ok_or_else(|| CoreError::Invalid("填空槽位顺序非法或重复".into()))?;
+                let _ = order;
+                let answers = slot
+                    .get("canonical_answers")
+                    .and_then(Value::as_array)
+                    .filter(|answers| !answers.is_empty())
+                    .ok_or_else(|| CoreError::Invalid("填空槽位缺少标准答案".into()))?;
+                if answers
+                    .iter()
+                    .any(|answer| answer.as_str().map(str::trim).is_none_or(str::is_empty))
+                {
+                    return Err(CoreError::Invalid("填空标准答案含空值或非字符串".into()));
+                }
+                let max_score = slot
+                    .get("max_score")
+                    .and_then(Value::as_f64)
+                    .filter(|score| score.is_finite() && *score > 0.0)
+                    .ok_or_else(|| CoreError::Invalid("填空槽位必须明确正分值".into()))?;
+                total += max_score;
+            }
+            if (total - item.max_score).abs() > 0.000_001 {
+                return Err(CoreError::Invalid(
+                    "ready 填空槽位分值之和必须等于题目总分".into(),
+                ));
+            }
+        }
+        AnswerSourceQuestionType::ShortAnswer => {}
+    }
+    Ok(())
+}
+
 impl AnswerSourceRecognitionOutput {
     pub fn validate_against(&self, request: &AnswerSourceRecognitionRequest<'_>) -> CoreResult<()> {
         request.validate()?;
@@ -395,6 +476,8 @@ impl AnswerSourceRecognitionOutput {
                     .ok_or_else(|| CoreError::Invalid("答案结构化题目身份不存在".into()))?;
                 if item.question_type == AnswerSourceQuestionType::ShortAnswer {
                     validate_ready_short_answer(item, &entry.answer_json)?;
+                } else {
+                    validate_ready_objective_or_fill(item, &entry.answer_json)?;
                 }
             }
             match request.source_format {
@@ -749,5 +832,52 @@ mod tests {
             }
         ]);
         output.validate_against(&request).unwrap();
+    }
+
+    #[test]
+    fn ready_fill_blank_requires_scored_slots_with_exact_total() {
+        let items = vec![AnswerSourceItemSpec {
+            assessment_item_id: 31,
+            order_index: 0,
+            question_no: "1".into(),
+            question_type: AnswerSourceQuestionType::FillBlank,
+            stem: "《南京条约》签订于____年。".into(),
+            max_score: 2.0,
+        }];
+        let request = request(&items);
+        let mut output = AnswerSourceRecognitionOutput {
+            schema_version: 1,
+            ingest_batch_id: 7,
+            source_artifact_id: 9,
+            source_artifact_sha256: request.source_artifact_sha256.into(),
+            input_hash: request.input_hash().unwrap(),
+            descriptor: AnswerSourceRecognizerDescriptor {
+                provider: "fixture".into(),
+                model_name: "fixture".into(),
+                model_version: "v1".into(),
+                config_version: "v1".into(),
+                rule_version: "v1".into(),
+            },
+            state: AnswerSourceState::Ready,
+            entries: vec![AnswerSourceEntry {
+                assessment_item_id: 31,
+                answer_json: serde_json::json!({
+                    "schema_version":1,
+                    "slots":[{
+                        "order_index":0,
+                        "canonical_answers":["1842"]
+                    }]
+                }),
+                source_anchor: serde_json::json!({"schema_version":1,"line":1}),
+                confidence: 0.99,
+            }],
+            confidence: 0.99,
+            issue_codes: vec![],
+        };
+        assert!(output.validate_against(&request).is_err());
+        output.entries[0].answer_json["slots"][0]["max_score"] = serde_json::json!(2.0);
+        output.validate_against(&request).unwrap();
+        output.entries[0].answer_json["slots"][0]["max_score"] = serde_json::json!(1.0);
+        assert!(output.validate_against(&request).is_err());
     }
 }

@@ -433,6 +433,19 @@ pub fn create_answer_key_version(
     conn: &Connection,
     input: &NewAnswerKeyVersion<'_>,
 ) -> CoreResult<VersionRef> {
+    let tx = conn.unchecked_transaction()?;
+    let created = create_answer_key_version_in_transaction(&tx, input)?;
+    tx.commit()?;
+    Ok(created)
+}
+
+/// 在调用方持有的事务内创建答案版本与槽位。
+///
+/// 用于把“老师确认答案、创建评价规则、质量晋级和审计记录”保持为一个原子操作。
+pub fn create_answer_key_version_in_transaction(
+    conn: &Connection,
+    input: &NewAnswerKeyVersion<'_>,
+) -> CoreResult<VersionRef> {
     validate_schema_object(input.answer_json, "标准答案")?;
     if input.revision <= 0 || !matches!(input.state, "draft" | "confirmed" | "retired") {
         return Err(CoreError::Invalid("答案 revision/state 非法".into()));
@@ -452,8 +465,7 @@ pub fn create_answer_key_version(
     let public_id = ids::new_public_id();
     let created_at = time::utc_now_rfc3339();
     let confirmed_at = (input.state == "confirmed").then(|| created_at.clone());
-    let tx = conn.unchecked_transaction()?;
-    tx.execute(
+    conn.execute(
         "INSERT INTO k1_answer_key_versions
          (public_id, question_version_id, revision, answer_json, state,
           supersedes_answer_key_id, created_at, confirmed_by, confirmed_at)
@@ -470,9 +482,9 @@ pub fn create_answer_key_version(
             confirmed_at.as_deref(),
         ),
     )?;
-    let answer_key_id = tx.last_insert_rowid();
+    let answer_key_id = conn.last_insert_rowid();
     for slot in input.slots {
-        tx.execute(
+        conn.execute(
             "INSERT INTO k1_answer_slots
              (public_id, stable_id, answer_key_version_id, order_index,
               canonical_answers_json, normalization_rules_json, max_score, created_at)
@@ -491,7 +503,6 @@ pub fn create_answer_key_version(
             ),
         )?;
     }
-    tx.commit()?;
     Ok(VersionRef {
         id: answer_key_id,
         public_id,
@@ -521,6 +532,17 @@ pub struct NewRubricVersion<'a> {
 }
 
 pub fn create_rubric_version(
+    conn: &Connection,
+    input: &NewRubricVersion<'_>,
+) -> CoreResult<VersionRef> {
+    let tx = conn.unchecked_transaction()?;
+    let created = create_rubric_version_in_transaction(&tx, input)?;
+    tx.commit()?;
+    Ok(created)
+}
+
+/// 在调用方持有的事务内创建 rubric 与评分点。
+pub fn create_rubric_version_in_transaction(
     conn: &Connection,
     input: &NewRubricVersion<'_>,
 ) -> CoreResult<VersionRef> {
@@ -555,8 +577,7 @@ pub fn create_rubric_version(
     let public_id = ids::new_public_id();
     let created_at = time::utc_now_rfc3339();
     let confirmed_at = (input.state == "confirmed").then(|| created_at.clone());
-    let tx = conn.unchecked_transaction()?;
-    tx.execute(
+    conn.execute(
         "INSERT INTO k1_rubric_versions
          (public_id, question_version_id, revision, max_score, state, supersedes_rubric_id,
           created_at, confirmed_by, confirmed_at)
@@ -573,9 +594,9 @@ pub fn create_rubric_version(
             confirmed_at.as_deref(),
         ),
     )?;
-    let rubric_id = tx.last_insert_rowid();
+    let rubric_id = conn.last_insert_rowid();
     for point in input.points {
-        tx.execute(
+        conn.execute(
             "INSERT INTO k1_rubric_points
              (public_id, stable_id, rubric_version_id, order_index, canonical_text,
               allowed_paraphrases_json, required_concepts_json, max_score, created_at)
@@ -596,7 +617,6 @@ pub fn create_rubric_version(
             ),
         )?;
     }
-    tx.commit()?;
     Ok(VersionRef {
         id: rubric_id,
         public_id,
@@ -844,6 +864,26 @@ pub fn promote_question_version(
     verified_by: &str,
     reason: Option<&str>,
 ) -> CoreResult<QuestionVersion> {
+    let tx = conn.unchecked_transaction()?;
+    let promoted = promote_question_version_in_transaction(
+        &tx,
+        question_version_id,
+        target_quality,
+        verified_by,
+        reason,
+    )?;
+    tx.commit()?;
+    Ok(promoted)
+}
+
+/// 在调用方持有的事务内通过质量闸门晋级。
+pub fn promote_question_version_in_transaction(
+    conn: &Connection,
+    question_version_id: i64,
+    target_quality: &str,
+    verified_by: &str,
+    reason: Option<&str>,
+) -> CoreResult<QuestionVersion> {
     required(verified_by, "质量确认人")?;
     let target_rank = quality_rank(target_quality)
         .ok_or_else(|| CoreError::Invalid("目标质量等级非法".into()))?;
@@ -886,14 +926,13 @@ pub fn promote_question_version(
     }
 
     let verified_at = time::utc_now_rfc3339();
-    let tx = conn.unchecked_transaction()?;
-    let revision: i64 = tx.query_row(
+    let revision: i64 = conn.query_row(
         "SELECT COALESCE(MAX(revision), 0) + 1 FROM k1_question_quality_events
          WHERE question_version_id=?1",
         [question_version_id],
         |row| row.get(0),
     )?;
-    tx.execute(
+    conn.execute(
         "INSERT INTO k1_question_quality_events
          (public_id, question_version_id, revision, from_quality, to_quality,
           from_state, to_state, reason, verified_by, verified_at, created_at)
@@ -910,11 +949,10 @@ pub fn promote_question_version(
             &verified_at,
         ),
     )?;
-    tx.execute(
+    conn.execute(
         "UPDATE k1_question_versions SET quality_level=?1, state='published' WHERE id=?2",
         (target_quality, question_version_id),
     )?;
-    tx.commit()?;
     get_question_version(conn, question_version_id)?
         .ok_or_else(|| CoreError::NotFound("晋级后的题目版本".into()))
 }

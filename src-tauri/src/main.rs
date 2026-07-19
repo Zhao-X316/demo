@@ -17,6 +17,7 @@ mod dictation_provider;
 mod dictation_run;
 mod exam_commands;
 mod exam_intake;
+mod knowledge_answer_run;
 mod knowledge_commands;
 mod knowledge_source_provider;
 mod knowledge_source_run;
@@ -148,6 +149,10 @@ fn main() {
             knowledge_commands::k1_source_inbox,
             knowledge_commands::k1_source_accept,
             knowledge_commands::k1_source_discard,
+            knowledge_commands::k1_answer_targets,
+            knowledge_commands::k1_answer_import_analyze,
+            knowledge_commands::k1_answer_inbox,
+            knowledge_commands::k1_answer_confirm,
             exam_commands::kp_list,
             exam_commands::kp_create,
             exam_commands::kp_rename,

@@ -27,6 +27,10 @@ static MIGRATIONS: &[Migration] = &[
         id: "k1_0004",
         sql: include_str!("../migrations/0004_source_documents.sql"),
     },
+    Migration {
+        id: "k1_0005",
+        sql: include_str!("../migrations/0005_answer_sources.sql"),
+    },
 ];
 
 pub fn knowledge_migrations() -> &'static [Migration] {

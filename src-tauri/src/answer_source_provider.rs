@@ -17,8 +17,8 @@ use crate::secrets::VolcanoCreds;
 use crate::vlm::{ARK_URL, DEFAULT_MODEL};
 
 const MODEL_VERSION: &str = "ark-chat-completions-v3";
-const CONFIG_VERSION: &str = "answer-source-image-text-pdf-office-v3";
-const RULE_VERSION: &str = "answer-source-structured-json-source-anchor-v3";
+const CONFIG_VERSION: &str = "answer-source-image-text-pdf-office-v4";
+const RULE_VERSION: &str = "answer-source-structured-json-source-anchor-v4";
 
 pub struct ArkAnswerSourceRecognizer {
     api_key: String,
@@ -88,7 +88,8 @@ fn build_prompt(request: &AnswerSourceRecognitionRequest<'_>) -> String {
          entries 为 [{{assessment_item_id,answer_json,source_anchor,confidence}}]；\n\
          confidence 为 0~1；issue_codes 为字符串数组。\n\
          answer_json 必须带 schema_version=1：单选/多选使用 correct_labels 字符串数组；\n\
-         判断题使用 correct 布尔值；填空使用 slots 数组，每项含 order_index、canonical_answers，资料明确列出同义写法时可加 accepted_variants；\n\
+         判断题使用 correct 布尔值；填空使用 slots 数组，每项含 order_index、canonical_answers、max_score，资料明确列出同义写法时可加 accepted_variants；\n\
+         填空各槽位分值之和必须等于题目总分；\n\
          简答使用 reference_answer 与 rubric_points 数组；每个评分点必须含 order_index、canonical_text、max_score，\n\
          可选 allowed_paraphrases 与 required_concepts 字符串数组，评分点分值之和必须等于题目总分。source_anchor 必须带 schema_version=1，\n\
          图片/PDF 写真实的 page（从1开始）和 region_hint，文本/Word/Excel 写 line/quote。不得新增清单外题目，不得根据题干猜答案，\n\
