@@ -11,10 +11,10 @@ mod asr;
 mod audio;
 mod backup;
 mod commands;
+mod diagnostics;
 mod dictation_materialization;
 mod dictation_provider;
 mod dictation_run;
-mod diagnostics;
 mod exam_commands;
 mod exam_intake;
 mod learning_commands;
@@ -109,6 +109,7 @@ fn main() {
             learning_commands::wrongbook_statistics,
             learning_commands::create_wrongbook_report_snapshot,
             learning_commands::write_wrongbook_report_snapshot,
+            learning_commands::list_profile_scope_options,
             learning_commands::preview_student_profile,
             learning_commands::generate_student_profile,
             learning_commands::latest_student_profile,

@@ -26,6 +26,7 @@ import {
   voidClassTeachingEvent,
   writeClassProfileExportSnapshot,
 } from "../api/classDashboard";
+import { loadProfileScopeOptions, ProfileScopeOption } from "../api/learning";
 import { Class, classesList } from "../api/manage";
 
 interface Props {
@@ -151,6 +152,9 @@ export default function ClassDashboard({ onNavigate, onOpenLearning }: Props) {
   const [refreshTick, setRefreshTick] = useState(0);
   const [profileRangeStart, setProfileRangeStart] = useState(() => daysBefore(localDate(), 29));
   const [profileRangeEnd, setProfileRangeEnd] = useState(localDate);
+  const [profileScopeOptions, setProfileScopeOptions] = useState<ProfileScopeOption[]>([]);
+  const [profileScopeSelectorKey, setProfileScopeSelectorKey] =
+    useState("auto_evidence_maps");
   const [profilePreview, setProfilePreview] = useState<ClassProfilePreview | null>(null);
   const [profileSnapshot, setProfileSnapshot] = useState<ClassProfileSnapshot | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
@@ -172,6 +176,31 @@ export default function ClassDashboard({ onNavigate, onOpenLearning }: Props) {
     rangeEnd: localDate(),
     note: "",
   }));
+  const selectedProfileScope = useMemo(
+    () => profileScopeOptions.find(
+      (item) => item.selector_key === profileScopeSelectorKey,
+    ) ?? profileScopeOptions[0] ?? null,
+    [profileScopeOptions, profileScopeSelectorKey],
+  );
+
+  useEffect(() => {
+    let current = true;
+    loadProfileScopeOptions()
+      .then((items) => {
+        if (!current) return;
+        setProfileScopeOptions(items);
+        setProfileScopeSelectorKey((selected) =>
+          items.some((item) => item.selector_key === selected)
+            ? selected
+            : items[0]?.selector_key ?? "auto_evidence_maps");
+      })
+      .catch((reason) => {
+        if (current) setProfileError(String(reason));
+      });
+    return () => {
+      current = false;
+    };
+  }, []);
 
   useEffect(() => {
     classesList()
@@ -297,6 +326,8 @@ export default function ClassDashboard({ onNavigate, onOpenLearning }: Props) {
         classId,
         rangeStart: profileRangeStart,
         rangeEnd: profileRangeEnd,
+        scopeSelectorKind: selectedProfileScope?.selector_kind ?? "auto_evidence_maps",
+        scopeSelectorPublicId: selectedProfileScope?.selector_public_id ?? null,
       });
       setProfilePreview(value);
     } catch (reason) {
@@ -316,6 +347,8 @@ export default function ClassDashboard({ onNavigate, onOpenLearning }: Props) {
         classId,
         rangeStart: profileRangeStart,
         rangeEnd: profileRangeEnd,
+        scopeSelectorKind: selectedProfileScope?.selector_kind ?? "auto_evidence_maps",
+        scopeSelectorPublicId: selectedProfileScope?.selector_public_id ?? null,
         expectedSourceWatermark: profilePreview.source_watermark,
       });
       setProfileSnapshot(value);
@@ -577,6 +610,24 @@ export default function ClassDashboard({ onNavigate, onOpenLearning }: Props) {
               </div>
               <div className="class-profile-scope">
                 <label>
+                  <span>教材范围</span>
+                  <select
+                    aria-label="班级掌握教材范围"
+                    value={profileScopeSelectorKey}
+                    onChange={(event) => {
+                      setProfileScopeSelectorKey(event.target.value);
+                      setProfilePreview(null);
+                    }}
+                  >
+                    {profileScopeOptions.map((option) => (
+                      <option value={option.selector_key} key={option.selector_key}>
+                        {option.node_type === "textbook" ? "本册 · " : ""}
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
                   <span>开始</span>
                   <input
                     type="date"
@@ -610,7 +661,10 @@ export default function ClassDashboard({ onNavigate, onOpenLearning }: Props) {
               <div className="class-profile-preview">
                 <div>
                   <b>生成前确认</b>
-                  <span>{profilePreview.range_start} 至 {profilePreview.range_end}</span>
+                  <span>
+                    {profilePreview.range_start} 至 {profilePreview.range_end} ·
+                    {profilePreview.scope_selection.path}
+                  </span>
                 </div>
                 <div className="class-profile-preview-counts">
                   <span>有当前快照 <b>{profilePreview.counts.snapshot_student_count}/{profilePreview.counts.total_student_count}</b> 人</span>
@@ -687,7 +741,10 @@ export default function ClassDashboard({ onNavigate, onOpenLearning }: Props) {
                   </div>
                   <div>
                     <span>数据范围</span>
-                    <b>{profileSnapshot.range_start} 至 {profileSnapshot.range_end}</b>
+                    <b>
+                      {profileSnapshot.range_start} 至 {profileSnapshot.range_end}
+                      · {profileSnapshot.scope_selection.path}
+                    </b>
                   </div>
                 </div>
 

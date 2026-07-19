@@ -15,7 +15,9 @@ import {
   loadWrongbookStatistics,
   generateStudentProfile,
   loadLatestStudentProfile,
+  loadProfileScopeOptions,
   previewStudentProfile,
+  ProfileScopeOption,
   ProfileNodeMetric,
   ProfileNodeStatus,
   ProfileRecitationSummary,
@@ -708,12 +710,39 @@ function StudentProfilePanel({
   const [studentId, setStudentId] = useState<number | null>(students[0]?.id ?? null);
   const [rangeStart, setRangeStart] = useState(shiftShanghaiDate(today, -89));
   const [rangeEnd, setRangeEnd] = useState(today);
+  const [scopeOptions, setScopeOptions] = useState<ProfileScopeOption[]>([]);
+  const [scopeSelectorKey, setScopeSelectorKey] = useState("auto_evidence_maps");
   const [preview, setPreview] = useState<StudentProfilePreview | null>(null);
   const [snapshot, setSnapshot] = useState<StudentProfileSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [profileError, setProfileError] = useState("");
   const [generatedRefreshToken, setGeneratedRefreshToken] = useState(0);
+  const selectedScope = useMemo(
+    () => scopeOptions.find((item) => item.selector_key === scopeSelectorKey)
+      ?? scopeOptions[0]
+      ?? null,
+    [scopeOptions, scopeSelectorKey],
+  );
+
+  useEffect(() => {
+    let current = true;
+    loadProfileScopeOptions()
+      .then((items) => {
+        if (!current) return;
+        setScopeOptions(items);
+        setScopeSelectorKey((selected) =>
+          items.some((item) => item.selector_key === selected)
+            ? selected
+            : items[0]?.selector_key ?? "auto_evidence_maps");
+      })
+      .catch((reason) => {
+        if (current) setProfileError(String(reason));
+      });
+    return () => {
+      current = false;
+    };
+  }, []);
 
   useEffect(() => {
     setStudentId((current) =>
@@ -735,7 +764,14 @@ function StudentProfilePanel({
     setLoading(true);
     setProfileError("");
     Promise.all([
-      previewStudentProfile({ classId, studentId, rangeStart, rangeEnd }),
+      previewStudentProfile({
+        classId,
+        studentId,
+        rangeStart,
+        rangeEnd,
+        scopeSelectorKind: selectedScope?.selector_kind ?? "auto_evidence_maps",
+        scopeSelectorPublicId: selectedScope?.selector_public_id ?? null,
+      }),
       loadLatestStudentProfile(classId, studentId),
     ])
       .then(([nextPreview, latest]) => {
@@ -754,7 +790,15 @@ function StudentProfilePanel({
     return () => {
       current = false;
     };
-  }, [classId, externalRefreshToken, generatedRefreshToken, rangeEnd, rangeStart, studentId]);
+  }, [
+    classId,
+    externalRefreshToken,
+    generatedRefreshToken,
+    rangeEnd,
+    rangeStart,
+    selectedScope,
+    studentId,
+  ]);
 
   const generate = async () => {
     if (studentId == null || !preview?.can_generate) return;
@@ -766,6 +810,8 @@ function StudentProfilePanel({
         studentId,
         rangeStart,
         rangeEnd,
+        scopeSelectorKind: selectedScope?.selector_kind ?? "auto_evidence_maps",
+        scopeSelectorPublicId: selectedScope?.selector_public_id ?? null,
       });
       setSnapshot(generated);
       setGeneratedRefreshToken((value) => value + 1);
@@ -811,6 +857,24 @@ function StudentProfilePanel({
             </select>
           </label>
           <label>
+            <span>教材范围</span>
+            <select
+              aria-label="掌握快照教材范围"
+              value={scopeSelectorKey}
+              onChange={(event) => {
+                setScopeSelectorKey(event.target.value);
+                setPreview(null);
+              }}
+            >
+              {scopeOptions.map((option) => (
+                <option value={option.selector_key} key={option.selector_key}>
+                  {option.node_type === "textbook" ? "本册 · " : ""}
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
             <span>从</span>
             <input type="date" value={rangeStart}
               onChange={(event) => setRangeStart(event.target.value)} />
@@ -835,7 +899,10 @@ function StudentProfilePanel({
           <div className="profile-preview-head">
             <div>
               <b>生成前预览</b>
-              <span>{preview.student.student_no}号 {preview.student.name} · {preview.range_start} 至 {preview.range_end}</span>
+              <span>
+                {preview.student.student_no}号 {preview.student.name} ·
+                {preview.range_start} 至 {preview.range_end} · {preview.scope_selection.path}
+              </span>
             </div>
             <button className="primary" disabled={!preview.can_generate || generating}
               onClick={generate}>
@@ -862,7 +929,8 @@ function StudentProfilePanel({
               <span>
                 未纳入：纯机器 {preview.counts.machine_only_excluded}、
                 未映射逐点 {preview.counts.unmapped_formal_excluded}、
-                不支持的来源契约 {preview.counts.unsupported_contract_excluded}。
+                不支持的来源契约 {preview.counts.unsupported_contract_excluded}、
+                教材范围外 {preview.counts.out_of_scope_excluded}。
               </span>
             )}
             {preview.counts.teacher_overall_excluded > 0 && (
@@ -884,7 +952,8 @@ function StudentProfilePanel({
             <div>
               <b>第 {snapshot.revision} 版掌握快照</b>
               <span>
-                {snapshot.range_start} 至 {snapshot.range_end} · 数据截至 {formatTime(snapshot.evidence_cutoff_at)}
+                {snapshot.range_start} 至 {snapshot.range_end} · {snapshot.scope_selection.path}
+                · 数据截至 {formatTime(snapshot.evidence_cutoff_at)}
                 {" "}· 规则第 {snapshot.policy.revision} 版
               </span>
             </div>

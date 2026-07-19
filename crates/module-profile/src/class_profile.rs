@@ -15,7 +15,10 @@ use suite_core::domain::{hashing, ids, time};
 use suite_core::error::{CoreError, CoreResult};
 use suite_core::models::AuditActorType;
 
-use crate::profile::{self, ProfileNodeMetric, ProfileStudent, StudentProfileSnapshot};
+use crate::profile::{
+    self, ProfileNodeMetric, ProfileScopeSelectionInput, ProfileScopeSelectionView, ProfileStudent,
+    StudentProfileSnapshot,
+};
 
 pub const CLASS_PROFILE_SCHEMA_VERSION: i64 = 1;
 pub const CLASS_PROFILE_RULE_VERSION: &str = "m6.1-latest-student-snapshots-v1";
@@ -31,6 +34,14 @@ pub struct ClassProfileScope<'a> {
 #[derive(Debug, Clone)]
 pub struct GenerateClassProfileInput<'a> {
     pub scope: ClassProfileScope<'a>,
+    pub expected_source_watermark: &'a str,
+    pub confirmed_by: &'a str,
+}
+
+#[derive(Debug, Clone)]
+pub struct GenerateScopedClassProfileInput<'a> {
+    pub scope: ClassProfileScope<'a>,
+    pub selection: ProfileScopeSelectionInput<'a>,
     pub expected_source_watermark: &'a str,
     pub confirmed_by: &'a str,
 }
@@ -75,6 +86,7 @@ pub struct ClassProfilePreview {
     pub class: ProfileClass,
     pub range_start: String,
     pub range_end: String,
+    pub scope_selection: ProfileScopeSelectionView,
     pub policy: ClassProfilePolicy,
     pub counts: ClassProfilePreviewCounts,
     pub source_watermark: String,
@@ -187,6 +199,7 @@ pub struct ClassProfileSnapshot {
     pub range_start: String,
     pub range_end: String,
     pub scope_kind: String,
+    pub scope_selection: ProfileScopeSelectionView,
     pub evidence_cutoff_at: String,
     pub policy: ClassProfilePolicy,
     pub source_watermark: String,
@@ -219,6 +232,7 @@ struct ValidatedClassScope {
     students: Vec<ProfileStudent>,
     range_start: NaiveDate,
     range_end: NaiveDate,
+    selection: ProfileScopeSelectionView,
 }
 
 #[derive(Debug, Clone)]
@@ -307,6 +321,7 @@ fn student_no_parts(value: &str) -> (u8, i64, String) {
 fn validate_scope(
     conn: &Connection,
     scope: &ClassProfileScope<'_>,
+    selection: Option<&ProfileScopeSelectionInput<'_>>,
 ) -> CoreResult<ValidatedClassScope> {
     let range_start = parse_date(scope.range_start, "开始日期")?;
     let range_end = parse_date(scope.range_end, "结束日期")?;
@@ -357,6 +372,13 @@ fn validate_scope(
         students,
         range_start,
         range_end,
+        selection: profile::resolve_profile_scope_selection(
+            conn,
+            selection.unwrap_or(&ProfileScopeSelectionInput {
+                selector_kind: "auto_evidence_maps",
+                selector_public_id: None,
+            }),
+        )?,
     })
 }
 
@@ -392,7 +414,7 @@ fn load_student_inputs(
     let expected_start = validated.range_start.to_string();
     let expected_end = validated.range_end.to_string();
     for student in &validated.students {
-        let latest = conn
+        let latest_any = conn
             .query_row(
                 "SELECT id,public_id,range_start,range_end
                  FROM profile_snapshots
@@ -409,7 +431,7 @@ fn load_student_inputs(
                 },
             )
             .optional()?;
-        let Some((snapshot_id, public_id, range_start, range_end)) = latest else {
+        let Some((latest_id, latest_public_id, latest_start, latest_end)) = latest_any else {
             result.push(StudentInput {
                 student: student.clone(),
                 student_snapshot_id: None,
@@ -420,19 +442,41 @@ fn load_student_inputs(
             });
             continue;
         };
-        if range_start != expected_start || range_end != expected_end {
+        let matching = conn
+            .query_row(
+                "SELECT id,public_id
+                 FROM profile_snapshots
+                 WHERE class_id=?1 AND student_id=?2
+                   AND range_start=?3 AND range_end=?4
+                   AND COALESCE(
+                     json_extract(scope_json,'$.selection.selector_key'),
+                     'auto_evidence_maps'
+                   )=?5
+                 ORDER BY revision DESC LIMIT 1",
+                params![
+                    validated.class.id,
+                    student.id,
+                    expected_start,
+                    expected_end,
+                    validated.selection.selector_key
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((snapshot_id, public_id)) = matching else {
             result.push(StudentInput {
                 student: student.clone(),
-                student_snapshot_id: Some(snapshot_id),
-                student_snapshot_public_id: Some(public_id),
+                student_snapshot_id: Some(latest_id),
+                student_snapshot_public_id: Some(latest_public_id),
                 snapshot: None,
                 inclusion_status: "scope_mismatch".into(),
                 detail: format!(
-                    "最新个人快照范围为 {range_start} 至 {range_end}，与本次班级范围不一致。"
+                    "最新个人快照范围为 {latest_start} 至 {latest_end}；未找到同日期且教材范围为“{}”的个人快照。",
+                    validated.selection.path
                 ),
             });
             continue;
-        }
+        };
         let snapshot = profile::get_student_profile(conn, &public_id)?
             .ok_or_else(|| CoreError::Db("个人快照索引存在但无法读取".into()))?;
         if snapshot.is_stale {
@@ -454,7 +498,7 @@ fn load_student_inputs(
             student_snapshot_public_id: Some(public_id),
             snapshot: Some(snapshot),
             inclusion_status: "included".into(),
-            detail: "已纳入：最新个人快照范围一致且未过期。".into(),
+            detail: "已纳入：个人快照的日期、教材范围均一致且未过期。".into(),
         });
     }
     Ok(result)
@@ -660,6 +704,7 @@ fn source_watermark(
         "class_id": validated.class.id,
         "range_start": validated.range_start.to_string(),
         "range_end": validated.range_end.to_string(),
+        "scope_selection": &validated.selection,
         "policy_public_id": policy.public_id,
         "policy_revision": policy.revision,
         "student_inputs": rows
@@ -669,8 +714,12 @@ fn source_watermark(
     Ok(hashing::sha256_hex(&bytes))
 }
 
-fn compute(conn: &Connection, scope: &ClassProfileScope<'_>) -> CoreResult<Computation> {
-    let validated = validate_scope(conn, scope)?;
+fn compute_with_selection(
+    conn: &Connection,
+    scope: &ClassProfileScope<'_>,
+    selection: Option<&ProfileScopeSelectionInput<'_>>,
+) -> CoreResult<Computation> {
+    let validated = validate_scope(conn, scope, selection)?;
     let (policy_id, policy) = active_policy(conn)?;
     let inputs = load_student_inputs(conn, &validated)?;
     let mut targets = BTreeSet::new();
@@ -775,7 +824,15 @@ pub fn preview_class_profile(
     conn: &Connection,
     scope: &ClassProfileScope<'_>,
 ) -> CoreResult<ClassProfilePreview> {
-    let computation = compute(conn, scope)?;
+    preview_class_profile_with_selection(conn, scope, None)
+}
+
+fn preview_class_profile_with_selection(
+    conn: &Connection,
+    scope: &ClassProfileScope<'_>,
+    selection: Option<&ProfileScopeSelectionInput<'_>>,
+) -> CoreResult<ClassProfilePreview> {
+    let computation = compute_with_selection(conn, scope, selection)?;
     let can_generate = computation.counts.snapshot_student_count > 0;
     Ok(ClassProfilePreview {
         schema_version: CLASS_PROFILE_SCHEMA_VERSION,
@@ -784,6 +841,7 @@ pub fn preview_class_profile(
         class: computation.validated.class,
         range_start: computation.validated.range_start.to_string(),
         range_end: computation.validated.range_end.to_string(),
+        scope_selection: computation.validated.selection,
         policy: computation.policy,
         counts: computation.counts,
         source_watermark: computation.source_watermark,
@@ -791,8 +849,16 @@ pub fn preview_class_profile(
         blocker: (!can_generate)
             .then(|| "所选范围没有任何最新、范围一致且未过期的个人掌握快照。".into()),
         denominator_note: "班级结论同时显示合格样本人数/全班人数；至少 3 人且覆盖全班 50% 才允许标记共同需要支持。".into(),
-        scope_note: "只使用每位启用学生最新的个人快照；范围不符、已过期或缺失均单列，不解释为薄弱。".into(),
+        scope_note: "只使用日期和教材范围完全一致且未过期的个人快照；范围不符、已过期或缺失均单列，不解释为薄弱。".into(),
     })
+}
+
+pub fn preview_scoped_class_profile(
+    conn: &Connection,
+    scope: &ClassProfileScope<'_>,
+    selection: &ProfileScopeSelectionInput<'_>,
+) -> CoreResult<ClassProfilePreview> {
+    preview_class_profile_with_selection(conn, scope, Some(selection))
 }
 
 fn payload_hash(computation: &Computation) -> CoreResult<String> {
@@ -832,6 +898,7 @@ fn payload_hash(computation: &Computation) -> CoreResult<String> {
         "class_id": computation.validated.class.id,
         "range_start": computation.validated.range_start.to_string(),
         "range_end": computation.validated.range_end.to_string(),
+        "scope_selector_key": computation.validated.selection.selector_key,
         "policy_public_id": computation.policy.public_id,
         "policy_revision": computation.policy.revision,
         "source_watermark": computation.source_watermark,
@@ -860,6 +927,7 @@ fn insert_snapshot(
     let scope_json = serde_json::json!({
         "schema_version": 1,
         "scope_kind": "latest_exact_range_student_snapshots",
+        "selection": &computation.validated.selection,
         "range_start": computation.validated.range_start.to_string(),
         "range_end": computation.validated.range_end.to_string()
     })
@@ -868,6 +936,8 @@ fn insert_snapshot(
         "schema_version": 1,
         "latest_student_snapshot_only": true,
         "exact_range_required": true,
+        "exact_textbook_scope_required": true,
+        "scope_selector_key": computation.validated.selection.selector_key,
         "non_stale_required": true,
         "missing_is_not_weak": true,
         "no_student_ranking": true
@@ -1005,22 +1075,37 @@ pub fn generate_class_profile(
     conn: &mut Connection,
     input: &GenerateClassProfileInput<'_>,
 ) -> CoreResult<ClassProfileSnapshot> {
-    required(input.confirmed_by, "确认人")?;
-    required(input.expected_source_watermark, "预览水位")?;
+    generate_class_profile_with_selection(
+        conn,
+        &input.scope,
+        None,
+        input.expected_source_watermark,
+        input.confirmed_by,
+    )
+}
+
+fn generate_class_profile_with_selection(
+    conn: &mut Connection,
+    scope: &ClassProfileScope<'_>,
+    selection: Option<&ProfileScopeSelectionInput<'_>>,
+    expected_source_watermark: &str,
+    confirmed_by: &str,
+) -> CoreResult<ClassProfileSnapshot> {
+    required(confirmed_by, "确认人")?;
+    required(expected_source_watermark, "预览水位")?;
     let tx = conn.transaction()?;
-    let computation = compute(&tx, &input.scope)?;
+    let computation = compute_with_selection(&tx, scope, selection)?;
     if computation.counts.snapshot_student_count == 0 {
         return Err(CoreError::Invalid(
             "所选范围没有可用于班级快照的当前个人快照".into(),
         ));
     }
-    if computation.source_watermark != input.expected_source_watermark {
+    if computation.source_watermark != expected_source_watermark {
         return Err(CoreError::Invalid(
             "班级名单或个人快照在预览后发生变化，请刷新预览再确认".into(),
         ));
     }
-    let (public_id, revision, generated_at) =
-        insert_snapshot(&tx, &computation, input.confirmed_by)?;
+    let (public_id, revision, generated_at) = insert_snapshot(&tx, &computation, confirmed_by)?;
     let event_payload = serde_json::json!({
         "schema_version": CLASS_PROFILE_SCHEMA_VERSION,
         "snapshot_public_id": public_id,
@@ -1028,6 +1113,7 @@ pub fn generate_class_profile(
         "revision": revision,
         "range_start": computation.validated.range_start.to_string(),
         "range_end": computation.validated.range_end.to_string(),
+        "scope_selector_key": computation.validated.selection.selector_key,
         "total_student_count": computation.counts.total_student_count,
         "snapshot_student_count": computation.counts.snapshot_student_count,
         "eligible_student_count": computation.counts.eligible_student_count
@@ -1051,7 +1137,7 @@ pub fn generate_class_profile(
         &NewAuditEvent {
             idempotency_key: &format!("profile:audit:class-snapshot:{public_id}"),
             actor_type: AuditActorType::Teacher,
-            actor_id: Some(input.confirmed_by.trim()),
+            actor_id: Some(confirmed_by.trim()),
             action: "profile.class_snapshot.generated",
             object_type: "class_profile_snapshot",
             object_id: &public_id,
@@ -1064,6 +1150,19 @@ pub fn generate_class_profile(
     tx.commit()?;
     get_class_profile(conn, &public_id)?
         .ok_or_else(|| CoreError::Db("班级掌握快照写入后无法读取".into()))
+}
+
+pub fn generate_scoped_class_profile(
+    conn: &mut Connection,
+    input: &GenerateScopedClassProfileInput<'_>,
+) -> CoreResult<ClassProfileSnapshot> {
+    generate_class_profile_with_selection(
+        conn,
+        &input.scope,
+        Some(&input.selection),
+        input.expected_source_watermark,
+        input.confirmed_by,
+    )
 }
 
 fn load_inputs(
@@ -1327,6 +1426,7 @@ struct TrendInput<'a> {
     range_start: &'a str,
     range_end: &'a str,
     policy_public_id: &'a str,
+    scope_selector_key: &'a str,
     snapshot_student_count: i64,
     eligible_student_count: i64,
     status_counts: &'a ClassProfileStudentStatusCounts,
@@ -1349,13 +1449,18 @@ fn load_comparable_trend(
              WHERE p.class_id=?1 AND p.revision<?2
                AND p.range_start=?3 AND p.range_end=?4
                AND policy.public_id=?5
+               AND COALESCE(
+                 json_extract(p.scope_json,'$.selection.selector_key'),
+                 'auto_evidence_maps'
+               )=?6
              ORDER BY p.revision DESC LIMIT 1",
             params![
                 input.class_id,
                 input.revision,
                 input.range_start,
                 input.range_end,
-                input.policy_public_id
+                input.policy_public_id,
+                input.scope_selector_key
             ],
             |row| {
                 Ok((
@@ -1398,7 +1503,8 @@ fn load_comparable_trend(
             ability_common_support_delta: None,
             previous_status_counts: None,
             current_status_counts: input.status_counts.clone(),
-            note: "暂无同班级、同日期范围且同策略的上一版快照；不跨口径拼接趋势。".into(),
+            note: "暂无同班级、同日期范围、同教材范围且同策略的上一版快照；不跨口径拼接趋势。"
+                .into(),
         });
     };
     let previous_inputs = load_inputs(conn, previous_id)?;
@@ -1427,7 +1533,7 @@ fn load_comparable_trend(
         ability_common_support_delta: Some(ability_current - ability_before),
         previous_status_counts: Some(previous_status_counts),
         current_status_counts: input.status_counts.clone(),
-        note: "仅比较同一日期范围、同一策略的两次快照刷新；分母变化会影响结果，不能据此自动宣称教学导致进步或退步。".into(),
+        note: "仅比较同一日期、同一教材范围和同一策略的两次快照刷新；分母变化会影响结果，不能据此自动宣称教学导致进步或退步。".into(),
     })
 }
 
@@ -1446,6 +1552,7 @@ pub fn get_class_profile(
                     p.knowledge_node_sample_sufficient,p.ability_node_total,
                     p.ability_node_sample_sufficient,p.state,p.payload_sha256,
                     p.generated_by,p.generated_at,p.confirmed_by,p.confirmed_at
+                    ,p.scope_json
              FROM class_profile_snapshots p
              JOIN classes c ON c.id=p.class_id
              JOIN class_profile_policy_versions policy ON policy.id=p.policy_id
@@ -1485,6 +1592,7 @@ pub fn get_class_profile(
                     row.get::<_, String>(27)?,
                     row.get::<_, String>(28)?,
                     row.get::<_, String>(29)?,
+                    row.get::<_, String>(30)?,
                 ))
             },
         )
@@ -1516,17 +1624,37 @@ pub fn get_class_profile(
         generated_at,
         confirmed_by,
         confirmed_at,
+        scope_json,
     )) = row
     else {
         return Ok(None);
     };
-    let current = compute(
+    let stored_scope_selection = serde_json::from_str::<serde_json::Value>(&scope_json)
+        .ok()
+        .and_then(|value| value.get("selection").cloned())
+        .and_then(|value| serde_json::from_value::<ProfileScopeSelectionView>(value).ok());
+    let scope_selection = match stored_scope_selection {
+        Some(selection) => selection,
+        None => profile::resolve_profile_scope_selection(
+            conn,
+            &ProfileScopeSelectionInput {
+                selector_kind: "auto_evidence_maps",
+                selector_public_id: None,
+            },
+        )?,
+    };
+    let selector_input = ProfileScopeSelectionInput {
+        selector_kind: &scope_selection.selector_kind,
+        selector_public_id: scope_selection.selector_public_id.as_deref(),
+    };
+    let current = compute_with_selection(
         conn,
         &ClassProfileScope {
             class_id,
             range_start: &range_start,
             range_end: &range_end,
         },
+        Some(&selector_input),
     )?;
     let policy_stale = current.policy.public_id != policy.public_id;
     let source_stale = current.source_watermark != source_watermark;
@@ -1550,6 +1678,7 @@ pub fn get_class_profile(
             range_start: &range_start,
             range_end: &range_end,
             policy_public_id: &policy.public_id,
+            scope_selector_key: &scope_selection.selector_key,
             snapshot_student_count,
             eligible_student_count,
             status_counts: &student_status_counts,
@@ -1570,6 +1699,7 @@ pub fn get_class_profile(
         range_start,
         range_end,
         scope_kind,
+        scope_selection,
         evidence_cutoff_at,
         policy,
         source_watermark,
@@ -1636,6 +1766,7 @@ mod tests {
         students: Vec<i64>,
         map_public_id: String,
         knowledge: String,
+        curriculum: String,
     }
 
     fn setup() -> Fixture {
@@ -1684,13 +1815,23 @@ mod tests {
         )
         .unwrap();
         let map_id = conn.last_insert_rowid();
+        let curriculum = "curriculum-1".to_string();
+        conn.execute(
+            "INSERT INTO k1_curriculum_nodes
+              (public_id,stable_id,knowledge_map_id,node_type,title,order_index,state,created_at)
+             VALUES (?1,'curriculum-stable-1',?2,'unit','第一单元',1,'active',
+                     '2026-07-01T00:00:00.000Z')",
+            (&curriculum, map_id),
+        )
+        .unwrap();
+        let curriculum_id = conn.last_insert_rowid();
         let knowledge = "knowledge-1".to_string();
         conn.execute(
             "INSERT INTO k1_knowledge_nodes
-              (public_id,stable_id,knowledge_map_id,title,order_index,state,created_at)
-             VALUES (?1,'stable-1',?2,'洋务运动失败原因',1,'active',
+              (public_id,stable_id,knowledge_map_id,curriculum_node_id,title,order_index,state,created_at)
+             VALUES (?1,'stable-1',?2,?3,'洋务运动失败原因',1,'active',
                      '2026-07-01T00:00:00.000Z')",
-            (&knowledge, map_id),
+            (&knowledge, map_id, curriculum_id),
         )
         .unwrap();
         Fixture {
@@ -1699,6 +1840,7 @@ mod tests {
             students,
             map_public_id,
             knowledge,
+            curriculum,
         }
     }
 
@@ -1778,6 +1920,49 @@ mod tests {
         .unwrap()
     }
 
+    fn generate_personal_scoped(
+        fixture: &mut Fixture,
+        student_id: i64,
+        prefix: &str,
+        value: f64,
+        curriculum_public_id: &str,
+    ) -> StudentProfileSnapshot {
+        for (index, date) in [
+            "2026-07-05T00:00:00.000Z",
+            "2026-07-12T00:00:00.000Z",
+            "2026-07-20T00:00:00.000Z",
+        ]
+        .iter()
+        .enumerate()
+        {
+            add_evidence(
+                fixture,
+                student_id,
+                &format!("{prefix}-{index}"),
+                &format!("{prefix}-q{index}"),
+                date,
+                value,
+            );
+        }
+        profile::generate_scoped_student_profile(
+            &mut fixture.conn,
+            &profile::GenerateScopedStudentProfileInput {
+                scope: profile::StudentProfileScope {
+                    class_id: fixture.class_id,
+                    student_id,
+                    range_start: "2026-07-01",
+                    range_end: "2026-07-31",
+                },
+                selection: ProfileScopeSelectionInput {
+                    selector_kind: "curriculum_node",
+                    selector_public_id: Some(curriculum_public_id),
+                },
+                confirmed_by: "teacher-1",
+            },
+        )
+        .unwrap()
+    }
+
     fn scope(fixture: &Fixture) -> ClassProfileScope<'_> {
         ClassProfileScope {
             class_id: fixture.class_id,
@@ -1840,6 +2025,56 @@ mod tests {
         assert_eq!(preview.counts.scope_mismatch_count, 1);
         assert_eq!(preview.counts.stale_snapshot_count, 1);
         assert_eq!(preview.counts.missing_snapshot_count, 1);
+    }
+
+    #[test]
+    fn class_scope_only_uses_personal_snapshots_with_exact_textbook_scope() {
+        let mut fixture = setup();
+        let first = fixture.students[0];
+        let second = fixture.students[1];
+        let curriculum = fixture.curriculum.clone();
+        generate_personal_scoped(&mut fixture, first, "scoped", 1.0, &curriculum);
+        generate_personal(
+            &mut fixture,
+            second,
+            "automatic",
+            1.0,
+            "2026-07-01",
+            "2026-07-31",
+        );
+        let selection = ProfileScopeSelectionInput {
+            selector_kind: "curriculum_node",
+            selector_public_id: Some(&curriculum),
+        };
+        let preview =
+            preview_scoped_class_profile(&fixture.conn, &scope(&fixture), &selection).unwrap();
+        assert_eq!(preview.counts.snapshot_student_count, 1);
+        assert_eq!(preview.counts.scope_mismatch_count, 1);
+        assert_eq!(preview.counts.missing_snapshot_count, 2);
+        assert_eq!(
+            preview.scope_selection.selector_public_id.as_deref(),
+            Some(curriculum.as_str())
+        );
+        let snapshot = generate_scoped_class_profile(
+            &mut fixture.conn,
+            &GenerateScopedClassProfileInput {
+                scope: ClassProfileScope {
+                    class_id: fixture.class_id,
+                    range_start: "2026-07-01",
+                    range_end: "2026-07-31",
+                },
+                selection,
+                expected_source_watermark: &preview.source_watermark,
+                confirmed_by: "teacher-1",
+            },
+        )
+        .unwrap();
+        assert_eq!(snapshot.snapshot_student_count, 1);
+        assert_eq!(
+            snapshot.scope_selection.selector_public_id.as_deref(),
+            Some(curriculum.as_str())
+        );
+        assert!(!snapshot.is_stale);
     }
 
     #[test]

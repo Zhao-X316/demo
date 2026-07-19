@@ -399,6 +399,7 @@ export interface ProfilePreviewCounts {
   teacher_overall_excluded: number;
   unmapped_formal_excluded: number;
   unsupported_contract_excluded: number;
+  out_of_scope_excluded: number;
   referenced_knowledge_map_count: number;
 }
 
@@ -455,6 +456,32 @@ export interface ProfileWrongbookSummary {
   facts: ProfileWrongbookFactView[];
 }
 
+export interface ProfileScopeOption {
+  selector_kind: "auto_evidence_maps" | "knowledge_map" | "curriculum_node";
+  selector_public_id: string | null;
+  selector_key: string;
+  label: string;
+  detail: string;
+  node_type: string | null;
+  knowledge_map_public_id: string | null;
+  textbook_edition_public_id: string | null;
+  knowledge_node_count: number;
+}
+
+export interface ProfileScopeSelectionView {
+  selector_kind: "auto_evidence_maps" | "knowledge_map" | "curriculum_node";
+  selector_public_id: string | null;
+  selector_key: string;
+  title: string;
+  path: string;
+  node_type: string | null;
+  knowledge_map_public_id: string | null;
+  knowledge_map_version: string | null;
+  textbook_edition_public_id: string | null;
+  textbook_title: string | null;
+  knowledge_node_count: number;
+}
+
 export interface StudentProfilePreview {
   schema_version: number;
   rule_version: string;
@@ -462,6 +489,7 @@ export interface StudentProfilePreview {
   student: ProfileStudent;
   range_start: string;
   range_end: string;
+  scope_selection: ProfileScopeSelectionView;
   policy: ProfilePolicy;
   counts: ProfilePreviewCounts;
   recitation_summary: ProfileRecitationSummary;
@@ -581,6 +609,7 @@ export interface StudentProfileSnapshot {
   range_start: string;
   range_end: string;
   scope_kind: string;
+  scope_selection: ProfileScopeSelectionView;
   evidence_cutoff_at: string;
   policy: ProfilePolicy;
   source_watermark: string;
@@ -612,7 +641,12 @@ export interface StudentProfileScopeInput {
   studentId: number;
   rangeStart: string;
   rangeEnd: string;
+  scopeSelectorKind?: ProfileScopeOption["selector_kind"];
+  scopeSelectorPublicId?: string | null;
 }
+
+export const loadProfileScopeOptions = () =>
+  call<ProfileScopeOption[]>("list_profile_scope_options");
 
 export const previewStudentProfile = (input: StudentProfileScopeInput) =>
   call<StudentProfilePreview>("preview_student_profile", { input });

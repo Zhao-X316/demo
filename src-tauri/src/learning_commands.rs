@@ -13,11 +13,11 @@ use module_profile::class_exports::{
 };
 use module_profile::class_profile::{
     self as class_profile_service, ClassProfilePreview, ClassProfileScope, ClassProfileSnapshot,
-    GenerateClassProfileInput,
+    GenerateScopedClassProfileInput,
 };
 use module_profile::profile::{
-    self, GenerateStudentProfileInput, StudentProfilePreview, StudentProfileScope,
-    StudentProfileSnapshot,
+    self, GenerateScopedStudentProfileInput, ProfileScopeOption, ProfileScopeSelectionInput,
+    StudentProfilePreview, StudentProfileScope, StudentProfileSnapshot,
 };
 use module_profile::teacher_assessments::{
     self, ProfileTeacherAssessment, SaveProfileTeacherAssessmentInput,
@@ -125,6 +125,8 @@ pub struct StudentProfileScopeRequest {
     student_id: i64,
     range_start: String,
     range_end: String,
+    scope_selector_kind: Option<String>,
+    scope_selector_public_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -143,6 +145,8 @@ pub struct ClassProfileScopeRequest {
     class_id: i64,
     range_start: String,
     range_end: String,
+    scope_selector_kind: Option<String>,
+    scope_selector_public_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -151,6 +155,8 @@ pub struct GenerateClassProfileRequest {
     class_id: i64,
     range_start: String,
     range_end: String,
+    scope_selector_kind: Option<String>,
+    scope_selector_public_id: Option<String>,
     expected_source_watermark: String,
 }
 
@@ -397,18 +403,34 @@ pub fn write_wrongbook_report_snapshot(
 }
 
 #[tauri::command]
+pub fn list_profile_scope_options(
+    state: State<'_, AppState>,
+) -> Result<Vec<ProfileScopeOption>, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    profile::list_profile_scope_options(&connection).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn preview_student_profile(
     state: State<'_, AppState>,
     input: StudentProfileScopeRequest,
 ) -> Result<StudentProfilePreview, String> {
     let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
-    profile::preview_student_profile(
+    let selector_kind = input
+        .scope_selector_kind
+        .as_deref()
+        .unwrap_or("auto_evidence_maps");
+    profile::preview_scoped_student_profile(
         &connection,
         &StudentProfileScope {
             class_id: input.class_id,
             student_id: input.student_id,
             range_start: &input.range_start,
             range_end: &input.range_end,
+        },
+        &ProfileScopeSelectionInput {
+            selector_kind,
+            selector_public_id: input.scope_selector_public_id.as_deref(),
         },
     )
     .map_err(|error| error.to_string())
@@ -420,14 +442,22 @@ pub fn generate_student_profile(
     input: StudentProfileScopeRequest,
 ) -> Result<StudentProfileSnapshot, String> {
     let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
-    profile::generate_student_profile(
+    let selector_kind = input
+        .scope_selector_kind
+        .as_deref()
+        .unwrap_or("auto_evidence_maps");
+    profile::generate_scoped_student_profile(
         &mut connection,
-        &GenerateStudentProfileInput {
+        &GenerateScopedStudentProfileInput {
             scope: StudentProfileScope {
                 class_id: input.class_id,
                 student_id: input.student_id,
                 range_start: &input.range_start,
                 range_end: &input.range_end,
+            },
+            selection: ProfileScopeSelectionInput {
+                selector_kind,
+                selector_public_id: input.scope_selector_public_id.as_deref(),
             },
             confirmed_by: "local_teacher",
         },
@@ -472,12 +502,20 @@ pub fn preview_class_profile(
     input: ClassProfileScopeRequest,
 ) -> Result<ClassProfilePreview, String> {
     let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
-    class_profile_service::preview_class_profile(
+    let selector_kind = input
+        .scope_selector_kind
+        .as_deref()
+        .unwrap_or("auto_evidence_maps");
+    class_profile_service::preview_scoped_class_profile(
         &connection,
         &ClassProfileScope {
             class_id: input.class_id,
             range_start: &input.range_start,
             range_end: &input.range_end,
+        },
+        &ProfileScopeSelectionInput {
+            selector_kind,
+            selector_public_id: input.scope_selector_public_id.as_deref(),
         },
     )
     .map_err(|error| error.to_string())
@@ -489,13 +527,21 @@ pub fn generate_class_profile(
     input: GenerateClassProfileRequest,
 ) -> Result<ClassProfileSnapshot, String> {
     let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
-    class_profile_service::generate_class_profile(
+    let selector_kind = input
+        .scope_selector_kind
+        .as_deref()
+        .unwrap_or("auto_evidence_maps");
+    class_profile_service::generate_scoped_class_profile(
         &mut connection,
-        &GenerateClassProfileInput {
+        &GenerateScopedClassProfileInput {
             scope: ClassProfileScope {
                 class_id: input.class_id,
                 range_start: &input.range_start,
                 range_end: &input.range_end,
+            },
+            selection: ProfileScopeSelectionInput {
+                selector_kind,
+                selector_public_id: input.scope_selector_public_id.as_deref(),
             },
             expected_source_watermark: &input.expected_source_watermark,
             confirmed_by: "local_teacher",

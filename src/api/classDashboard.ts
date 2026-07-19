@@ -1,4 +1,5 @@
 import { call } from "./client";
+import type { ProfileScopeOption, ProfileScopeSelectionView } from "./learning";
 
 export type AppModule = "recitation" | "exam";
 export type DashboardTargetView = "today" | "desk" | "exam";
@@ -107,6 +108,7 @@ export interface ClassProfilePreview {
   class: DashboardClass;
   range_start: string;
   range_end: string;
+  scope_selection: ProfileScopeSelectionView;
   policy: ClassProfilePolicy;
   counts: ClassProfilePreviewCounts;
   source_watermark: string;
@@ -224,6 +226,7 @@ export interface ClassProfileSnapshot {
   range_start: string;
   range_end: string;
   scope_kind: string;
+  scope_selection: ProfileScopeSelectionView;
   evidence_cutoff_at: string;
   policy: ClassProfilePolicy;
   source_watermark: string;
@@ -279,6 +282,8 @@ export interface ClassProfileScopeInput {
   classId: number;
   rangeStart: string;
   rangeEnd: string;
+  scopeSelectorKind?: ProfileScopeOption["selector_kind"];
+  scopeSelectorPublicId?: string | null;
 }
 
 export interface ClassTeachingEvent {

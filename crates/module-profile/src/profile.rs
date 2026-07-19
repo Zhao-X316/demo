@@ -33,9 +33,50 @@ pub struct StudentProfileScope<'a> {
 }
 
 #[derive(Debug, Clone)]
+pub struct ProfileScopeSelectionInput<'a> {
+    pub selector_kind: &'a str,
+    pub selector_public_id: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
 pub struct GenerateStudentProfileInput<'a> {
     pub scope: StudentProfileScope<'a>,
     pub confirmed_by: &'a str,
+}
+
+#[derive(Debug, Clone)]
+pub struct GenerateScopedStudentProfileInput<'a> {
+    pub scope: StudentProfileScope<'a>,
+    pub selection: ProfileScopeSelectionInput<'a>,
+    pub confirmed_by: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileScopeOption {
+    pub selector_kind: String,
+    pub selector_public_id: Option<String>,
+    pub selector_key: String,
+    pub label: String,
+    pub detail: String,
+    pub node_type: Option<String>,
+    pub knowledge_map_public_id: Option<String>,
+    pub textbook_edition_public_id: Option<String>,
+    pub knowledge_node_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileScopeSelectionView {
+    pub selector_kind: String,
+    pub selector_public_id: Option<String>,
+    pub selector_key: String,
+    pub title: String,
+    pub path: String,
+    pub node_type: Option<String>,
+    pub knowledge_map_public_id: Option<String>,
+    pub knowledge_map_version: Option<String>,
+    pub textbook_edition_public_id: Option<String>,
+    pub textbook_title: Option<String>,
+    pub knowledge_node_count: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +112,7 @@ pub struct ProfilePreviewCounts {
     pub teacher_overall_excluded: i64,
     pub unmapped_formal_excluded: i64,
     pub unsupported_contract_excluded: i64,
+    pub out_of_scope_excluded: i64,
     pub referenced_knowledge_map_count: i64,
 }
 
@@ -82,6 +124,7 @@ pub struct StudentProfilePreview {
     pub student: ProfileStudent,
     pub range_start: String,
     pub range_end: String,
+    pub scope_selection: ProfileScopeSelectionView,
     pub policy: ProfilePolicy,
     pub counts: ProfilePreviewCounts,
     pub recitation_summary: ProfileRecitationSummary,
@@ -239,6 +282,7 @@ pub struct StudentProfileSnapshot {
     pub range_start: String,
     pub range_end: String,
     pub scope_kind: String,
+    pub scope_selection: ProfileScopeSelectionView,
     pub evidence_cutoff_at: String,
     pub policy: ProfilePolicy,
     pub source_watermark: String,
@@ -346,6 +390,14 @@ struct ValidatedScope {
     student: ProfileStudent,
     range_start: NaiveDate,
     range_end: NaiveDate,
+    selection: ResolvedProfileScope,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedProfileScope {
+    view: ProfileScopeSelectionView,
+    knowledge_node_public_ids: Option<BTreeSet<String>>,
+    map_ids: BTreeMap<i64, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -390,6 +442,7 @@ struct SnapshotHashPayload<'a> {
     class_id: i64,
     range_start: String,
     range_end: String,
+    scope_selector_key: &'a str,
     policy_public_id: &'a str,
     policy_revision: i64,
     source_watermark: &'a str,
@@ -420,9 +473,265 @@ fn parse_date(value: &str, field: &str) -> CoreResult<NaiveDate> {
         .map_err(|_| CoreError::Invalid(format!("{field}必须是 YYYY-MM-DD")))
 }
 
+fn auto_scope_selection() -> ResolvedProfileScope {
+    ResolvedProfileScope {
+        view: ProfileScopeSelectionView {
+            selector_kind: "auto_evidence_maps".into(),
+            selector_public_id: None,
+            selector_key: "auto_evidence_maps".into(),
+            title: "自动：按正式证据涉及范围".into(),
+            path: "系统按所选日期内的老师确认逐点证据确定教材范围".into(),
+            node_type: None,
+            knowledge_map_public_id: None,
+            knowledge_map_version: None,
+            textbook_edition_public_id: None,
+            textbook_title: None,
+            knowledge_node_count: 0,
+        },
+        knowledge_node_public_ids: None,
+        map_ids: BTreeMap::new(),
+    }
+}
+
+fn curriculum_path(conn: &Connection, node_id: i64) -> CoreResult<String> {
+    let mut titles = Vec::new();
+    let mut current = Some(node_id);
+    while let Some(id) = current {
+        let (parent_id, title) = conn.query_row(
+            "SELECT parent_id,title FROM k1_curriculum_nodes WHERE id=?1",
+            [id],
+            |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        titles.push(title);
+        current = parent_id;
+    }
+    titles.reverse();
+    Ok(titles.join(" / "))
+}
+
+fn resolve_profile_scope(
+    conn: &Connection,
+    selection: Option<&ProfileScopeSelectionInput<'_>>,
+) -> CoreResult<ResolvedProfileScope> {
+    let Some(selection) = selection else {
+        return Ok(auto_scope_selection());
+    };
+    match selection.selector_kind.trim() {
+        "" | "auto_evidence_maps" => Ok(auto_scope_selection()),
+        "knowledge_map" => {
+            let public_id = selection
+                .selector_public_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| CoreError::Invalid("选择本册范围时必须指定知识图谱".into()))?;
+            let row = conn
+                .query_row(
+                    "SELECT m.id,m.public_id,m.revision,e.public_id,e.title
+                     FROM k1_knowledge_maps m
+                     JOIN k1_textbook_editions e ON e.id=m.textbook_edition_id
+                     WHERE m.public_id=?1 AND m.state='confirmed' AND e.state='active'",
+                    [public_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or_else(|| CoreError::Invalid("所选教材知识图谱不存在或尚未确认".into()))?;
+            let mut stmt = conn.prepare(
+                "SELECT public_id FROM k1_knowledge_nodes
+                 WHERE knowledge_map_id=?1 AND state='active' ORDER BY order_index,id",
+            )?;
+            let node_ids = stmt
+                .query_map([row.0], |node| node.get::<_, String>(0))?
+                .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+            let map_version = format!("{}:r{}", row.1, row.2);
+            Ok(ResolvedProfileScope {
+                view: ProfileScopeSelectionView {
+                    selector_kind: "knowledge_map".into(),
+                    selector_public_id: Some(row.1.clone()),
+                    selector_key: format!("knowledge_map:{}", row.1),
+                    title: row.4.clone(),
+                    path: row.4.clone(),
+                    node_type: Some("textbook".into()),
+                    knowledge_map_public_id: Some(row.1.clone()),
+                    knowledge_map_version: Some(map_version.clone()),
+                    textbook_edition_public_id: Some(row.3),
+                    textbook_title: Some(row.4),
+                    knowledge_node_count: node_ids.len() as i64,
+                },
+                knowledge_node_public_ids: Some(node_ids),
+                map_ids: BTreeMap::from([(row.0, map_version)]),
+            })
+        }
+        "curriculum_node" => {
+            let public_id = selection
+                .selector_public_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| CoreError::Invalid("选择单元或课时范围时必须指定课程节点".into()))?;
+            let row = conn
+                .query_row(
+                    "SELECT c.id,c.public_id,c.node_type,c.title,m.id,m.public_id,m.revision,
+                            e.public_id,e.title
+                     FROM k1_curriculum_nodes c
+                     JOIN k1_knowledge_maps m ON m.id=c.knowledge_map_id
+                     JOIN k1_textbook_editions e ON e.id=m.textbook_edition_id
+                     WHERE c.public_id=?1 AND c.state='active'
+                       AND m.state='confirmed' AND e.state='active'",
+                    [public_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, i64>(6)?,
+                            row.get::<_, String>(7)?,
+                            row.get::<_, String>(8)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or_else(|| {
+                    CoreError::Invalid("所选课程范围不存在或不属于已确认知识图谱".into())
+                })?;
+            let path = curriculum_path(conn, row.0)?;
+            let mut stmt = conn.prepare(
+                "WITH RECURSIVE curriculum_scope(id) AS (
+                   SELECT ?1
+                   UNION ALL
+                   SELECT child.id FROM k1_curriculum_nodes child
+                   JOIN curriculum_scope parent ON child.parent_id=parent.id
+                   WHERE child.state='active'
+                 ),
+                 knowledge_scope(id,public_id) AS (
+                   SELECT k.id,k.public_id FROM k1_knowledge_nodes k
+                   WHERE k.knowledge_map_id=?2 AND k.state='active'
+                     AND k.curriculum_node_id IN (SELECT id FROM curriculum_scope)
+                   UNION
+                   SELECT child.id,child.public_id FROM k1_knowledge_nodes child
+                   JOIN knowledge_scope parent ON child.parent_id=parent.id
+                   WHERE child.state='active'
+                 )
+                 SELECT public_id FROM knowledge_scope ORDER BY public_id",
+            )?;
+            let node_ids = stmt
+                .query_map((row.0, row.4), |node| node.get::<_, String>(0))?
+                .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+            let map_version = format!("{}:r{}", row.5, row.6);
+            Ok(ResolvedProfileScope {
+                view: ProfileScopeSelectionView {
+                    selector_kind: "curriculum_node".into(),
+                    selector_public_id: Some(row.1.clone()),
+                    selector_key: format!("curriculum_node:{}", row.1),
+                    title: row.3,
+                    path: format!("{} / {}", row.8, path),
+                    node_type: Some(row.2),
+                    knowledge_map_public_id: Some(row.5.clone()),
+                    knowledge_map_version: Some(map_version.clone()),
+                    textbook_edition_public_id: Some(row.7),
+                    textbook_title: Some(row.8),
+                    knowledge_node_count: node_ids.len() as i64,
+                },
+                knowledge_node_public_ids: Some(node_ids),
+                map_ids: BTreeMap::from([(row.4, map_version)]),
+            })
+        }
+        _ => Err(CoreError::Invalid(
+            "教材范围类型只支持自动范围、本册或课程节点".into(),
+        )),
+    }
+}
+
+pub fn list_profile_scope_options(conn: &Connection) -> CoreResult<Vec<ProfileScopeOption>> {
+    let automatic = auto_scope_selection().view;
+    let mut options = vec![ProfileScopeOption {
+        selector_kind: automatic.selector_kind,
+        selector_public_id: automatic.selector_public_id,
+        selector_key: automatic.selector_key,
+        label: automatic.title,
+        detail: automatic.path,
+        node_type: automatic.node_type,
+        knowledge_map_public_id: automatic.knowledge_map_public_id,
+        textbook_edition_public_id: automatic.textbook_edition_public_id,
+        knowledge_node_count: automatic.knowledge_node_count,
+    }];
+    let mut stmt = conn.prepare(
+        "SELECT m.public_id FROM k1_knowledge_maps m
+         JOIN k1_textbook_editions e ON e.id=m.textbook_edition_id
+         WHERE m.state='confirmed' AND e.state='active'
+         ORDER BY e.title,m.revision DESC",
+    )?;
+    let maps = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for map_public_id in maps {
+        let map_input = ProfileScopeSelectionInput {
+            selector_kind: "knowledge_map",
+            selector_public_id: Some(&map_public_id),
+        };
+        let map = resolve_profile_scope(conn, Some(&map_input))?.view;
+        options.push(ProfileScopeOption {
+            selector_kind: map.selector_kind,
+            selector_public_id: map.selector_public_id,
+            selector_key: map.selector_key,
+            label: map.title,
+            detail: "本册全部知识节点".into(),
+            node_type: map.node_type,
+            knowledge_map_public_id: map.knowledge_map_public_id.clone(),
+            textbook_edition_public_id: map.textbook_edition_public_id,
+            knowledge_node_count: map.knowledge_node_count,
+        });
+        let mut curriculum = conn.prepare(
+            "SELECT c.public_id FROM k1_curriculum_nodes c
+             JOIN k1_knowledge_maps m ON m.id=c.knowledge_map_id
+             WHERE m.public_id=?1 AND c.state='active'
+             ORDER BY c.order_index,c.id",
+        )?;
+        let curriculum_ids = curriculum
+            .query_map([&map_public_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for curriculum_public_id in curriculum_ids {
+            let node_input = ProfileScopeSelectionInput {
+                selector_kind: "curriculum_node",
+                selector_public_id: Some(&curriculum_public_id),
+            };
+            let node = resolve_profile_scope(conn, Some(&node_input))?.view;
+            options.push(ProfileScopeOption {
+                selector_kind: node.selector_kind,
+                selector_public_id: node.selector_public_id,
+                selector_key: node.selector_key,
+                label: node.title,
+                detail: node.path,
+                node_type: node.node_type,
+                knowledge_map_public_id: node.knowledge_map_public_id,
+                textbook_edition_public_id: node.textbook_edition_public_id,
+                knowledge_node_count: node.knowledge_node_count,
+            });
+        }
+    }
+    Ok(options)
+}
+
+pub fn resolve_profile_scope_selection(
+    conn: &Connection,
+    selection: &ProfileScopeSelectionInput<'_>,
+) -> CoreResult<ProfileScopeSelectionView> {
+    Ok(resolve_profile_scope(conn, Some(selection))?.view)
+}
+
 fn validate_scope(
     conn: &Connection,
     scope: &StudentProfileScope<'_>,
+    selection: Option<&ProfileScopeSelectionInput<'_>>,
 ) -> CoreResult<ValidatedScope> {
     let range_start = parse_date(scope.range_start, "开始日期")?;
     let range_end = parse_date(scope.range_end, "结束日期")?;
@@ -453,6 +762,7 @@ fn validate_scope(
         student,
         range_start,
         range_end,
+        selection: resolve_profile_scope(conn, selection)?,
     })
 }
 
@@ -575,6 +885,7 @@ type LoadedEvidenceTargets = (
     BTreeMap<i64, String>,
     BTreeSet<String>,
     i64,
+    i64,
 );
 
 fn load_evidence_targets(
@@ -614,9 +925,15 @@ fn load_evidence_targets(
         ))
     })?;
     let mut targets = Vec::new();
-    let mut map_ids = BTreeMap::new();
-    let mut map_versions = BTreeSet::new();
+    let mut map_ids = validated.selection.map_ids.clone();
+    let mut map_versions = validated
+        .selection
+        .map_ids
+        .values()
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let mut unsupported_evidence_ids = HashSet::new();
+    let mut out_of_scope_evidence_ids = HashSet::new();
     for row in rows {
         let (
             id,
@@ -642,7 +959,7 @@ fn load_evidence_targets(
         if occurred_date < validated.range_start || occurred_date > validated.range_end {
             continue;
         }
-        let knowledge_supported = knowledge_node_id.is_some()
+        let mut knowledge_supported = knowledge_node_id.is_some()
             && supports_formal_target(
                 &source_module,
                 &source_type,
@@ -650,7 +967,7 @@ fn load_evidence_targets(
                 &evidence_kind,
                 "knowledge_node",
             );
-        let ability_supported = ability_dimension_id.is_some()
+        let mut ability_supported = ability_dimension_id.is_some()
             && supports_formal_target(
                 &source_module,
                 &source_type,
@@ -662,6 +979,16 @@ fn load_evidence_targets(
             || (ability_dimension_id.is_some() && !ability_supported)
         {
             unsupported_evidence_ids.insert(id);
+        }
+        if let Some(selected_nodes) = &validated.selection.knowledge_node_public_ids {
+            let selected = knowledge_node_id
+                .as_ref()
+                .is_some_and(|node| selected_nodes.contains(node));
+            if (knowledge_supported || ability_supported) && !selected {
+                out_of_scope_evidence_ids.insert(id);
+            }
+            knowledge_supported &= selected;
+            ability_supported &= selected;
         }
         if !knowledge_supported && !ability_supported {
             continue;
@@ -677,6 +1004,12 @@ fn load_evidence_targets(
         let Some(map_id) = map_id else {
             continue;
         };
+        if !validated.selection.map_ids.is_empty()
+            && !validated.selection.map_ids.contains_key(&map_id)
+        {
+            out_of_scope_evidence_ids.insert(id);
+            continue;
+        }
         map_ids.insert(map_id, knowledge_map_version.clone());
         map_versions.insert(knowledge_map_version.clone());
         if knowledge_supported {
@@ -751,6 +1084,7 @@ fn load_evidence_targets(
         map_ids,
         map_versions,
         unsupported_evidence_ids.len() as i64,
+        out_of_scope_evidence_ids.len() as i64,
     ))
 }
 
@@ -759,6 +1093,7 @@ type LoadedRecitationHistory = (Vec<RecitationEvidence>, i64);
 fn load_recitation_history(
     conn: &Connection,
     validated: &ValidatedScope,
+    selected_decisions: Option<&BTreeSet<(String, i64)>>,
 ) -> CoreResult<LoadedRecitationHistory> {
     let mut stmt = conn.prepare(
         "SELECT id,public_id,source_type,source_ref_type,source_ref_id,
@@ -798,6 +1133,18 @@ fn load_recitation_history(
             &evidence.source_ref_type,
             &evidence.evidence_kind,
         ) {
+            if let Some(decisions) = selected_decisions {
+                let selected = evidence
+                    .decision_ref_id
+                    .as_ref()
+                    .zip(evidence.decision_revision)
+                    .is_some_and(|(decision, revision)| {
+                        decisions.contains(&(decision.clone(), revision))
+                    });
+                if !selected {
+                    continue;
+                }
+            }
             history.push(evidence);
         } else {
             unsupported += 1;
@@ -859,6 +1206,15 @@ fn load_wrongbook_facts(
             .into_iter()
             .filter_map(|item| match shanghai_date(&item.latest_response_at) {
                 Ok(date) if date >= validated.range_start && date <= validated.range_end => {
+                    if let Some(selected_nodes) = &validated.selection.knowledge_node_public_ids {
+                        if !item
+                            .knowledge_nodes
+                            .iter()
+                            .any(|node| selected_nodes.contains(&node.public_id))
+                        {
+                            return None;
+                        }
+                    }
                     Some(Ok(ProfileWrongbookFactView {
                         question_version_public_id: item.question_version_id,
                         question_type: item.question_type,
@@ -936,6 +1292,7 @@ fn wrongbook_summary(facts: &[ProfileWrongbookFactView]) -> ProfileWrongbookSumm
 fn load_scope_nodes(
     conn: &Connection,
     map_ids: &BTreeMap<i64, String>,
+    selected_knowledge_nodes: Option<&BTreeSet<String>>,
 ) -> CoreResult<Vec<ScopeNode>> {
     let mut nodes = Vec::new();
     let mut subject_ids = BTreeSet::new();
@@ -962,7 +1319,13 @@ fn load_scope_nodes(
             })
         })?;
         for row in rows {
-            nodes.push(row?);
+            let node = row?;
+            if selected_knowledge_nodes
+                .map(|selected| selected.contains(&node.public_id))
+                .unwrap_or(true)
+            {
+                nodes.push(node);
+            }
         }
     }
     for subject_id in subject_ids {
@@ -1161,15 +1524,53 @@ fn excluded_count(
     )?)
 }
 
-fn compute(conn: &Connection, scope: &StudentProfileScope<'_>) -> CoreResult<Computation> {
-    let validated = validate_scope(conn, scope)?;
+fn compute_with_selection(
+    conn: &Connection,
+    scope: &StudentProfileScope<'_>,
+    selection: Option<&ProfileScopeSelectionInput<'_>>,
+) -> CoreResult<Computation> {
+    let mut validated = validate_scope(conn, scope, selection)?;
     let (policy_id, policy) = active_policy(conn)?;
-    let (targets, map_ids, map_versions, unsupported_formal_excluded) =
+    let (targets, map_ids, map_versions, unsupported_formal_excluded, out_of_scope_excluded) =
         load_evidence_targets(conn, &validated)?;
+    let selected_recitation_decisions =
+        validated
+            .selection
+            .knowledge_node_public_ids
+            .as_ref()
+            .map(|_| {
+                targets
+                    .iter()
+                    .filter(|item| item.source_module == "recitation")
+                    .filter_map(|item| {
+                        item.decision_ref_id
+                            .as_ref()
+                            .zip(item.decision_revision)
+                            .map(|(decision, revision)| (decision.clone(), revision))
+                    })
+                    .collect::<BTreeSet<_>>()
+            });
     let (recitation_evidence, unsupported_history_excluded) =
-        load_recitation_history(conn, &validated)?;
+        load_recitation_history(conn, &validated, selected_recitation_decisions.as_ref())?;
     let wrongbook_facts = load_wrongbook_facts(conn, &validated)?;
-    let scope_nodes = load_scope_nodes(conn, &map_ids)?;
+    let scope_nodes = load_scope_nodes(
+        conn,
+        &map_ids,
+        validated.selection.knowledge_node_public_ids.as_ref(),
+    )?;
+    if validated.selection.view.selector_kind == "auto_evidence_maps" {
+        validated.selection.view.knowledge_node_count = scope_nodes
+            .iter()
+            .filter(|node| node.target_type == "knowledge_node")
+            .count() as i64;
+        if map_versions.len() == 1 {
+            validated.selection.view.knowledge_map_version = map_versions.iter().next().cloned();
+            validated.selection.view.knowledge_map_public_id = map_versions
+                .iter()
+                .next()
+                .map(|version| map_public_id(version).to_owned());
+        }
+    }
     let mut by_target: HashMap<(String, String), Vec<EvidenceTarget>> = HashMap::new();
     for target in targets {
         by_target
@@ -1245,6 +1646,7 @@ fn compute(conn: &Connection, scope: &StudentProfileScope<'_>) -> CoreResult<Com
              AND knowledge_node_id IS NULL AND ability_dimension_id IS NULL",
         )?,
         unsupported_contract_excluded: unsupported_formal_excluded + unsupported_history_excluded,
+        out_of_scope_excluded,
         referenced_knowledge_map_count: map_ids.len() as i64,
     };
     let mut watermark_rows = Vec::new();
@@ -1305,6 +1707,7 @@ fn compute(conn: &Connection, scope: &StudentProfileScope<'_>) -> CoreResult<Com
         "recitation_history": recitation_watermark_rows,
         "wrongbook_current_facts": &wrongbook_facts,
         "scope_nodes": scope_identity,
+        "scope_selection": &validated.selection.view,
         "knowledge_map_versions": map_versions,
         "policy_public_id": policy.public_id,
         "policy_revision": policy.revision
@@ -1329,11 +1732,24 @@ fn compute(conn: &Connection, scope: &StudentProfileScope<'_>) -> CoreResult<Com
     })
 }
 
+#[cfg(test)]
+fn compute(conn: &Connection, scope: &StudentProfileScope<'_>) -> CoreResult<Computation> {
+    compute_with_selection(conn, scope, None)
+}
+
 pub fn preview_student_profile(
     conn: &Connection,
     scope: &StudentProfileScope<'_>,
 ) -> CoreResult<StudentProfilePreview> {
-    let computation = compute(conn, scope)?;
+    preview_student_profile_with_selection(conn, scope, None)
+}
+
+fn preview_student_profile_with_selection(
+    conn: &Connection,
+    scope: &StudentProfileScope<'_>,
+    selection: Option<&ProfileScopeSelectionInput<'_>>,
+) -> CoreResult<StudentProfilePreview> {
+    let computation = compute_with_selection(conn, scope, selection)?;
     let can_generate = computation.counts.mapped_formal_evidence > 0;
     Ok(StudentProfilePreview {
         schema_version: PROFILE_SCHEMA_VERSION,
@@ -1342,6 +1758,7 @@ pub fn preview_student_profile(
         student: computation.validated.student,
         range_start: computation.validated.range_start.to_string(),
         range_end: computation.validated.range_end.to_string(),
+        scope_selection: computation.validated.selection.view,
         policy: computation.policy,
         counts: computation.counts,
         recitation_summary: recitation_summary(&computation.recitation_evidence),
@@ -1350,10 +1767,17 @@ pub fn preview_student_profile(
         can_generate,
         blocker: (!can_generate)
             .then(|| "所选范围还没有老师确认、已发布且知识/能力链接明确的逐点证据。".into()),
-        scope_note: "范围为当前正式证据引用的已确认 K1 知识图谱版本；未覆盖节点保留为“未评估”。"
-            .into(),
+        scope_note: "教材范围已冻结到本次预览；未覆盖节点保留为“未评估”，范围外证据不参与计算。".into(),
         evidence_note: "M1 总体、流畅度和保持度只显示为背诵内容历史；M3 订正按低权重正式证据进入原知识/能力节点，当前错题恢复状态另行展示，不直接等同掌握。".into(),
     })
+}
+
+pub fn preview_scoped_student_profile(
+    conn: &Connection,
+    scope: &StudentProfileScope<'_>,
+    selection: &ProfileScopeSelectionInput<'_>,
+) -> CoreResult<StudentProfilePreview> {
+    preview_student_profile_with_selection(conn, scope, Some(selection))
 }
 
 fn payload_hash(computation: &Computation) -> CoreResult<String> {
@@ -1387,6 +1811,7 @@ fn payload_hash(computation: &Computation) -> CoreResult<String> {
         class_id: computation.validated.student.class_id,
         range_start: computation.validated.range_start.to_string(),
         range_end: computation.validated.range_end.to_string(),
+        scope_selector_key: &computation.validated.selection.view.selector_key,
         policy_public_id: &computation.policy.public_id,
         policy_revision: computation.policy.revision,
         source_watermark: &computation.source_watermark,
@@ -1413,6 +1838,7 @@ fn insert_snapshot(
     let scope_json = serde_json::json!({
         "schema_version": PROFILE_SCHEMA_VERSION,
         "scope_kind": "confirmed_evidence_maps",
+        "selection": &computation.validated.selection.view,
         "knowledge_map_versions": computation.knowledge_map_versions,
         "range_start": computation.validated.range_start.to_string(),
         "range_end": computation.validated.range_end.to_string()
@@ -1429,6 +1855,7 @@ fn insert_snapshot(
         },
         "recitation_history": ["recitation_overall","recitation_fluency","recitation_retention"],
         "wrongbook_history": "m3_current_facts_latest_response_in_scope",
+        "scope_selector_key": computation.validated.selection.view.selector_key,
         "active_only": true,
         "same_source_same_day": "collapse_minimum",
         "context_weights": {
@@ -1561,16 +1988,24 @@ pub fn generate_student_profile(
     conn: &mut Connection,
     input: &GenerateStudentProfileInput<'_>,
 ) -> CoreResult<StudentProfileSnapshot> {
-    required(input.confirmed_by, "确认人")?;
+    generate_student_profile_with_selection(conn, &input.scope, None, input.confirmed_by)
+}
+
+fn generate_student_profile_with_selection(
+    conn: &mut Connection,
+    scope: &StudentProfileScope<'_>,
+    selection: Option<&ProfileScopeSelectionInput<'_>>,
+    confirmed_by: &str,
+) -> CoreResult<StudentProfileSnapshot> {
+    required(confirmed_by, "确认人")?;
     let tx = conn.transaction()?;
-    let computation = compute(&tx, &input.scope)?;
+    let computation = compute_with_selection(&tx, scope, selection)?;
     if computation.counts.mapped_formal_evidence == 0 {
         return Err(CoreError::Invalid(
             "所选范围没有可生成正式快照的逐点证据".into(),
         ));
     }
-    let (public_id, revision, generated_at) =
-        insert_snapshot(&tx, &computation, input.confirmed_by)?;
+    let (public_id, revision, generated_at) = insert_snapshot(&tx, &computation, confirmed_by)?;
     let event_payload = serde_json::json!({
         "schema_version": PROFILE_SCHEMA_VERSION,
         "snapshot_public_id": public_id,
@@ -1579,6 +2014,7 @@ pub fn generate_student_profile(
         "revision": revision,
         "range_start": computation.validated.range_start.to_string(),
         "range_end": computation.validated.range_end.to_string(),
+        "scope_selector_key": computation.validated.selection.view.selector_key,
         "evidence_count": computation.evidence_ids.len()
     })
     .to_string();
@@ -1600,7 +2036,7 @@ pub fn generate_student_profile(
         &NewAuditEvent {
             idempotency_key: &format!("profile:audit:snapshot:{public_id}"),
             actor_type: AuditActorType::Teacher,
-            actor_id: Some(input.confirmed_by.trim()),
+            actor_id: Some(confirmed_by.trim()),
             action: "profile.snapshot.generated",
             object_type: "profile_snapshot",
             object_id: &public_id,
@@ -1613,6 +2049,18 @@ pub fn generate_student_profile(
     tx.commit()?;
     get_student_profile(conn, &public_id)?
         .ok_or_else(|| CoreError::Db("学习掌握快照写入后无法读取".into()))
+}
+
+pub fn generate_scoped_student_profile(
+    conn: &mut Connection,
+    input: &GenerateScopedStudentProfileInput<'_>,
+) -> CoreResult<StudentProfileSnapshot> {
+    generate_student_profile_with_selection(
+        conn,
+        &input.scope,
+        Some(&input.selection),
+        input.confirmed_by,
+    )
 }
 
 fn load_metric_evidence(
@@ -1978,7 +2426,7 @@ pub fn get_student_profile(
                     p.knowledge_node_assessed,p.knowledge_node_eligible,p.ability_node_total,
                     p.ability_node_assessed,p.ability_node_eligible,p.state,p.payload_sha256,
                     p.generated_by,p.generated_at,p.confirmed_by,p.confirmed_at,
-                    p.source_config_json
+                    p.source_config_json,p.scope_json
              FROM profile_snapshots p
              JOIN students s ON s.id=p.student_id
              JOIN profile_policy_versions policy ON policy.id=p.policy_id
@@ -2024,6 +2472,7 @@ pub fn get_student_profile(
                     row.get::<_, String>(32)?,
                     row.get::<_, String>(33)?,
                     row.get::<_, String>(34)?,
+                    row.get::<_, String>(35)?,
                 ))
             },
         )
@@ -2053,6 +2502,7 @@ pub fn get_student_profile(
         confirmed_by,
         confirmed_at,
         source_config_json,
+        scope_json,
     )) = row
     else {
         return Ok(None);
@@ -2063,7 +2513,16 @@ pub fn get_student_profile(
         range_start: &range_start,
         range_end: &range_end,
     };
-    let current = compute(conn, &scope)?;
+    let scope_selection = serde_json::from_str::<serde_json::Value>(&scope_json)
+        .ok()
+        .and_then(|value| value.get("selection").cloned())
+        .and_then(|value| serde_json::from_value::<ProfileScopeSelectionView>(value).ok())
+        .unwrap_or_else(|| auto_scope_selection().view);
+    let selector_input = ProfileScopeSelectionInput {
+        selector_kind: &scope_selection.selector_kind,
+        selector_public_id: scope_selection.selector_public_id.as_deref(),
+    };
+    let current = compute_with_selection(conn, &scope, Some(&selector_input))?;
     let policy_stale = current.policy.public_id != policy.public_id;
     let source_stale = current.source_watermark != source_watermark;
     let is_stale = policy_stale || source_stale;
@@ -2100,6 +2559,7 @@ pub fn get_student_profile(
         range_start,
         range_end,
         scope_kind,
+        scope_selection,
         evidence_cutoff_at,
         policy,
         source_watermark,
@@ -2164,6 +2624,7 @@ mod tests {
         map_public_id: String,
         knowledge: Vec<String>,
         ability: String,
+        curriculum: Vec<String>,
     }
 
     fn setup() -> Fixture {
@@ -2208,17 +2669,51 @@ mod tests {
         )
         .unwrap();
         let map_id = conn.last_insert_rowid();
+        let mut curriculum = Vec::new();
+        for index in 1..=2 {
+            let public_id = format!("curriculum-{index}");
+            conn.execute(
+                "INSERT INTO k1_curriculum_nodes
+                  (public_id,stable_id,knowledge_map_id,node_type,title,order_index,state,created_at)
+                 VALUES (?1,?2,?3,'unit',?4,?5,'active','2026-07-01T00:00:00.000Z')",
+                params![
+                    public_id,
+                    format!("curriculum-stable-{index}"),
+                    map_id,
+                    format!("第{index}单元"),
+                    index
+                ],
+            )
+            .unwrap();
+            curriculum.push(public_id);
+        }
+        let curriculum_ids = curriculum
+            .iter()
+            .map(|public_id| {
+                conn.query_row(
+                    "SELECT id FROM k1_curriculum_nodes WHERE public_id=?1",
+                    [public_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
         let mut knowledge = Vec::new();
         for index in 1..=3 {
             let public_id = format!("knowledge-{index}");
             conn.execute(
                 "INSERT INTO k1_knowledge_nodes
-                  (public_id,stable_id,knowledge_map_id,title,order_index,state,created_at)
-                 VALUES (?1,?2,?3,?4,?5,'active','2026-07-01T00:00:00.000Z')",
+                  (public_id,stable_id,knowledge_map_id,curriculum_node_id,title,order_index,state,created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,'active','2026-07-01T00:00:00.000Z')",
                 params![
                     public_id,
                     format!("stable-{index}"),
                     map_id,
+                    if index <= 2 {
+                        curriculum_ids[0]
+                    } else {
+                        curriculum_ids[1]
+                    },
                     format!("知识点{index}"),
                     index
                 ],
@@ -2242,6 +2737,7 @@ mod tests {
             map_public_id,
             knowledge,
             ability,
+            curriculum,
         }
     }
 
@@ -2431,6 +2927,77 @@ mod tests {
         assert!(!preview.can_generate);
         assert_eq!(preview.counts.machine_only_excluded, 1);
         assert_eq!(preview.counts.mapped_formal_evidence, 0);
+    }
+
+    #[test]
+    fn curriculum_scope_catalog_filters_and_freezes_personal_snapshot() {
+        let mut fixture = setup();
+        add_evidence(
+            &fixture,
+            "unit-1-evidence",
+            &fixture.knowledge[0],
+            "q-unit-1",
+            "2026-07-10T00:00:00.000Z",
+            1.0,
+            AssessmentContext::ClosedBook,
+            ConfirmationLevel::TeacherCorrected,
+        );
+        add_evidence(
+            &fixture,
+            "unit-2-evidence",
+            &fixture.knowledge[2],
+            "q-unit-2",
+            "2026-07-11T00:00:00.000Z",
+            0.0,
+            AssessmentContext::ClosedBook,
+            ConfirmationLevel::TeacherCorrected,
+        );
+        let options = list_profile_scope_options(&fixture.conn).unwrap();
+        let selected = options
+            .iter()
+            .find(|item| item.selector_public_id.as_deref() == Some(&fixture.curriculum[0]))
+            .unwrap();
+        assert_eq!(selected.knowledge_node_count, 2);
+        assert!(options
+            .iter()
+            .any(|item| item.selector_kind == "knowledge_map"));
+
+        let selection = ProfileScopeSelectionInput {
+            selector_kind: "curriculum_node",
+            selector_public_id: Some(&fixture.curriculum[0]),
+        };
+        let preview =
+            preview_scoped_student_profile(&fixture.conn, &scope(&fixture), &selection).unwrap();
+        assert_eq!(preview.scope_selection.knowledge_node_count, 2);
+        assert_eq!(preview.counts.knowledge_node_total, 2);
+        assert_eq!(preview.counts.knowledge_node_assessed, 1);
+        assert_eq!(preview.counts.mapped_formal_evidence, 1);
+        assert_eq!(preview.counts.out_of_scope_excluded, 1);
+
+        let snapshot = generate_scoped_student_profile(
+            &mut fixture.conn,
+            &GenerateScopedStudentProfileInput {
+                scope: StudentProfileScope {
+                    class_id: fixture.class_id,
+                    student_id: fixture.student_id,
+                    range_start: "2026-07-01",
+                    range_end: "2026-07-31",
+                },
+                selection,
+                confirmed_by: "teacher-1",
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot.scope_selection.selector_public_id.as_deref(),
+            Some(fixture.curriculum[0].as_str())
+        );
+        assert_eq!(snapshot.knowledge_metrics.len(), 2);
+        assert!(snapshot
+            .knowledge_metrics
+            .iter()
+            .all(|item| item.target_public_id != fixture.knowledge[2]));
+        assert!(!snapshot.is_stale);
     }
 
     #[test]
