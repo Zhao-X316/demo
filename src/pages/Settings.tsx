@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { save } from "@tauri-apps/plugin-dialog";
 import {
   RecitationConfig,
   VolcanoCreds,
@@ -10,6 +11,10 @@ import {
   backupsList,
   configGet,
   configSet,
+  DiagnosticPreview,
+  DiagnosticSensitiveOptions,
+  diagnosticExport,
+  diagnosticPreview,
   secretsGet,
   secretsSet,
 } from "../api/settings";
@@ -22,6 +27,13 @@ export default function Settings() {
   const [err, setErr] = useState("");
   const [backups, setBackups] = useState<BackupCatalog | null>(null);
   const [backupBusy, setBackupBusy] = useState(false);
+  const [diagnosticBusy, setDiagnosticBusy] = useState(false);
+  const [diagnosticOptions, setDiagnosticOptions] = useState<DiagnosticSensitiveOptions>({
+    include_failed_audio: false,
+    include_failed_asr: false,
+    include_standard_answers: false,
+  });
+  const [diagnosticPreviewResult, setDiagnosticPreviewResult] = useState<DiagnosticPreview | null>(null);
 
   useEffect(() => {
     configGet().then(setCfg).catch((e) => setErr(String(e)));
@@ -95,6 +107,84 @@ export default function Settings() {
     })[kind];
   const backupTime = (value: string) => value.replace("T", " ").replace("+08:00", " 中国时间");
   const backupSize = (value: number) => `${(value / 1024 / 1024).toFixed(2)} MB`;
+  const diagnosticSize = (value: number) =>
+    value < 1024 * 1024 ? `${Math.max(1, Math.ceil(value / 1024))} KB` : `${(value / 1024 / 1024).toFixed(2)} MB`;
+  const diagnosticRequestKey = () =>
+    `diagnostic-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const diagnosticDefaultName = () => {
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "").replace("T", "-");
+    return `教辅系统诊断包-${stamp}.zip`;
+  };
+  const chooseDiagnosticPath = async () =>
+    save({
+      defaultPath: diagnosticDefaultName(),
+      filters: [{ name: "诊断包", extensions: ["zip"] }],
+    });
+  const exportDefaultDiagnostic = async () => {
+    const outputPath = await chooseDiagnosticPath();
+    if (!outputPath) return;
+    setDiagnosticBusy(true);
+    setErr("");
+    try {
+      const result = await diagnosticExport(
+        outputPath,
+        diagnosticRequestKey(),
+        {
+          include_failed_audio: false,
+          include_failed_asr: false,
+          include_standard_answers: false,
+        },
+        null,
+        false,
+      );
+      setToast(`默认脱敏诊断包已导出：${result.file_name}`);
+    } catch (e) {
+      setErr(String(e));
+    }
+    setDiagnosticBusy(false);
+  };
+  const updateDiagnosticOption = (
+    key: keyof DiagnosticSensitiveOptions,
+    checked: boolean,
+  ) => {
+    setDiagnosticOptions((current) => ({ ...current, [key]: checked }));
+    setDiagnosticPreviewResult(null);
+  };
+  const previewSensitiveDiagnostic = async () => {
+    setDiagnosticBusy(true);
+    setErr("");
+    try {
+      setDiagnosticPreviewResult(await diagnosticPreview(diagnosticOptions));
+    } catch (e) {
+      setErr(String(e));
+    }
+    setDiagnosticBusy(false);
+  };
+  const exportSensitiveDiagnostic = async () => {
+    if (!diagnosticPreviewResult?.preview_token) return;
+    const confirmed = window.confirm(
+      `将导出 ${diagnosticPreviewResult.available_item_count} 项内容证据（约 ${diagnosticSize(diagnosticPreviewResult.total_available_bytes)}）。\n\n内容可能包含学生声音、背诵正文或标准答案。确认继续吗？`,
+    );
+    if (!confirmed) return;
+    const outputPath = await chooseDiagnosticPath();
+    if (!outputPath) return;
+    setDiagnosticBusy(true);
+    setErr("");
+    try {
+      const result = await diagnosticExport(
+        outputPath,
+        diagnosticRequestKey(),
+        diagnosticOptions,
+        diagnosticPreviewResult.preview_token,
+        true,
+      );
+      setToast(`含 ${result.included_sensitive_items} 项内容证据的诊断包已导出：${result.file_name}`);
+      setDiagnosticPreviewResult(null);
+    } catch (e) {
+      setErr(String(e));
+    }
+    setDiagnosticBusy(false);
+  };
 
   if (!cfg) return <div className="page"><div className="loading">加载设置…</div></div>;
 
@@ -187,6 +277,87 @@ export default function Settings() {
             </div>
           )) : <div className="sub">暂无备份</div>}
         </div>
+      </div>
+
+      <h2>一键诊断</h2>
+      <div className="form" style={{ maxWidth: 760 }}>
+        <div className="sub">
+          默认只导出版本、数据库完整性、迁移、备份、任务状态、内部 ID 和脱敏错误码；不包含姓名、绝对路径、录音、ASR、答案正文或云凭据。
+        </div>
+        <div>
+          <button className="primary" disabled={diagnosticBusy} onClick={exportDefaultDiagnostic}>
+            {diagnosticBusy ? "正在生成…" : "导出默认脱敏诊断包"}
+          </button>
+        </div>
+        <details>
+          <summary>高级：确需技术人员核对内容证据</summary>
+          <div className="form" style={{ marginTop: 12 }}>
+            <div className="error">
+              只有排查内容识别问题时才选择。系统会先展示精确清单，必须再次确认后才会导出。
+            </div>
+            <label className="field check">
+              <input
+                type="checkbox"
+                checked={diagnosticOptions.include_failed_audio}
+                onChange={(event) => updateDiagnosticOption("include_failed_audio", event.target.checked)}
+              />
+              包含最近失败记录的原始录音
+            </label>
+            <label className="field check">
+              <input
+                type="checkbox"
+                checked={diagnosticOptions.include_failed_asr}
+                onChange={(event) => updateDiagnosticOption("include_failed_asr", event.target.checked)}
+              />
+              包含最近失败记录的完整 ASR
+            </label>
+            <label className="field check">
+              <input
+                type="checkbox"
+                checked={diagnosticOptions.include_standard_answers}
+                onChange={(event) => updateDiagnosticOption("include_standard_answers", event.target.checked)}
+              />
+              包含相关标准答案正文
+            </label>
+            <div>
+              <button
+                disabled={diagnosticBusy || !Object.values(diagnosticOptions).some(Boolean)}
+                onClick={previewSensitiveDiagnostic}
+              >
+                先预览内容清单
+              </button>
+            </div>
+            {diagnosticPreviewResult?.sensitive_content_selected && (
+              <div className="panel" style={{ padding: 12 }}>
+                <div className="who">
+                  可导出 {diagnosticPreviewResult.available_item_count} 项 · 不可用 {diagnosticPreviewResult.unavailable_item_count} 项 · 约 {diagnosticSize(diagnosticPreviewResult.total_available_bytes)}
+                </div>
+                <div className="meta">{diagnosticPreviewResult.warning}</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10 }}>
+                  {diagnosticPreviewResult.items.map((item) => (
+                    <div className="row" style={{ padding: "8px 10px" }} key={`${item.category}-${item.internal_ref}-${item.archive_name}`}>
+                      <div>
+                        <div className="who">{item.category} · {item.internal_ref}</div>
+                        <div className="meta">
+                          {item.archive_name} · {item.available ? diagnosticSize(item.size_bytes) : item.reason_code}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ marginTop: 10 }}>
+                  <button
+                    className="primary"
+                    disabled={diagnosticBusy || !diagnosticPreviewResult.available_item_count}
+                    onClick={exportSensitiveDiagnostic}
+                  >
+                    二次确认并导出所列内容
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </details>
       </div>
 
       <h2>火山 ASR 凭据（本机）</h2>

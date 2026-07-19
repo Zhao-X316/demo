@@ -14,6 +14,7 @@ mod commands;
 mod dictation_materialization;
 mod dictation_provider;
 mod dictation_run;
+mod diagnostics;
 mod exam_commands;
 mod exam_intake;
 mod learning_commands;
@@ -64,6 +65,8 @@ fn main() {
             commands::backups_list,
             commands::backup_create,
             commands::backup_restore,
+            diagnostics::diagnostic_preview,
+            diagnostics::diagnostic_export,
             commands::secrets_get,
             commands::secrets_set,
             commands::students_upsert,

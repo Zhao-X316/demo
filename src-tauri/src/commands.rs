@@ -617,6 +617,13 @@ pub fn backup_restore(
         // 下次启动还会重新按数据库精确放行，先保留可审计日志。
         eprintln!("[媒体白名单] 恢复后刷新失败，重启后将重试：{err}");
     }
+    if let Err(err) =
+        crate::diagnostics::record_backup_restore(&conn, &file_name, &protective.file_name)
+    {
+        // 恢复已经通过迁移与完整性检查，审计补写失败不能伪装成恢复失败。
+        // 诊断包会明确显示最近恢复状态仍为未记录。
+        eprintln!("[备份恢复] 恢复已完成，但脱敏审计写入失败：{err}");
+    }
     Ok(protective)
 }
 
