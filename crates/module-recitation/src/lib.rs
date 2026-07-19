@@ -30,6 +30,10 @@ static MIGRATIONS: &[Migration] = &[
         id: "recitation_0003",
         sql: include_str!("../migrations/0003_point_review_revisions.sql"),
     },
+    Migration {
+        id: "recitation_0004",
+        sql: include_str!("../migrations/0004_learning_evidence_guard.sql"),
+    },
 ];
 
 /// 模块迁移（供外壳/测试在 core 迁移之后运行）。

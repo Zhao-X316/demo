@@ -272,6 +272,37 @@ pub fn revert_for_decision(
     )?)
 }
 
+/// 同一业务来源追加新 revision 时，将旧来源的 active 证据标记为 superseded。
+///
+/// 调用方必须在自己的业务 transaction 中先写新来源 revision，再调用本函数切换旧证据，
+/// 最后创建新证据。重复调用不会再次改变行。
+pub fn supersede_for_source(
+    conn: &Connection,
+    source_module: EvidenceSourceModule,
+    source_ref_type: &str,
+    source_ref_id: &str,
+    source_revision: i64,
+) -> CoreResult<usize> {
+    required(source_ref_type, "source_ref_type")?;
+    required(source_ref_id, "source_ref_id")?;
+    if source_revision < 1 {
+        return Err(CoreError::Invalid(
+            "learning evidence source_revision must be at least 1".into(),
+        ));
+    }
+    Ok(conn.execute(
+        "UPDATE learning_evidence SET state='superseded'
+         WHERE source_module=?1 AND source_ref_type=?2 AND source_ref_id=?3
+           AND source_revision=?4 AND state='active'",
+        params![
+            source_module.as_str(),
+            source_ref_type.trim(),
+            source_ref_id.trim(),
+            source_revision
+        ],
+    )?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,5 +433,25 @@ mod tests {
         assert!(conn
             .execute("DELETE FROM learning_evidence WHERE id=?1", [evidence.id])
             .is_err());
+    }
+
+    #[test]
+    fn source_supersede_is_scoped_and_idempotent() {
+        let (conn, student_id) = setup();
+        let evidence = create_or_get(&conn, &input(student_id, "confirmed")).unwrap();
+        assert_eq!(
+            supersede_for_source(&conn, EvidenceSourceModule::Grading, "exam_answer", "42", 1)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            supersede_for_source(&conn, EvidenceSourceModule::Grading, "exam_answer", "42", 1)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            get_by_id(&conn, evidence.id).unwrap().unwrap().state,
+            EvidenceState::Superseded
+        );
     }
 }

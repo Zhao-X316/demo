@@ -98,6 +98,14 @@ struct FixtureReport {
     point_states: BTreeMap<String, i64>,
     active_point_reviews: i64,
     point_review_items: i64,
+    active_learning_evidence: i64,
+    teacher_overall_evidence: i64,
+    active_point_evidence: i64,
+    reverted_learning_evidence: i64,
+    superseded_learning_evidence: i64,
+    learning_evidence_outbox: i64,
+    learning_evidence_audit: i64,
+    dangling_active_evidence: i64,
     scored_content_confirmed_rubrics: i64,
     setup_content_confirmed_rubrics: i64,
     expected_review_order: Vec<String>,
@@ -565,6 +573,57 @@ fn inspect_fixture(data_dir: &Path, phase: &str) -> AppResult<FixtureReport> {
             "SELECT COUNT(*) FROM rec_point_review_revisions WHERE state='active'",
         )?,
         point_review_items: count(&conn, "SELECT COUNT(*) FROM rec_point_review_items")?,
+        active_learning_evidence: count(
+            &conn,
+            "SELECT COUNT(*) FROM learning_evidence
+             WHERE source_module='recitation' AND state='active'",
+        )?,
+        teacher_overall_evidence: count(
+            &conn,
+            "SELECT COUNT(*) FROM learning_evidence
+             WHERE source_module='recitation' AND state='active'
+               AND confirmation_level='teacher_overall'",
+        )?,
+        active_point_evidence: count(
+            &conn,
+            "SELECT COUNT(*) FROM learning_evidence
+             WHERE source_module='recitation' AND state='active'
+               AND source_type='recitation_rubric_point'
+               AND confirmation_level IN ('teacher_accepted','teacher_corrected')",
+        )?,
+        reverted_learning_evidence: count(
+            &conn,
+            "SELECT COUNT(*) FROM learning_evidence
+             WHERE source_module='recitation' AND state='reverted'",
+        )?,
+        superseded_learning_evidence: count(
+            &conn,
+            "SELECT COUNT(*) FROM learning_evidence
+             WHERE source_module='recitation' AND state='superseded'",
+        )?,
+        learning_evidence_outbox: count(
+            &conn,
+            "SELECT COUNT(*) FROM outbox_events
+             WHERE event_type='learning_evidence_changed'
+               AND idempotency_key LIKE 'recitation:outbox:evidence:%'",
+        )?,
+        learning_evidence_audit: count(
+            &conn,
+            "SELECT COUNT(*) FROM audit_events
+             WHERE action='recitation.learning_evidence.activated'",
+        )?,
+        dangling_active_evidence: count(
+            &conn,
+            "SELECT COUNT(*)
+             FROM learning_evidence evidence
+             LEFT JOIN decision_effects effect
+               ON evidence.decision_ref_type='recitation_decision_effect'
+              AND evidence.decision_ref_id=CAST(effect.id AS TEXT)
+              AND evidence.decision_revision=effect.revision
+             WHERE evidence.source_module='recitation'
+               AND evidence.state='active'
+               AND (effect.id IS NULL OR effect.state<>'active')",
+        )?,
         scored_content_confirmed_rubrics: rubric_count(&conn, SCORED_CONTENT_NO)?,
         setup_content_confirmed_rubrics: rubric_count(&conn, SETUP_CONTENT_NO)?,
         expected_review_order: marker.expected_review_order,
@@ -634,8 +693,11 @@ fn verify_fixture(data_dir: &Path, phase: &str) -> AppResult<FixtureReport> {
                 report.confirmed_submissions == 0
                     && report.decision_effects == 0
                     && report.active_point_reviews == 0
-                    && report.point_review_items == 0,
-                "seeded 阶段不能有老师终审、效果或逐点复核",
+                    && report.point_review_items == 0
+                    && report.active_learning_evidence == 0
+                    && report.learning_evidence_outbox == 0
+                    && report.learning_evidence_audit == 0,
+                "seeded 阶段不能有老师终审、效果、逐点复核或正式学习证据",
             )?;
             expect(
                 report.setup_content_confirmed_rubrics == 0,
@@ -651,6 +713,25 @@ fn verify_fixture(data_dir: &Path, phase: &str) -> AppResult<FixtureReport> {
             expect(
                 report.active_point_reviews >= 1 && report.point_review_items >= 4,
                 "真机验收至少要保存一条完整逐点评审",
+            )?;
+            expect(
+                report.teacher_overall_evidence == 6
+                    && report.active_point_evidence >= 4
+                    && report.active_learning_evidence
+                        == report.teacher_overall_evidence + report.active_point_evidence,
+                "三条终审必须各生成总体/流畅证据，逐点确认必须生成正式逐点证据",
+            )?;
+            expect(
+                report.dangling_active_evidence == 0,
+                "active 背诵证据必须引用仍 active 的终审效果",
+            )?;
+            let total_evidence = report.active_learning_evidence
+                + report.reverted_learning_evidence
+                + report.superseded_learning_evidence;
+            expect(
+                report.learning_evidence_outbox == total_evidence
+                    && report.learning_evidence_audit == total_evidence,
+                "每条背诵学习证据必须各有一条可靠 outbox 和不可变 audit",
             )?;
             expect(
                 report.setup_content_confirmed_rubrics == 1,

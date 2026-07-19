@@ -20,6 +20,7 @@ use crate::db::contents;
 use crate::db::point_reviews::{self, TeacherPointReviewInput};
 use crate::domain::fluency::FluencyCfg;
 use crate::grader::{RecitationGradeInput, RecitationGrader};
+use crate::service::learning_evidence;
 use crate::service::tasks as task_service;
 
 const MODULE: ModuleKey = ModuleKey::Recitation;
@@ -284,8 +285,7 @@ fn json_encode<T: serde::Serialize>(value: &T, label: &str) -> CoreResult<String
 }
 
 fn json_decode<T: serde::de::DeserializeOwned>(raw: &str, label: &str) -> CoreResult<T> {
-    serde_json::from_str(raw)
-        .map_err(|err| CoreError::Invalid(format!("{label} 解析失败: {err}")))
+    serde_json::from_str(raw).map_err(|err| CoreError::Invalid(format!("{label} 解析失败: {err}")))
 }
 
 fn validate_review_evidence(
@@ -424,8 +424,7 @@ fn apply_and_record_effect(
     )?;
     let created_makeup_ids = match &next {
         NextAction::Makeup {
-            task_id: Some(id),
-            ..
+            task_id: Some(id), ..
         } if !before_ids.contains(id) => vec![*id],
         _ => Vec::new(),
     };
@@ -526,6 +525,10 @@ pub fn human_decide_with_point_review(
     } else {
         None
     };
+    let decision_actor = decided_by
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("teacher");
 
     let tx = conn.unchecked_transaction()?;
     let sub = submissions::get(&tx, submission_id)?
@@ -557,8 +560,7 @@ pub fn human_decide_with_point_review(
                     .ok_or_else(|| CoreError::NotFound(format!("task {task_id}")))?;
                 if matches!(task.status, TaskStatus::Passed | TaskStatus::Failed) {
                     return Err(CoreError::Invalid(
-                        "检测到旧版机器评分已产生副作用，请先执行旧数据修复后再重开"
-                            .into(),
+                        "检测到旧版机器评分已产生副作用，请先执行旧数据修复后再重开".into(),
                     ));
                 }
             }
@@ -589,17 +591,36 @@ pub fn human_decide_with_point_review(
             CoreError::Invalid("终审结果缺少效果账本，拒绝猜测历史状态；请先执行旧数据修复".into())
         })?;
         verdicts::set_human_result(&tx, verdict.id, result, note, decided_by)?;
-        if let (Some(review), Some(actor)) = (point_review, point_review_actor) {
-            point_reviews::record_review_inner(
-                &tx,
-                submission_id,
-                verdict.id,
-                active_effect.id,
-                result,
-                actor,
-                review,
-            )?;
-        }
+        let previous_review = point_reviews::active_review_for_submission(&tx, submission_id)?;
+        let recorded_review =
+            if let (Some(review), Some(actor)) = (point_review, point_review_actor) {
+                let recorded = point_reviews::record_review_inner(
+                    &tx,
+                    submission_id,
+                    verdict.id,
+                    active_effect.id,
+                    result,
+                    actor,
+                    review,
+                )?;
+                if let Some(previous) = previous_review.as_ref() {
+                    if previous.id != recorded.id {
+                        learning_evidence::supersede_for_review(&tx, previous)?;
+                    }
+                }
+                Some(recorded)
+            } else {
+                None
+            };
+        learning_evidence::activate_for_decision(
+            &tx,
+            submission_id,
+            student_id,
+            &verdict,
+            &active_effect,
+            recorded_review.as_ref(),
+            decision_actor,
+        )?;
         submissions::set_status(&tx, submission_id, "confirmed")?;
         tx.commit()?;
         return Ok(NextAction::Unchanged);
@@ -625,11 +646,7 @@ pub fn human_decide_with_point_review(
 
     if let Some(effect) = effect_to_replace {
         let latest = decision_effects::latest_active_for_scope(
-            &tx,
-            MODULE,
-            student_id,
-            REF_TYPE,
-            content_id,
+            &tx, MODULE, student_id, REF_TYPE, content_id,
         )?
         .ok_or_else(|| CoreError::Invalid("效果账本状态不完整".into()))?;
         if latest.id != effect.id {
@@ -638,6 +655,7 @@ pub fn human_decide_with_point_review(
             ));
         }
         restore_effect(&tx, &effect)?;
+        learning_evidence::revert_for_effect(&tx, &effect)?;
         point_reviews::revert_for_effect_inner(&tx, effect.id)?;
         decision_effects::mark_reverted(&tx, effect.id)?;
     } else if existing_result.is_some() {
@@ -668,8 +686,8 @@ pub fn human_decide_with_point_review(
         },
     )?;
     verdicts::set_human_result(&tx, verdict.id, result, note, decided_by)?;
-    if let (Some(review), Some(actor)) = (point_review, point_review_actor) {
-        point_reviews::record_review_inner(
+    let recorded_review = if let (Some(review), Some(actor)) = (point_review, point_review_actor) {
+        Some(point_reviews::record_review_inner(
             &tx,
             submission_id,
             verdict.id,
@@ -677,8 +695,22 @@ pub fn human_decide_with_point_review(
             result,
             actor,
             review,
-        )?;
-    }
+        )?)
+    } else {
+        None
+    };
+    let active_effect = decision_effects::active_for_verdict(&tx, verdict.id)?
+        .filter(|effect| effect.id == applied.effect_id)
+        .ok_or_else(|| CoreError::Db("新终审效果账本写入后无法读取".into()))?;
+    learning_evidence::activate_for_decision(
+        &tx,
+        submission_id,
+        student_id,
+        &verdict,
+        &active_effect,
+        recorded_review.as_ref(),
+        decision_actor,
+    )?;
     submissions::set_status(&tx, submission_id, "confirmed")?;
     tx.commit()?;
     Ok(applied.next)
@@ -695,10 +727,14 @@ mod tests {
         begin_asr_run, finish_asr_success, AsrRunDescriptor, BeginAsrRun, FinishAsrSuccessInput,
     };
     use crate::service::import::{import_one, ImportItem, ImportOutcome};
+    use module_knowledge::db::taxonomy::{
+        create_knowledge_map, create_knowledge_node, create_textbook_edition, NewKnowledgeMap,
+        NewKnowledgeNode, NewTextbookEdition,
+    };
     use rusqlite::params;
-    use suite_core::db::repo::memory_cards;
     use suite_core::db::repo::students::{upsert as upsert_student, StudentInput};
     use suite_core::db::repo::tasks::NewTask;
+    use suite_core::db::repo::{learning_evidence as evidence_repo, memory_cards};
     use suite_core::db::{open_in_memory, run_migrations, CORE_MIGRATIONS};
     use suite_core::domain::hashing;
     use suite_core::models::TaskKind;
@@ -767,8 +803,70 @@ mod tests {
         (conn, s.id, c.id, sub_id)
     }
 
-    fn setup_structured_scored(answer: &str) -> (Connection, i64, i64, i64, i64, i64) {
+    type StructuredSetup = (
+        Connection,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+    );
+
+    fn setup_structured_scored_inner(
+        answer: &str,
+        knowledge_map_state: Option<&'static str>,
+    ) -> StructuredSetup {
         let (conn, student_id, content_id, submission_id) = setup_imported(answer);
+        let link = if let Some(map_state) = knowledge_map_state {
+            conn.execute("INSERT INTO subjects(name) VALUES ('历史')", [])
+                .unwrap();
+            let edition = create_textbook_edition(
+                &conn,
+                &NewTextbookEdition {
+                    subject_id: 1,
+                    publisher_code: "PEP",
+                    edition_code: "2024",
+                    title: "中国历史八年级上册",
+                    grade: "8",
+                    volume: "upper",
+                    curriculum_region: Some("CN"),
+                },
+            )
+            .unwrap();
+            let map = create_knowledge_map(
+                &conn,
+                &NewKnowledgeMap {
+                    textbook_edition_id: edition.id,
+                    revision: 1,
+                    state: map_state,
+                    supersedes_map_id: None,
+                },
+            )
+            .unwrap();
+            let node = create_knowledge_node(
+                &conn,
+                &NewKnowledgeNode {
+                    stable_id: None,
+                    knowledge_map_id: map.id,
+                    curriculum_node_id: None,
+                    parent_id: None,
+                    code: Some("K-MAIN"),
+                    title: "背诵主评分点",
+                    description: None,
+                    order_index: 0,
+                },
+            )
+            .unwrap();
+            Some((
+                node.id,
+                node.public_id,
+                format!("{}:r{}", map.public_id, map.revision),
+            ))
+        } else {
+            None
+        };
         let answer_version = current_answer_version(&conn, content_id).unwrap().unwrap();
         let points = [RubricPointDraftInput {
             stable_key: "main-point",
@@ -779,10 +877,10 @@ mod tests {
             required: true,
             weight: 1.0,
             order_index: 0,
-            knowledge_node_id: None,
-            knowledge_link_state: "none",
-            verified_by: None,
-            verified_at: None,
+            knowledge_node_id: link.as_ref().map(|value| value.0),
+            knowledge_link_state: if link.is_some() { "confirmed" } else { "none" },
+            verified_by: link.as_ref().map(|_| "teacher"),
+            verified_at: link.as_ref().map(|_| "2026-06-25T00:00:00.000Z"),
         }];
         let rubric = create_rubric_draft(
             &conn,
@@ -850,6 +948,21 @@ mod tests {
             submission_id,
             score.id,
             point_result.id,
+            link.as_ref().map(|value| value.1.clone()),
+            link.as_ref().map(|value| value.2.clone()),
+        )
+    }
+
+    fn setup_structured_scored(answer: &str) -> (Connection, i64, i64, i64, i64, i64) {
+        let (conn, student_id, content_id, submission_id, score_id, point_result_id, _, _) =
+            setup_structured_scored_inner(answer, None);
+        (
+            conn,
+            student_id,
+            content_id,
+            submission_id,
+            score_id,
+            point_result_id,
         )
     }
 
@@ -894,6 +1007,21 @@ mod tests {
             )
             .unwrap();
         assert_eq!(review_count, 0);
+        let evidence_counts: (i64, i64, i64) = conn
+            .query_row(
+                "SELECT count(*),
+                        sum(CASE WHEN source_type='recitation_overall'
+                                      AND evidence_kind='accuracy' THEN 1 ELSE 0 END),
+                        sum(CASE WHEN source_type='recitation_fluency'
+                                      AND evidence_kind='fluency' THEN 1 ELSE 0 END)
+                 FROM learning_evidence
+                 WHERE source_module='recitation' AND state='active'
+                   AND confirmation_level='teacher_overall'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(evidence_counts, (2, 1, 1));
     }
 
     #[test]
@@ -1003,6 +1131,121 @@ mod tests {
             )
             .unwrap();
         assert_eq!(audit_count, 1);
+        let evidence_counts: (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT count(*),
+                        sum(CASE WHEN confirmation_level='teacher_overall' THEN 1 ELSE 0 END),
+                        sum(CASE WHEN confirmation_level='teacher_accepted' THEN 1 ELSE 0 END),
+                        sum(CASE WHEN source_type='recitation_rubric_point'
+                                      AND knowledge_node_id IS NULL THEN 1 ELSE 0 END)
+                 FROM learning_evidence
+                 WHERE source_module='recitation' AND state='active'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(evidence_counts, (4, 2, 2, 2));
+        let evidence_events: (i64, i64) = conn
+            .query_row(
+                "SELECT
+                   (SELECT count(*) FROM outbox_events
+                    WHERE event_type='learning_evidence_changed'
+                      AND aggregate_type='learning_evidence'),
+                   (SELECT count(*) FROM audit_events
+                    WHERE action='recitation.learning_evidence.activated'
+                      AND object_type='learning_evidence')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(evidence_events, (4, 4));
+    }
+
+    #[test]
+    fn confirmed_rubric_link_projects_public_knowledge_identity() {
+        let (
+            conn,
+            _student_id,
+            _content_id,
+            submission_id,
+            score_id,
+            point_result_id,
+            node_public_id,
+            map_version,
+        ) = setup_structured_scored_inner("床前明月光", Some("confirmed"));
+        let review = accepted_review(score_id, point_result_id);
+        human_decide_with_point_review(
+            &conn,
+            submission_id,
+            &HumanDecisionRequest {
+                result: "pass",
+                note: Some("确认总体、逐点和知识链接"),
+                decided_by: Some("teacher"),
+                point_review: Some(&review),
+            },
+            NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        let targets: Vec<(String, String)> = {
+            let mut statement = conn
+                .prepare(
+                    "SELECT knowledge_node_id,knowledge_map_version
+                     FROM learning_evidence
+                     WHERE source_type='recitation_rubric_point' AND state='active'
+                     ORDER BY evidence_kind",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(targets.len(), 2);
+        assert!(targets.iter().all(|target| {
+            target.0 == node_public_id.as_deref().unwrap()
+                && target.1 == map_version.as_deref().unwrap()
+        }));
+    }
+
+    #[test]
+    fn draft_knowledge_map_is_not_projected_as_formal_point_identity() {
+        let (conn, _, _, submission_id, score_id, point_result_id, _, _) =
+            setup_structured_scored_inner("床前明月光", Some("draft"));
+        let review = accepted_review(score_id, point_result_id);
+        human_decide_with_point_review(
+            &conn,
+            submission_id,
+            &HumanDecisionRequest {
+                result: "pass",
+                note: Some("确认逐点，但知识地图尚未确认"),
+                decided_by: Some("teacher"),
+                point_review: Some(&review),
+            },
+            NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        let targets: Vec<(Option<String>, String)> = {
+            let mut statement = conn
+                .prepare(
+                    "SELECT knowledge_node_id,knowledge_map_version
+                     FROM learning_evidence
+                     WHERE source_type='recitation_rubric_point' AND state='active'
+                     ORDER BY evidence_kind",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(targets.len(), 2);
+        assert!(targets
+            .iter()
+            .all(|target| target.0.is_none() && target.1 == "unmapped:r1"));
     }
 
     #[test]
@@ -1100,6 +1343,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(superseded, 2);
+        let evidence_states: (i64, i64, i64) = conn
+            .query_row(
+                "SELECT count(*),
+                        sum(CASE WHEN state='active' THEN 1 ELSE 0 END),
+                        sum(CASE WHEN state='superseded' THEN 1 ELSE 0 END)
+                 FROM learning_evidence
+                 WHERE source_module='recitation'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(evidence_states, (7, 4, 3));
     }
 
     #[test]
@@ -1150,6 +1405,93 @@ mod tests {
                 .unwrap()
                 .state,
             "reverted"
+        );
+        let evidence_states: (i64, i64) = conn
+            .query_row(
+                "SELECT sum(CASE WHEN state='active' THEN 1 ELSE 0 END),
+                        sum(CASE WHEN state='reverted' THEN 1 ELSE 0 END)
+                 FROM learning_evidence WHERE source_module='recitation'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(evidence_states, (4, 4));
+    }
+
+    #[test]
+    fn database_blocks_effect_revert_while_recitation_evidence_is_active() {
+        let (conn, _sid, _cid, submission_id, _score_id, _point_result_id) =
+            setup_structured_scored("床前明月光");
+        let today = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        human_decide(
+            &conn,
+            submission_id,
+            "pass",
+            Some("确认总体"),
+            Some("teacher"),
+            today,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        let verdict = verdicts::get_by_submission(&conn, submission_id)
+            .unwrap()
+            .unwrap();
+        let effect = decision_effects::active_for_verdict(&conn, verdict.id)
+            .unwrap()
+            .unwrap();
+        let error = decision_effects::mark_reverted(&conn, effect.id)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("M1_LEARNING_EVIDENCE_MUST_REVERT_FIRST"));
+        assert_eq!(
+            learning_evidence::revert_for_effect(&conn, &effect).unwrap(),
+            2
+        );
+        decision_effects::mark_reverted(&conn, effect.id).unwrap();
+    }
+
+    #[test]
+    fn evidence_write_failure_rolls_back_decision_effect_and_schedule() {
+        let (conn, student_id, content_id, submission_id, _score_id, _point_result_id) =
+            setup_structured_scored("床前明月光");
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER fail_recitation_fluency_evidence
+             BEFORE INSERT ON learning_evidence
+             WHEN NEW.source_module='recitation' AND NEW.evidence_kind='fluency'
+             BEGIN
+               SELECT RAISE(ABORT,'TEST_FAIL_RECITATION_EVIDENCE');
+             END;",
+        )
+        .unwrap();
+        let error = human_decide(
+            &conn,
+            submission_id,
+            "pass",
+            Some("触发证据写入失败"),
+            Some("teacher"),
+            NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
+            &ScoreCfg::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("TEST_FAIL_RECITATION_EVIDENCE"));
+        let verdict = verdicts::get_by_submission(&conn, submission_id)
+            .unwrap()
+            .unwrap();
+        assert!(verdict.human_result.is_none());
+        assert!(decision_effects::active_for_verdict(&conn, verdict.id)
+            .unwrap()
+            .is_none());
+        assert!(
+            memory_cards::get(&conn, MODULE, student_id, REF_TYPE, content_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            evidence_repo::list_active_for_student(&conn, student_id, false)
+                .unwrap()
+                .len(),
+            0
         );
     }
 
@@ -1356,14 +1698,8 @@ mod tests {
             })
             .collect();
         let day2 = NaiveDate::from_ymd_opt(2026, 6, 26).unwrap();
-        let scored = score_submission(
-            &conn,
-            makeup_sub,
-            &words,
-            day2,
-            &ScoreCfg::default(),
-        )
-        .unwrap();
+        let scored =
+            score_submission(&conn, makeup_sub, &words, day2, &ScoreCfg::default()).unwrap();
         assert!(scored.pass);
         assert_eq!(scored.quality, "A");
         let next = human_decide(
@@ -1612,7 +1948,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(verdicts_count, 0);
-        assert_eq!(submissions::get(&conn, sub).unwrap().unwrap().status, "pending");
+        assert_eq!(
+            submissions::get(&conn, sub).unwrap().unwrap().status,
+            "pending"
+        );
     }
 
     #[test]

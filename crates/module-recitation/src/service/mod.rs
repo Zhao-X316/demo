@@ -1,6 +1,7 @@
 //! 背诵模块领域服务：导入流水线、评分编排、任务生成。
 pub mod ai_pipeline;
 pub mod import;
+pub(crate) mod learning_evidence;
 pub mod matching;
 pub mod recognition;
 pub mod rubric_setup;
