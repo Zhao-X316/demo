@@ -12,6 +12,7 @@ MOCK_SCRIPT = r"""
 window.__blueprintCalls = [];
 window.__assemblies = [];
 window.__duplicateDecision = null;
+window.__candidatePending = true;
 window.__TAURI_INTERNALS__ = {
   transformCallback: () => 1,
   unregisterCallback: () => undefined,
@@ -54,6 +55,52 @@ window.__TAURI_INTERNALS__ = {
     if (cmd === "list_class_teaching_events"
         || cmd === "list_class_teaching_inputs"
         || cmd === "list_class_action_drafts") return [];
+    if (cmd === "k1_candidate_review_list") {
+      return {
+        schema_version: 1,
+        rule_version: "m2.5-candidate-review-v1",
+        calculated_at: "2026-07-19T12:00:00Z",
+        pending_count: window.__candidatePending ? 1 : 0,
+        boundary_note: "这里只整理已通过隐私门禁的老师私有 C0 候选；确认到 L1 不会切换当前作业、重算成绩或进入学习图谱。",
+        items: window.__candidatePending ? [{
+          candidate_public_id: "candidate-1",
+          source_type: "student_paper",
+          privacy_status: "text_only",
+          question_type: "single",
+          stem: "洋务运动后期提出的口号是？",
+          material_text: null,
+          max_score: 2,
+          options: [
+            { label: "A", content: "自强", order_index: 0 },
+            { label: "B", content: "求富", order_index: 1 }
+          ],
+          content_hash: "c".repeat(64),
+          quality_issues: ["standard_answer_unconfirmed"],
+          source_question_version_public_id: "candidate-version-1",
+          source_quality_level: "C0",
+          created_at: "2026-07-19T11:50:00Z",
+          review_action: null,
+          result_question_version_public_id: null,
+          reviewed_at: null
+        }] : []
+      };
+    }
+    if (cmd === "k1_candidate_promote_l1") {
+      window.__candidatePending = false;
+      return {
+        public_id: "candidate-review-1",
+        candidate_public_id: "candidate-1",
+        action: "promote_l1",
+        source_question_version_public_id: "candidate-version-1",
+        result_question_version_public_id: "candidate-version-2",
+        result_answer_key_version_public_id: "candidate-answer-1",
+        result_quality_level: "L1",
+        reviewed_by: "local_teacher",
+        reviewed_at: "2026-07-19T12:02:00Z",
+        current_assessment_rebound: false,
+        boundary_note: "只更新个人题库候选；当前作业固定题目、成绩和学习证据均未切换。"
+      };
+    }
     if (cmd === "k1_question_search") {
       const candidate = {
         question_version_public_id: "question-2",
@@ -288,6 +335,29 @@ def test_question_bank(base_url: str) -> None:
         assert duplicate_calls[0]["args"]["input"]["leftQuestionVersionPublicId"] == "question-1"
         assert duplicate_calls[0]["args"]["input"]["rightQuestionVersionPublicId"] == "question-2"
         page.screenshot(path="/tmp/jiaofu-question-search.png", full_page=True)
+
+        page.get_by_role("button", name="待整理新题").click()
+        expect(page.get_by_text("1 道待整理", exact=True)).to_be_visible()
+        expect(page.locator(".candidate-list-item").filter(
+            has_text="洋务运动后期提出的口号是？"
+        )).to_be_visible()
+        page.get_by_placeholder("填写一个正确选项字母，如 B").fill("B")
+        page.screenshot(path="/tmp/jiaofu-question-candidate-review-editor.png", full_page=True)
+        page.get_by_role("button", name="确认并收入我的题库").click()
+        expect(page.get_by_text("已收入个人题库 L1；当前作业和历史成绩未切换。", exact=True)).to_be_visible()
+        expect(page.get_by_text("当前没有待整理题目。", exact=False)).to_be_visible()
+        candidate_calls = page.evaluate(
+            """window.__blueprintCalls.filter((item) => item.cmd === "k1_candidate_promote_l1")"""
+        )
+        assert len(candidate_calls) == 1
+        candidate_input = candidate_calls[0]["args"]["input"]
+        assert candidate_input["candidatePublicId"] == "candidate-1"
+        assert candidate_input["answerText"] == "B"
+        assert candidate_input["options"] == [
+            {"label": "A", "content": "自强", "orderIndex": 0},
+            {"label": "B", "content": "求富", "orderIndex": 1},
+        ]
+        page.screenshot(path="/tmp/jiaofu-question-candidate-review.png", full_page=True)
 
         page.get_by_role("button", name="按蓝图组卷").click()
         expect(page.get_by_text("1. 这次要练什么", exact=True)).to_be_visible()

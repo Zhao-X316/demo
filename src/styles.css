@@ -743,6 +743,25 @@ code { background: #EEF0F3; padding: 1px 5px; border-radius: 4px; font-size: 12p
 .duplicate-candidate-row p { margin: 5px 0 0; color: var(--text-2); font-size: 12px; line-height: 1.5; }
 .duplicate-candidate-row > div:last-child { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
 .duplicate-candidate-row button { font-size: 11.5px; }
+.candidate-review-overview { margin-top: 14px; }
+.candidate-empty { margin-top: 12px; }
+.candidate-review-layout { display: grid; grid-template-columns: minmax(240px, .65fr) minmax(0, 1.35fr); gap: 12px; align-items: start; margin-top: 12px; }
+.candidate-review-list { display: flex; flex-direction: column; gap: 7px; padding: 9px; }
+.candidate-list-item { display: flex; flex-direction: column; align-items: stretch; gap: 5px; width: 100%; padding: 10px 11px; border: 1px solid transparent; background: transparent; text-align: left; }
+.candidate-list-item:hover, .candidate-list-item.active { border-color: var(--brand-line); background: var(--brand-weak); }
+.candidate-list-item span, .candidate-list-item small { color: var(--muted); font-size: 10.5px; }
+.candidate-list-item b { color: var(--text); font-size: 12.5px; line-height: 1.5; }
+.candidate-review-editor textarea, .candidate-review-editor input, .candidate-review-editor select { width: 100%; }
+.candidate-editor-grid { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(100px, .35fr); gap: 10px; }
+.candidate-option-editor { margin-bottom: 12px; }
+.candidate-option-editor > span { display: block; margin-bottom: 5px; }
+.candidate-option-editor > div { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; gap: 7px; margin-bottom: 6px; }
+.candidate-option-editor > div > button { padding-inline: 9px; font-size: 11px; }
+.candidate-option-editor > button { margin-top: 2px; font-size: 11.5px; }
+.candidate-review-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.candidate-review-actions > div { display: flex; flex: 1; flex-direction: column; gap: 3px; }
+.candidate-review-actions b { font-size: 12.5px; }
+.candidate-review-actions span { color: var(--muted); font-size: 11px; }
 @media (max-width: 900px) {
   .blueprint-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .blueprint-type-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -752,6 +771,8 @@ code { background: #EEF0F3; padding: 1px 5px; border-radius: 4px; font-size: 12p
   .question-search-advanced > div { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .duplicate-candidate-row { grid-template-columns: 1fr; }
   .duplicate-candidate-row > div:last-child { justify-content: flex-start; }
+  .candidate-review-layout { grid-template-columns: 1fr; }
+  .candidate-review-actions { align-items: stretch; flex-direction: column; }
 }
 
 /* ───── M2 题目批改 ───── */

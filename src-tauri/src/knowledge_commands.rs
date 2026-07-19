@@ -4,6 +4,10 @@ use module_exam::service::blueprint_assembly::{
     self, BlueprintAssembly, BlueprintOptions, BlueprintPreview, BlueprintPreviewRequest,
     BlueprintQuestionTypeTarget, ConfirmBlueprintRequest,
 };
+use module_exam::service::question_candidate_review::{
+    self, CandidateReviewDecision, CandidateReviewInbox, DiscardCandidateRequest,
+    PromoteCandidateRequest,
+};
 use module_knowledge::db::search::{
     self, DuplicateReviewDecision, QuestionSearchRequest, QuestionSearchResponse,
     ReviewDuplicateRequest,
@@ -149,4 +153,44 @@ pub fn k1_duplicate_review(
         },
     )
     .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn k1_candidate_review_list(
+    state: State<'_, AppState>,
+    include_reviewed: Option<bool>,
+    limit: Option<i64>,
+) -> Result<CandidateReviewInbox, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    question_candidate_review::list_candidate_review_inbox(
+        &connection,
+        LOCAL_TEACHER_ACTOR_ID,
+        include_reviewed.unwrap_or(false),
+        limit.unwrap_or(100),
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn k1_candidate_promote_l1(
+    state: State<'_, AppState>,
+    input: PromoteCandidateRequest,
+) -> Result<CandidateReviewDecision, String> {
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    question_candidate_review::promote_candidate_to_l1(
+        &mut connection,
+        LOCAL_TEACHER_ACTOR_ID,
+        &input,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn k1_candidate_discard(
+    state: State<'_, AppState>,
+    input: DiscardCandidateRequest,
+) -> Result<CandidateReviewDecision, String> {
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    question_candidate_review::discard_candidate(&mut connection, LOCAL_TEACHER_ACTOR_ID, &input)
+        .map_err(|error| error.to_string())
 }

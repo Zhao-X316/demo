@@ -15,6 +15,7 @@ pub mod ordered_retake;
 pub mod ordinary_structure;
 pub mod page_cycle;
 pub mod papers;
+pub mod question_candidate_review;
 pub mod question_ingest;
 pub mod subjective;
 pub mod subjective_links;
