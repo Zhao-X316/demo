@@ -160,6 +160,10 @@ static MIGRATIONS: &[Migration] = &[
         id: "exam_0033",
         sql: include_str!("../migrations/0033_ordinary_question_source_sync.sql"),
     },
+    Migration {
+        id: "exam_0034",
+        sql: include_str!("../migrations/0034_question_performance_impact.sql"),
+    },
 ];
 
 /// 模块迁移（供外壳/测试在 core 迁移之后运行）。

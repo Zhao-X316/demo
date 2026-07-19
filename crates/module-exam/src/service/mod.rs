@@ -18,6 +18,7 @@ pub mod page_cycle;
 pub mod papers;
 pub mod question_candidate_review;
 pub mod question_ingest;
+pub mod question_performance;
 pub mod subjective;
 pub mod subjective_links;
 

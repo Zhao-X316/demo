@@ -1094,6 +1094,117 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
   border-top: 1px solid var(--line);
 }
 
+/* ───── K1-5 题目实际表现与版本影响 ───── */
+.question-performance-page { display: flex; flex-direction: column; gap: 14px; }
+.question-performance-intro .hint, .question-impact-panel > .hint {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.question-performance-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+  gap: 12px;
+}
+.question-performance-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 15px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.question-performance-card-head, .performance-score-split, .performance-contexts,
+.impact-target, .impact-row-list article, .impact-row-list article > div {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.question-performance-card-head { justify-content: space-between; }
+.question-performance-card-head > div { display: flex; flex-wrap: wrap; gap: 6px; }
+.tag.warning { background: var(--warn-bg); color: var(--warn); }
+.tag.subtle { background: var(--bg-sub); color: var(--muted); }
+.question-performance-card h3 { font-size: 14px; line-height: 1.55; }
+.question-performance-metrics, .question-impact-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+.question-performance-metrics > div, .question-impact-summary > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px;
+  border-radius: 8px;
+  background: var(--bg-sub);
+}
+.question-performance-metrics b, .question-impact-summary b {
+  color: var(--text);
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+.question-performance-metrics span, .question-impact-summary span,
+.performance-score-split, .question-performance-card .muted {
+  color: var(--muted);
+  font-size: 11px;
+}
+.performance-score-split span { padding-right: 8px; border-right: 1px solid var(--line-strong); }
+.performance-score-split span:last-child { border-right: 0; }
+.performance-contexts span, .impact-target span {
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: var(--brand-weak);
+  color: var(--brand);
+  font-size: 11px;
+}
+.question-performance-card > button, .question-performance-card .ok-inline { margin-top: auto; }
+.ok-inline { color: var(--ok); font-size: 12px; }
+.question-impact-panel { display: flex; flex-direction: column; gap: 14px; }
+.question-impact-summary { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.impact-row-list { display: flex; flex-direction: column; gap: 8px; }
+.impact-row-list article {
+  justify-content: space-between;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-sub);
+}
+.impact-row-list article > div:first-child { flex-direction: column; align-items: flex-start; }
+.impact-row-list article b { font-size: 13px; }
+.impact-row-list article span { color: var(--muted); font-size: 11px; }
+.impact-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+}
+.impact-actions label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 8px;
+  align-items: center;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.impact-actions label.selected { border-color: var(--brand); background: var(--brand-weak); }
+.impact-actions label:has(input:disabled) { cursor: default; opacity: .55; }
+.impact-actions label span { grid-column: 2; color: var(--muted); font-size: 11px; }
+.impact-actions label b { font-size: 12px; }
+.warning-box {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.impact-confirm { align-self: flex-end; }
+
 @media (max-width: 920px) {
   .dashboard-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dashboard-grid { grid-template-columns: 1fr; }
@@ -1132,6 +1243,8 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
   .profile-inline-note, .profile-teacher-assessment > div:first-child { align-items: stretch; flex-direction: column; }
   .profile-teacher-assessment-fields { grid-template-columns: 1fr; }
   .knowledge-link-toolbar, .knowledge-link-confirm { grid-template-columns: 1fr; }
+  .question-impact-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .impact-actions { grid-template-columns: 1fr; }
   .knowledge-link-add-row, .knowledge-link-add-row.ability-row {
     grid-template-columns: 1fr 1fr;
   }
@@ -1199,4 +1312,6 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
   .knowledge-link-add-row, .knowledge-link-add-row.ability-row {
     grid-template-columns: 1fr;
   }
+  .question-performance-grid { grid-template-columns: 1fr; }
+  .question-performance-metrics, .question-impact-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

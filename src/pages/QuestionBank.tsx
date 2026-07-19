@@ -22,11 +22,17 @@ import {
   K1QuestionType,
   QuestionSearchInput,
   QuestionSearchResponse,
+  QuestionImpactAction,
+  QuestionImpactPlan,
+  QuestionPerformanceCatalog,
+  QuestionPerformanceItem,
+  QuestionVersionImpactPreview,
   SourceDraft,
   SourceInboxItem,
   acceptSourceDraft,
   confirmAnswerMatch,
   confirmKnowledgeLinks,
+  confirmQuestionImpact,
   confirmBlueprint,
   discardSourceDraft,
   discardCandidate,
@@ -42,10 +48,12 @@ import {
   loadLinkReviewEditor,
   loadLinkReviewInbox,
   previewBlueprint,
+  previewQuestionImpact,
   promoteCandidateToL1,
   reviewDuplicate,
   searchQuestions,
   suggestKnowledgeLinks,
+  loadQuestionPerformance,
 } from "../api/knowledge";
 
 const TYPE_LABEL: Record<K1QuestionType, string> = {
@@ -98,6 +106,12 @@ function newLinkRequestKey(action: "suggest" | "confirm") {
   const random = globalThis.crypto?.randomUUID?.()
     ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   return `k1-link-${action}-${random}`;
+}
+
+function newImpactRequestKey() {
+  const random = globalThis.crypto?.randomUUID?.()
+    ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `k1-impact-${random}`;
 }
 
 function sameNumber(left: number, right: number) {
@@ -2173,8 +2187,250 @@ function CandidateReviewPanel() {
   );
 }
 
+const ASSESSMENT_CONTEXT_LABEL: Record<string, string> = {
+  homework: "日常作业",
+  quiz: "随堂测验",
+  exam: "正式考试",
+  practice: "练习",
+  correction: "订正",
+};
+
+function percentage(value: number | null) {
+  return value == null ? "暂无" : `${Math.round(value * 100)}%`;
+}
+
+function changeLabels(row: QuestionVersionImpactPreview["rows"][number]) {
+  const labels: string[] = [];
+  if (row.answerChanged) labels.push("答案");
+  if (row.rubricChanged) labels.push("评分点");
+  if (row.linkChanged) labels.push("知识链接");
+  return labels.join("、") || "无";
+}
+
+function QuestionPerformancePanel() {
+  const [catalog, setCatalog] = useState<QuestionPerformanceCatalog | null>(null);
+  const [selected, setSelected] = useState<QuestionPerformanceItem | null>(null);
+  const [preview, setPreview] = useState<QuestionVersionImpactPreview | null>(null);
+  const [action, setAction] = useState<QuestionImpactAction>("future_only");
+  const [plan, setPlan] = useState<QuestionImpactPlan | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState("");
+
+  const refresh = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      setCatalog(await loadQuestionPerformance(200));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  const openImpact = async (item: QuestionPerformanceItem) => {
+    setSelected(item);
+    setPreview(null);
+    setPlan(null);
+    setAction("future_only");
+    setWorking(true);
+    setError("");
+    try {
+      setPreview(await previewQuestionImpact(item.questionVersionPublicId));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const confirmImpact = async () => {
+    if (!preview) return;
+    setWorking(true);
+    setError("");
+    try {
+      setPlan(await confirmQuestionImpact({
+        requestKey: newImpactRequestKey(),
+        questionVersionPublicId: preview.questionVersionPublicId,
+        expectedPreviewHash: preview.previewHash,
+        action,
+        plannedBy: "local_teacher",
+      }));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  return (
+    <div className="question-performance-page">
+      {error && <div className="error">{error}</div>}
+      <section className="dashboard-panel question-performance-intro">
+        <div className="dashboard-panel-head">
+          <div>
+            <b>题目实际表现</b>
+            <span>只统计当前已发布成绩中老师确认的结果，不把单个班级正确率写成题目永久难度。</span>
+          </div>
+          <button disabled={loading || working} onClick={refresh}>刷新统计</button>
+        </div>
+        {catalog && <div className="hint">{catalog.boundaryNote}</div>}
+      </section>
+
+      {loading ? (
+        <div className="loading">正在汇总题目表现…</div>
+      ) : !catalog?.items.length ? (
+        <section className="dashboard-panel empty-state">
+          <b>还没有可汇总的正式题目</b>
+          <span>题目被作业使用后会进入这里；发布老师确认的成绩后才会出现实际得分表现。</span>
+        </section>
+      ) : (
+        <div className="question-performance-grid">
+          {catalog.items.map((item) => (
+            <article className="question-performance-card" key={item.questionVersionPublicId}>
+              <div className="question-performance-card-head">
+                <div>
+                  <span className="tag">{TYPE_LABEL[item.questionType]}</span>
+                  <span className="tag subtle">第 {item.revision} 版 · {item.qualityLevel}</span>
+                </div>
+                {item.hasVersionUpdateImpact && <span className="tag warning">有新版影响</span>}
+              </div>
+              <h3>{item.stem}</h3>
+              <div className="question-performance-metrics">
+                <div><b>{percentage(item.averageScoreRate)}</b><span>平均得分率</span></div>
+                <div><b>{item.publishedResponseCount}</b><span>已发布作答</span></div>
+                <div><b>{item.assessmentUsageCount}</b><span>使用作业数</span></div>
+                <div><b>{percentage(item.fullCreditRate)}</b><span>满分率</span></div>
+              </div>
+              <div className="performance-score-split">
+                <span>满分 {item.fullCreditCount}</span>
+                <span>部分得分 {item.partialCreditCount}</span>
+                <span>零分 {item.zeroScoreCount}</span>
+                <span>首次 {item.firstAttemptCount} / 订正 {item.correctionAttemptCount}</span>
+              </div>
+              {item.contextBreakdown.length > 0 && (
+                <div className="performance-contexts">
+                  {item.contextBreakdown.map((context) => (
+                    <span key={context.assessmentContext}>
+                      {ASSESSMENT_CONTEXT_LABEL[context.assessmentContext] ?? context.assessmentContext}
+                      {" "}{context.publishedResponseCount} 份 · {percentage(context.averageScoreRate)}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {item.latestPublishedAt && (
+                <div className="muted">最近正式成绩：{new Date(item.latestPublishedAt).toLocaleString()}</div>
+              )}
+              {item.hasVersionUpdateImpact ? (
+                <button className="primary" disabled={working} onClick={() => openImpact(item)}>
+                  查看新版影响
+                </button>
+              ) : (
+                <div className="ok-inline">当前作业均使用最新确认版本</div>
+              )}
+            </article>
+          ))}
+        </div>
+      )}
+
+      {selected && (
+        <section className="dashboard-panel question-impact-panel">
+          <div className="dashboard-panel-head">
+            <div>
+              <b>版本变更影响预览</b>
+              <span>{selected.stem}</span>
+            </div>
+            <button disabled={working} onClick={() => {
+              setSelected(null);
+              setPreview(null);
+              setPlan(null);
+            }}>关闭</button>
+          </div>
+          {working && !preview ? <div className="loading">正在核对历史使用范围…</div> : preview && (
+            <>
+              <div className="impact-target">
+                <span>目标答案第 {preview.target.answerKeyRevision} 版</span>
+                <span>目标评分点第 {preview.target.rubricRevision} 版</span>
+                <span>目标知识链接第 {preview.target.linkSetRevision} 版</span>
+              </div>
+              <div className="question-impact-summary">
+                <div><b>{preview.affectedAssessmentCount}</b><span>受影响作业</span></div>
+                <div><b>{preview.unpublishedAttemptCount}</b><span>未发布作答</span></div>
+                <div><b>{preview.publishedAttemptCount}</b><span>已发布作答</span></div>
+                <div><b>{preview.activeLearningEvidenceCount}</b><span>有效学习证据</span></div>
+                <div><b>{preview.profileSnapshotCount}</b><span>已有图谱引用</span></div>
+              </div>
+              <div className="impact-row-list">
+                {preview.rows.map((row) => (
+                  <article key={row.assessmentItemPublicId}>
+                    <div>
+                      <b>{row.assessmentTitle}</b>
+                      <span>{row.className} · 变化：{changeLabels(row)}</span>
+                    </div>
+                    <div>
+                      <span>未发布 {row.unpublishedAttemptCount}</span>
+                      <span>已发布 {row.publishedAttemptCount}</span>
+                      <span>证据 {row.activeLearningEvidenceCount}</span>
+                      <span>图谱 {row.profileSnapshotCount}</span>
+                    </div>
+                  </article>
+                ))}
+              </div>
+              <div className="impact-actions">
+                <label className={action === "future_only" ? "selected" : ""}>
+                  <input type="radio" checked={action === "future_only"} onChange={() => setAction("future_only")} />
+                  <b>只用于以后新作业</b>
+                  <span>不建立历史复核任务</span>
+                </label>
+                <label className={action === "recalculate_unpublished" ? "selected" : ""}>
+                  <input
+                    type="radio"
+                    checked={action === "recalculate_unpublished"}
+                    disabled={preview.unpublishedAttemptCount === 0}
+                    onChange={() => setAction("recalculate_unpublished")}
+                  />
+                  <b>复核未发布作答</b>
+                  <span>建立 {preview.unpublishedAttemptCount} 条待重新计算清单</span>
+                </label>
+                <label className={action === "review_published" ? "selected" : ""}>
+                  <input
+                    type="radio"
+                    checked={action === "review_published"}
+                    disabled={preview.publishedAttemptCount === 0}
+                    onChange={() => setAction("review_published")}
+                  />
+                  <b>复核已发布成绩</b>
+                  <span>建立 {preview.publishedAttemptCount} 条人工复核清单</span>
+                </label>
+              </div>
+              <div className="warning-box">
+                确认只冻结影响计划和待办清单，不会切换作业版本，不会改分、重新发布、改写学习证据或覆盖旧图谱。
+              </div>
+              {plan ? (
+                <div className="ok-banner">
+                  已冻结处理计划，共 {plan.taskCount} 条待办；本次没有修改任何成绩和学习证据。
+                </div>
+              ) : (
+                <button className="primary impact-confirm" disabled={working} onClick={confirmImpact}>
+                  {working ? "正在冻结计划…" : "确认处理方式"}
+                </button>
+              )}
+              <div className="hint">{preview.boundaryNote}</div>
+            </>
+          )}
+        </section>
+      )}
+    </div>
+  );
+}
+
 export default function QuestionBank({ onOpenExam }: { onOpenExam: () => void }) {
-  const [mode, setMode] = useState<"import" | "search" | "candidates" | "blueprint">("import");
+  const [mode, setMode] = useState<"import" | "search" | "candidates" | "performance" | "blueprint">("import");
   const [options, setOptions] = useState<BlueprintOptions | null>(null);
   const [classId, setClassId] = useState(0);
   const [mapPublicId, setMapPublicId] = useState("");
@@ -2376,6 +2632,9 @@ export default function QuestionBank({ onOpenExam }: { onOpenExam: () => void })
         <button className={mode === "candidates" ? "tab active" : "tab"} onClick={() => setMode("candidates")}>
           待整理新题
         </button>
+        <button className={mode === "performance" ? "tab active" : "tab"} onClick={() => setMode("performance")}>
+          表现与版本影响
+        </button>
         <button className={mode === "blueprint" ? "tab active" : "tab"} onClick={() => setMode("blueprint")}>
           按蓝图组卷
         </button>
@@ -2383,6 +2642,8 @@ export default function QuestionBank({ onOpenExam }: { onOpenExam: () => void })
 
       {mode === "import" ? <SourceImportPanel /> : mode === "search" ? <QuestionSearchPanel options={options} /> : mode === "candidates" ? (
         <CandidateReviewPanel />
+      ) : mode === "performance" ? (
+        <QuestionPerformancePanel />
       ) : (
         <>
           {error && <div className="error">{error}</div>}

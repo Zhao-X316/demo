@@ -812,3 +812,126 @@ export const suggestKnowledgeLinks = (
 
 export const confirmKnowledgeLinks = (input: ConfirmLinkReviewInput) =>
   call<LinkReviewResult>("k1_link_confirm", { input });
+
+export interface QuestionPerformanceContext {
+  assessmentContext: string;
+  publishedResponseCount: number;
+  averageScoreRate: number | null;
+  fullCreditRate: number | null;
+}
+
+export interface QuestionPerformanceItem {
+  questionVersionPublicId: string;
+  revision: number;
+  ownerScope: string;
+  questionType: K1QuestionType;
+  stem: string;
+  maxScore: number;
+  qualityLevel: string;
+  state: string;
+  assessmentUsageCount: number;
+  publishedResponseCount: number;
+  fullCreditCount: number;
+  partialCreditCount: number;
+  zeroScoreCount: number;
+  averageScoreRate: number | null;
+  fullCreditRate: number | null;
+  firstAttemptCount: number;
+  correctionAttemptCount: number;
+  latestPublishedAt: string | null;
+  contextBreakdown: QuestionPerformanceContext[];
+  hasVersionUpdateImpact: boolean;
+}
+
+export interface QuestionPerformanceCatalog {
+  schemaVersion: number;
+  ruleVersion: string;
+  calculatedAt: string;
+  items: QuestionPerformanceItem[];
+  boundaryNote: string;
+}
+
+export interface QuestionImpactTargetVersion {
+  answerKeyVersionPublicId: string;
+  answerKeyRevision: number;
+  rubricVersionPublicId: string;
+  rubricRevision: number;
+  linkSetPublicId: string;
+  linkSetRevision: number;
+}
+
+export interface QuestionImpactRow {
+  assessmentPublicId: string;
+  assessmentTitle: string;
+  className: string;
+  assessmentVersionPublicId: string;
+  assessmentItemPublicId: string;
+  sourceAnswerKeyVersionPublicId: string;
+  sourceRubricVersionPublicId: string;
+  sourceLinkSetPublicId: string;
+  answerChanged: boolean;
+  rubricChanged: boolean;
+  linkChanged: boolean;
+  unpublishedAttemptCount: number;
+  publishedAttemptCount: number;
+  activeLearningEvidenceCount: number;
+  profileSnapshotCount: number;
+}
+
+export interface QuestionVersionImpactPreview {
+  schemaVersion: number;
+  ruleVersion: string;
+  calculatedAt: string;
+  previewHash: string;
+  questionVersionPublicId: string;
+  questionType: K1QuestionType;
+  stem: string;
+  target: QuestionImpactTargetVersion;
+  affectedAssessmentCount: number;
+  affectedAssessmentVersionCount: number;
+  affectedItemCount: number;
+  unpublishedAttemptCount: number;
+  publishedAttemptCount: number;
+  activeLearningEvidenceCount: number;
+  profileSnapshotCount: number;
+  rows: QuestionImpactRow[];
+  boundaryNote: string;
+}
+
+export type QuestionImpactAction =
+  | "future_only"
+  | "recalculate_unpublished"
+  | "review_published";
+
+export interface ConfirmQuestionImpactPlanInput {
+  requestKey: string;
+  questionVersionPublicId: string;
+  expectedPreviewHash: string;
+  action: QuestionImpactAction;
+  plannedBy: "local_teacher";
+}
+
+export interface QuestionImpactPlan {
+  publicId: string;
+  questionVersionPublicId: string;
+  expectedPreviewHash: string;
+  action: QuestionImpactAction;
+  taskCount: number;
+  plannedBy: string;
+  plannedAt: string;
+  changesAssessmentBinding: false;
+  changesGrade: false;
+  changesPublication: false;
+  changesLearningEvidence: false;
+}
+
+export const loadQuestionPerformance = (limit = 200) =>
+  call<QuestionPerformanceCatalog>("k1_question_performance", { limit });
+
+export const previewQuestionImpact = (questionVersionPublicId: string) =>
+  call<QuestionVersionImpactPreview>("k1_question_impact_preview", {
+    questionVersionPublicId,
+  });
+
+export const confirmQuestionImpact = (input: ConfirmQuestionImpactPlanInput) =>
+  call<QuestionImpactPlan>("k1_question_impact_confirm", { input });
