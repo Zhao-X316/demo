@@ -13,8 +13,10 @@ use module_exam::service::question_candidate_review::{
 };
 use module_exam::service::question_performance::{
     self, ConfirmQuestionImpactPlanRequest, PrepareQuestionImpactReviewCasesRequest,
-    PrepareQuestionImpactReviewCasesResult, QuestionImpactPlan, QuestionImpactReviewCaseCatalog,
+    PrepareQuestionImpactReviewCasesResult, PublishQuestionImpactReviewCaseRequest,
+    PublishQuestionImpactReviewCaseResult, QuestionImpactPlan, QuestionImpactReviewCaseCatalog,
     QuestionPerformanceCatalog, QuestionVersionImpactPreview,
+    ResolveQuestionImpactReviewCaseRequest, ResolveQuestionImpactReviewCaseResult,
 };
 use module_knowledge::db::answer_sources::{
     self, AnswerMatchReview, AnswerSourceInboxItem, AnswerTargetSet, ConfirmAnswerMatchRequest,
@@ -306,6 +308,34 @@ pub fn k1_question_impact_prepare(
     let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     question_performance::prepare_question_impact_review_cases(
         &mut connection,
+        LOCAL_TEACHER_ACTOR_ID,
+        &input,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn k1_question_impact_resolve(
+    state: State<'_, AppState>,
+    input: ResolveQuestionImpactReviewCaseRequest,
+) -> Result<ResolveQuestionImpactReviewCaseResult, String> {
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    question_performance::resolve_question_impact_review_case(
+        &mut connection,
+        LOCAL_TEACHER_ACTOR_ID,
+        &input,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn k1_question_impact_publish(
+    state: State<'_, AppState>,
+    input: PublishQuestionImpactReviewCaseRequest,
+) -> Result<PublishQuestionImpactReviewCaseResult, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    question_performance::publish_question_impact_review_case(
+        &connection,
         LOCAL_TEACHER_ACTOR_ID,
         &input,
     )

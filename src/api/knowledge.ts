@@ -935,15 +935,23 @@ export interface QuestionImpactReviewCase {
   studentNo: string;
   studentName: string;
   questionVersionPublicId: string;
+  questionType: K1QuestionType;
   questionStem: string;
   questionNo: number;
+  maxScore: number;
   attemptPublicId: string;
   attemptState: string;
   publicationPublicId: string | null;
   sourceGradeDecisionPublicId: string | null;
   sourceGradeDecisionRevision: number | null;
   sourceTeacherScore: number | null;
+  sourcePointResultsJson: string | null;
   sourceSnapshotHash: string;
+  studentResponseState: string | null;
+  studentResponseText: string | null;
+  cropPath: string | null;
+  targetAnswerJson: string;
+  targetComponents: QuestionImpactTargetComponent[];
   targetAnswerKeyVersionPublicId: string;
   targetAnswerKeyRevision: number;
   targetRubricVersionPublicId: string;
@@ -952,12 +960,26 @@ export interface QuestionImpactReviewCase {
   targetLinkSetRevision: number;
   preparedBy: string;
   preparedAt: string;
-  state: "open";
+  state: "open" | "grade_confirmed" | "republished";
+  resolutionPublicId: string | null;
+  resolvedGradeDecisionPublicId: string | null;
+  resolvedTeacherScore: number | null;
+  resolvedAt: string | null;
+  activePublicationPublicId: string | null;
   nextStepNote: string;
   changesAssessmentBinding: false;
-  changesGrade: false;
-  changesPublication: false;
-  changesLearningEvidence: false;
+  changesGrade: boolean;
+  changesPublication: boolean;
+  changesLearningEvidence: boolean;
+}
+
+export interface QuestionImpactTargetComponent {
+  sourceType: "answer_slot" | "rubric_point";
+  sourcePublicId: string;
+  stableId: string;
+  orderIndex: number;
+  label: string;
+  maxScore: number;
 }
 
 export interface QuestionImpactReviewCaseCatalog {
@@ -986,6 +1008,56 @@ export interface PrepareQuestionImpactReviewCasesResult {
   changesLearningEvidence: false;
 }
 
+export interface ResolveQuestionImpactComponentInput {
+  sourcePublicId: string;
+  teacherScore: number;
+  evidenceText: string | null;
+  teacherNote: string | null;
+}
+
+export interface ResolveQuestionImpactReviewCaseInput {
+  requestKey: string;
+  casePublicId: string;
+  expectedSourceSnapshotHash: string;
+  teacherScore: number | null;
+  components: ResolveQuestionImpactComponentInput[];
+  teacherNote: string;
+  resolvedBy: "local_teacher";
+}
+
+export interface ResolveQuestionImpactReviewCaseResult {
+  casePublicId: string;
+  resolutionPublicId: string;
+  gradeDecision: {
+    public_id: string;
+    revision: number;
+    teacher_score: number;
+    point_results_json: string;
+    state: string;
+  };
+  oldPublicationUnchanged: boolean;
+  learningEvidenceUnchanged: boolean;
+  requiresExplicitPublication: boolean;
+}
+
+export interface PublishQuestionImpactReviewCaseInput {
+  casePublicId: string;
+  expectedGradeDecisionPublicId: string;
+  publishedBy: "local_teacher";
+}
+
+export interface PublishQuestionImpactReviewCaseResult {
+  casePublicId: string;
+  publication: {
+    public_id: string;
+    revision: number;
+    state: string;
+    total_score: number;
+  };
+  priorPublicationSuperseded: boolean;
+  learningEvidenceSwitched: boolean;
+}
+
 export const loadQuestionPerformance = (limit = 200) =>
   call<QuestionPerformanceCatalog>("k1_question_performance", { limit });
 
@@ -1007,5 +1079,21 @@ export const prepareQuestionImpactCases = (
 ) =>
   call<PrepareQuestionImpactReviewCasesResult>(
     "k1_question_impact_prepare",
+    { input },
+  );
+
+export const resolveQuestionImpactCase = (
+  input: ResolveQuestionImpactReviewCaseInput,
+) =>
+  call<ResolveQuestionImpactReviewCaseResult>(
+    "k1_question_impact_resolve",
+    { input },
+  );
+
+export const publishQuestionImpactCase = (
+  input: PublishQuestionImpactReviewCaseInput,
+) =>
+  call<PublishQuestionImpactReviewCaseResult>(
+    "k1_question_impact_publish",
     { input },
   );

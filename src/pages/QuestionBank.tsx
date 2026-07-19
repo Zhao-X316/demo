@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   AcceptSourceDraftInput,
@@ -57,6 +58,8 @@ import {
   loadQuestionPerformance,
   loadQuestionImpactCases,
   prepareQuestionImpactCases,
+  publishQuestionImpactCase,
+  resolveQuestionImpactCase,
 } from "../api/knowledge";
 
 const TYPE_LABEL: Record<K1QuestionType, string> = {
@@ -2210,7 +2213,252 @@ function changeLabels(row: QuestionVersionImpactPreview["rows"][number]) {
   return labels.join("、") || "无";
 }
 
-function QuestionPerformancePanel() {
+function readableAnswerJson(raw: string) {
+  try {
+    const value = JSON.parse(raw) as Record<string, unknown>;
+    const labels = value.correct_labels ?? value.correctLabels;
+    if (Array.isArray(labels)) return labels.join("、");
+    const answer = value.answer ?? value.correct_answer ?? value.correctAnswer;
+    if (typeof answer === "string") return answer;
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return raw;
+  }
+}
+
+type ImpactComponentEditor = {
+  teacherScore: number;
+  evidenceText: string;
+  teacherNote: string;
+};
+
+function ImpactReviewCaseCard({
+  reviewCase,
+  disabled,
+  onResolved,
+  onPublished,
+  onOpenExam,
+}: {
+  reviewCase: QuestionImpactReviewCase;
+  disabled: boolean;
+  onResolved: (
+    reviewCase: QuestionImpactReviewCase,
+    teacherScore: number | null,
+    components: Array<{
+      sourcePublicId: string;
+      teacherScore: number;
+      evidenceText: string | null;
+      teacherNote: string | null;
+    }>,
+    note: string,
+  ) => Promise<void>;
+  onPublished: (reviewCase: QuestionImpactReviewCase) => Promise<void>;
+  onOpenExam: () => void;
+}) {
+  const [teacherScore, setTeacherScore] = useState(
+    reviewCase.sourceTeacherScore ?? reviewCase.maxScore,
+  );
+  const [note, setNote] = useState("");
+  const [components, setComponents] = useState<Record<string, ImpactComponentEditor>>(
+    Object.fromEntries(reviewCase.targetComponents.map((component) => [
+      component.sourcePublicId,
+      { teacherScore: 0, evidenceText: "", teacherNote: "" },
+    ])),
+  );
+  const isObjective = reviewCase.targetComponents.length === 0;
+  const canResolve = note.trim().length > 0 && (
+    isObjective
+      ? Number.isFinite(teacherScore)
+        && teacherScore >= 0
+        && teacherScore <= reviewCase.maxScore
+      : reviewCase.targetComponents.every((component) => {
+        const editor = components[component.sourcePublicId];
+        return editor
+          && Number.isFinite(editor.teacherScore)
+          && editor.teacherScore >= 0
+          && editor.teacherScore <= component.maxScore
+          && (editor.teacherScore === 0 || editor.evidenceText.trim().length > 0);
+      })
+  );
+  const submitResolution = () => onResolved(
+    reviewCase,
+    isObjective ? teacherScore : null,
+    reviewCase.targetComponents.map((component) => {
+      const editor = components[component.sourcePublicId];
+      return {
+        sourcePublicId: component.sourcePublicId,
+        teacherScore: editor.teacherScore,
+        evidenceText: editor.evidenceText.trim() || null,
+        teacherNote: editor.teacherNote.trim() || null,
+      };
+    }),
+    note.trim(),
+  );
+
+  return (
+    <article className={`impact-review-card state-${reviewCase.state}`}>
+      <div className="impact-case-head">
+        <div>
+          <b>{reviewCase.studentNo} · {reviewCase.studentName}</b>
+          <span>
+            {reviewCase.className} · {reviewCase.assessmentTitle} · 第 {reviewCase.questionNo} 题
+          </span>
+        </div>
+        <span className={reviewCase.caseKind === "published_review" ? "tag warning" : "tag subtle"}>
+          {reviewCase.caseKind === "published_review" ? "已发布复核" : "未发布重评"}
+        </span>
+      </div>
+      <div className="impact-case-meta">
+        <span>
+          旧评分：
+          {reviewCase.sourceTeacherScore == null
+            ? "暂无"
+            : `${reviewCase.sourceTeacherScore} 分（第 ${reviewCase.sourceGradeDecisionRevision} 版）`}
+        </span>
+        <span>目标答案第 {reviewCase.targetAnswerKeyRevision} 版</span>
+        <span>目标评分点第 {reviewCase.targetRubricRevision} 版</span>
+        <span>目标知识链接第 {reviewCase.targetLinkSetRevision} 版</span>
+      </div>
+      <div className="impact-evidence-grid">
+        <div>
+          <b>题目与目标答案</b>
+          <p>{reviewCase.questionStem}</p>
+          <pre>{readableAnswerJson(reviewCase.targetAnswerJson)}</pre>
+        </div>
+        <div>
+          <b>学生原作答</b>
+          {reviewCase.cropPath && (
+            <img
+              className="impact-answer-crop"
+              src={convertFileSrc(reviewCase.cropPath)}
+              alt={`${reviewCase.studentName} 第 ${reviewCase.questionNo} 题原作答`}
+            />
+          )}
+          <pre>{reviewCase.studentResponseText || "当前没有可用的识别文本，请回批改台核对原图。"}</pre>
+        </div>
+      </div>
+      {reviewCase.state === "open" ? (
+        <div className="impact-resolution-editor">
+          {isObjective ? (
+            <label className="field compact">
+              <span className="fl">按新答案确认得分（满分 {reviewCase.maxScore}）</span>
+              <input
+                aria-label={`${reviewCase.studentName} 新评分`}
+                type="number"
+                min={0}
+                max={reviewCase.maxScore}
+                step={0.5}
+                value={teacherScore}
+                onChange={(event) => setTeacherScore(Number(event.target.value))}
+              />
+            </label>
+          ) : (
+            <div className="impact-component-list">
+              {reviewCase.targetComponents.map((component) => {
+                const editor = components[component.sourcePublicId];
+                return (
+                  <div key={component.sourcePublicId} className="impact-component-row">
+                    <div>
+                      <b>{component.label}</b>
+                      <span>满分 {component.maxScore}</span>
+                    </div>
+                    <input
+                      aria-label={`${component.label} 得分`}
+                      type="number"
+                      min={0}
+                      max={component.maxScore}
+                      step={0.5}
+                      value={editor.teacherScore}
+                      onChange={(event) => setComponents((current) => ({
+                        ...current,
+                        [component.sourcePublicId]: {
+                          ...current[component.sourcePublicId],
+                          teacherScore: Number(event.target.value),
+                        },
+                      }))}
+                    />
+                    <input
+                      aria-label={`${component.label} 学生答案证据`}
+                      value={editor.evidenceText}
+                      placeholder="给分时粘贴学生答案原句"
+                      onChange={(event) => setComponents((current) => ({
+                        ...current,
+                        [component.sourcePublicId]: {
+                          ...current[component.sourcePublicId],
+                          evidenceText: event.target.value,
+                        },
+                      }))}
+                    />
+                    <input
+                      aria-label={`${component.label} 备注`}
+                      value={editor.teacherNote}
+                      placeholder="可选备注"
+                      onChange={(event) => setComponents((current) => ({
+                        ...current,
+                        [component.sourcePublicId]: {
+                          ...current[component.sourcePublicId],
+                          teacherNote: event.target.value,
+                        },
+                      }))}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <label className="field">
+            <span className="fl">本次复核说明（必填）</span>
+            <input
+              value={note}
+              maxLength={300}
+              placeholder="例如：按修订后的标准答案逐项核对"
+              onChange={(event) => setNote(event.target.value)}
+            />
+          </label>
+          <div className="impact-stage-action">
+            <span>保存只产生新评分 revision，旧正式成绩和学习证据暂不改变。</span>
+            <button
+              className="primary"
+              data-testid="impact-resolve-case"
+              disabled={disabled || !canResolve}
+              onClick={submitResolution}
+            >
+              确认新评分（暂不发布）
+            </button>
+          </div>
+        </div>
+      ) : reviewCase.state === "grade_confirmed" ? (
+        <div className="impact-stage-action warning-box">
+          <span>
+            新评分 {reviewCase.resolvedTeacherScore} 分已保存；旧正式成绩仍然有效。
+            {reviewCase.attemptState === "ready_to_publish"
+              ? " 确认后将发布整份作业的新 revision。"
+              : " 整份作业还有其他题待终审。"}
+          </span>
+          {reviewCase.attemptState === "ready_to_publish" ? (
+            <button
+              className="primary"
+              data-testid="impact-publish-case"
+              disabled={disabled}
+              onClick={() => onPublished(reviewCase)}
+            >
+              明确发布整份新成绩
+            </button>
+          ) : (
+            <button disabled={disabled} onClick={onOpenExam}>回批改台完成其余题目</button>
+          )}
+        </div>
+      ) : (
+        <div className="ok-banner">
+          新评分已经明确发布；旧发布快照保留审计，正式学习证据已按新版本切换。
+        </div>
+      )}
+      <p>{reviewCase.nextStepNote}</p>
+    </article>
+  );
+}
+
+function QuestionPerformancePanel({ onOpenExam }: { onOpenExam: () => void }) {
   const [catalog, setCatalog] = useState<QuestionPerformanceCatalog | null>(null);
   const [selected, setSelected] = useState<QuestionPerformanceItem | null>(null);
   const [preview, setPreview] = useState<QuestionVersionImpactPreview | null>(null);
@@ -2295,6 +2543,62 @@ function QuestionPerformancePanel() {
       setCaseBoundary(
         "待处理 case 已冻结旧评分/发布证据与目标版本；当前成绩、发布结果和学习证据均未改变。",
       );
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const refreshCases = async (planPublicId: string) => {
+    const next = await loadQuestionImpactCases(planPublicId);
+    setReviewCases(next.cases);
+    setCaseBoundary(next.boundaryNote);
+  };
+
+  const resolveCase = async (
+    reviewCase: QuestionImpactReviewCase,
+    teacherScore: number | null,
+    components: Array<{
+      sourcePublicId: string;
+      teacherScore: number;
+      evidenceText: string | null;
+      teacherNote: string | null;
+    }>,
+    note: string,
+  ) => {
+    setWorking(true);
+    setError("");
+    try {
+      await resolveQuestionImpactCase({
+        requestKey: `${newImpactRequestKey()}-resolve`,
+        casePublicId: reviewCase.publicId,
+        expectedSourceSnapshotHash: reviewCase.sourceSnapshotHash,
+        teacherScore,
+        components,
+        teacherNote: note,
+        resolvedBy: "local_teacher",
+      });
+      await refreshCases(reviewCase.planPublicId);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const publishCase = async (reviewCase: QuestionImpactReviewCase) => {
+    if (!reviewCase.resolvedGradeDecisionPublicId) return;
+    setWorking(true);
+    setError("");
+    try {
+      await publishQuestionImpactCase({
+        casePublicId: reviewCase.publicId,
+        expectedGradeDecisionPublicId: reviewCase.resolvedGradeDecisionPublicId,
+        publishedBy: "local_teacher",
+      });
+      await refreshCases(reviewCase.planPublicId);
+      await refresh();
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -2472,33 +2776,18 @@ function QuestionPerformancePanel() {
                     <div className="impact-case-section" data-testid="impact-case-list">
                       <div className="impact-case-section-head">
                         <b>待处理记录 {reviewCases.length} 条</b>
-                        <span>全部保持 open，后续由老师核对后再产生新评分 revision。</span>
+                        <span>先确认新评分，再明确发布；两个动作不会被系统合并。</span>
                       </div>
                       <div className="impact-case-list">
                         {reviewCases.map((reviewCase) => (
-                          <article key={reviewCase.publicId}>
-                            <div className="impact-case-head">
-                              <div>
-                                <b>{reviewCase.studentNo} · {reviewCase.studentName}</b>
-                                <span>{reviewCase.className} · {reviewCase.assessmentTitle} · 第 {reviewCase.questionNo} 题</span>
-                              </div>
-                              <span className={reviewCase.caseKind === "published_review" ? "tag warning" : "tag subtle"}>
-                                {reviewCase.caseKind === "published_review" ? "已发布复核" : "未发布重评准备"}
-                              </span>
-                            </div>
-                            <div className="impact-case-meta">
-                              <span>
-                                旧评分：
-                                {reviewCase.sourceTeacherScore == null
-                                  ? "暂无"
-                                  : `${reviewCase.sourceTeacherScore} 分（第 ${reviewCase.sourceGradeDecisionRevision} 版）`}
-                              </span>
-                              <span>目标答案第 {reviewCase.targetAnswerKeyRevision} 版</span>
-                              <span>目标评分点第 {reviewCase.targetRubricRevision} 版</span>
-                              <span>目标知识链接第 {reviewCase.targetLinkSetRevision} 版</span>
-                            </div>
-                            <p>{reviewCase.nextStepNote}</p>
-                          </article>
+                          <ImpactReviewCaseCard
+                            key={reviewCase.publicId}
+                            reviewCase={reviewCase}
+                            disabled={working}
+                            onResolved={resolveCase}
+                            onPublished={publishCase}
+                            onOpenExam={onOpenExam}
+                          />
                         ))}
                       </div>
                       {caseBoundary && <div className="hint">{caseBoundary}</div>}
@@ -2733,7 +3022,7 @@ export default function QuestionBank({ onOpenExam }: { onOpenExam: () => void })
       {mode === "import" ? <SourceImportPanel /> : mode === "search" ? <QuestionSearchPanel options={options} /> : mode === "candidates" ? (
         <CandidateReviewPanel />
       ) : mode === "performance" ? (
-        <QuestionPerformancePanel />
+        <QuestionPerformancePanel onOpenExam={onOpenExam} />
       ) : (
         <>
           {error && <div className="error">{error}</div>}

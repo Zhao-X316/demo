@@ -1257,6 +1257,76 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
   font-size: 11px;
   line-height: 1.55;
 }
+.impact-review-card.state-grade_confirmed { border-color: var(--warn); }
+.impact-review-card.state-republished { border-color: var(--ok); }
+.impact-evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.impact-evidence-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.impact-evidence-grid b { font-size: 12px; }
+.impact-evidence-grid pre {
+  max-height: 170px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.impact-answer-crop {
+  max-width: 100%;
+  max-height: 230px;
+  object-fit: contain;
+  border-radius: 7px;
+  background: var(--bg-sub);
+}
+.impact-resolution-editor, .impact-component-list {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.impact-resolution-editor {
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.impact-component-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.2fr) 90px minmax(190px, 1.4fr) minmax(140px, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+.impact-component-row > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.impact-component-row b { font-size: 12px; }
+.impact-component-row span { color: var(--muted); font-size: 11px; }
+.impact-stage-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.impact-stage-action > span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+.impact-stage-action.warning-box > span { color: inherit; }
 
 @media (max-width: 920px) {
   .dashboard-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1299,6 +1369,10 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
   .question-impact-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .impact-actions { grid-template-columns: 1fr; }
   .impact-prepare-row, .impact-case-head { align-items: stretch; flex-direction: column; }
+  .impact-evidence-grid { grid-template-columns: 1fr; }
+  .impact-component-row { grid-template-columns: 1fr 90px; }
+  .impact-component-row input:nth-of-type(n+2) { grid-column: 1 / -1; }
+  .impact-stage-action { align-items: stretch; flex-direction: column; }
   .knowledge-link-add-row, .knowledge-link-add-row.ability-row {
     grid-template-columns: 1fr 1fr;
   }

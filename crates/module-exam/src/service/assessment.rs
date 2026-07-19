@@ -1259,12 +1259,33 @@ pub(crate) fn decide_grade_in_transaction(
         |row| row.get(0),
     )?;
     if let Some(active) = current.as_ref() {
-        suite_core::db::repo::learning_evidence::revert_for_decision(
-            conn,
-            "grade_decision",
-            &active.public_id,
-            active.revision,
+        let is_currently_published: bool = conn.query_row(
+            "SELECT EXISTS(
+               SELECT 1
+               FROM exam_attempts_v2 attempt
+               JOIN exam_grade_publications_v2 publication
+                 ON publication.id=attempt.active_publication_id
+                AND publication.state='published'
+               JOIN exam_grade_publication_items_v2 publication_item
+                 ON publication_item.publication_id=publication.id
+                AND publication_item.attempt_id=attempt.id
+               JOIN exam_grade_publication_decisions_v2 publication_decision
+                 ON publication_decision.publication_item_id=publication_item.id
+                AND publication_decision.attempt_id=attempt.id
+                AND publication_decision.grade_decision_id=?2
+               WHERE attempt.id=?1
+             )",
+            (input.attempt_id, active.id),
+            |row| row.get(0),
         )?;
+        if !is_currently_published {
+            suite_core::db::repo::learning_evidence::revert_for_decision(
+                conn,
+                "grade_decision",
+                &active.public_id,
+                active.revision,
+            )?;
+        }
     }
     conn.execute(
         "UPDATE exam_grade_decisions_v2 SET state='superseded'
@@ -1387,7 +1408,16 @@ fn evidence_sources(
                 "SELECT source_type,source_public_id,teacher_score,max_score
                  FROM exam_grade_decision_subjective_components_v2
                  WHERE grade_decision_id=?1
-                 ORDER BY order_index,id",
+                 UNION ALL
+                 SELECT
+                   json_extract(component.value,'$.source_type'),
+                   json_extract(component.value,'$.source_public_id'),
+                   json_extract(component.value,'$.teacher_score'),
+                   json_extract(component.value,'$.max_score')
+                 FROM exam_question_version_review_resolutions_v2 resolution,
+                      json_each(resolution.component_results_json,'$.components') component
+                 WHERE resolution.grade_decision_id=?1
+                 ORDER BY 1,2",
             )?;
             let rows = stmt.query_map([decision.id], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
@@ -1745,13 +1775,22 @@ fn activate_publication_evidence(
     let assessment_context = evidence_context(&context_raw);
     let mut stmt = conn.prepare(
         "SELECT d.id,d.public_id,d.revision,d.teacher_score,d.confirmation_level,d.decided_at,
-                i.public_id,i.score,i.link_set_id,rp.public_id,q.question_type,
-                i.answer_key_version_id,i.rubric_version_id,
-                CASE WHEN subjective.grade_decision_id IS NULL THEN 0 ELSE 1 END,
+                i.public_id,i.score,
+                COALESCE(review_case.target_link_set_id,i.link_set_id),
+                rp.public_id,q.question_type,
+                COALESCE(review_case.target_answer_key_version_id,i.answer_key_version_id),
+                COALESCE(review_case.target_rubric_version_id,i.rubric_version_id),
+                CASE WHEN subjective.grade_decision_id IS NULL
+                           AND resolution.grade_decision_id IS NULL
+                     THEN 0 ELSE 1 END,
                 analysis.result_json
          FROM exam_grade_decisions_v2 d
          JOIN exam_assessment_items_v2 i ON i.id=d.assessment_item_id
          JOIN k1_question_versions q ON q.id=i.question_version_id
+         LEFT JOIN exam_question_version_review_resolutions_v2 resolution
+           ON resolution.grade_decision_id=d.id
+         LEFT JOIN exam_question_version_review_cases_v2 review_case
+           ON review_case.id=resolution.review_case_id
          LEFT JOIN exam_grade_decision_dictation_sources_v2 ds
            ON ds.grade_decision_id=d.id
          LEFT JOIN exam_dictation_point_observations_v2 obs
@@ -1981,6 +2020,31 @@ pub fn publish_attempt(
         )?;
     }
     if let Some(old_id) = old_publication_id {
+        let mut old_decision_stmt = tx.prepare(
+            "SELECT decision.public_id,decision.revision
+             FROM exam_grade_publication_items_v2 publication_item
+             JOIN exam_grade_publication_decisions_v2 publication_decision
+               ON publication_decision.publication_item_id=publication_item.id
+              AND publication_decision.attempt_id=publication_item.attempt_id
+             JOIN exam_grade_decisions_v2 decision
+               ON decision.id=publication_decision.grade_decision_id
+             WHERE publication_item.publication_id=?1
+               AND publication_item.attempt_id=?2",
+        )?;
+        let old_decisions = old_decision_stmt
+            .query_map((old_id, attempt_id), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(old_decision_stmt);
+        for (decision_public_id, decision_revision) in old_decisions {
+            learning_evidence::revert_for_decision(
+                &tx,
+                "grade_decision",
+                &decision_public_id,
+                decision_revision,
+            )?;
+        }
         tx.execute(
             "UPDATE exam_grade_publications_v2 SET state='superseded'
              WHERE id=?1 AND state='published'",
@@ -2710,7 +2774,11 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(evidence_after_change, (0, 2));
+        assert_eq!(
+            evidence_after_change,
+            (2, 0),
+            "改分但未重发时，旧正式发布对应的学习证据必须继续有效"
+        );
 
         let republished = publish_attempt(&fixture.conn, fixture.attempt_id, "teacher").unwrap();
         assert_eq!(republished.revision, 2);

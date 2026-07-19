@@ -1,8 +1,8 @@
 """K1-5 题目实际表现与版本变更影响浏览器冒烟测试。
 
 验证页面只展示已发布的老师确认统计，老师可查看新版对历史作业、学习证据和
-图谱快照的影响；确认时先建立复核计划，再冻结逐份待处理证据，不宣称已经
-自动改分、重新发布或覆盖旧图谱。
+图谱快照的影响；确认时先建立复核计划，再冻结逐份待处理证据。老师保存新
+评分后旧正式成绩保持不变，只有再次点击明确发布才切换正式结果。
 """
 
 from pathlib import Path
@@ -16,6 +16,7 @@ OUTPUT_DIR = Path(
 
 MOCK_SCRIPT = r"""
 window.__performanceCalls = [];
+window.__impactCases = [];
 window.__TAURI_INTERNALS__ = {
   transformCallback: () => 1,
   unregisterCallback: () => undefined,
@@ -169,8 +170,8 @@ window.__TAURI_INTERNALS__ = {
         schemaVersion: 1,
         ruleVersion: "k1-version-impact-review-case-v1",
         planPublicId: args.planPublicId,
-        cases: [],
-        boundaryNote: "只冻结证据，不改分。"
+        cases: window.__impactCases,
+        boundaryNote: "保存新评分不会自动发布；明确发布后才切换正式成绩和学习证据。"
       };
     }
     if (cmd === "k1_question_impact_prepare") {
@@ -178,49 +179,114 @@ window.__TAURI_INTERNALS__ = {
         ["01", "学生甲", "decision-1", 2],
         ["02", "学生乙", "decision-2", 1]
       ];
+      window.__impactCases = students.map(([studentNo, studentName, decisionId, score], index) => ({
+        publicId: `review-case-${index + 1}`,
+        impactTaskPublicId: `impact-task-${index + 1}`,
+        planPublicId: args.input.planPublicId,
+        caseKind: "published_review",
+        assessmentTitle: "第一单元检测",
+        className: "八年级一班",
+        studentNo,
+        studentName,
+        questionVersionPublicId: "question-version-1",
+        questionType: "single",
+        questionStem: "鸦片战争爆发于哪一年？",
+        questionNo: 1,
+        maxScore: 2,
+        attemptPublicId: `attempt-${index + 1}`,
+        attemptState: "published",
+        publicationPublicId: "publication-1",
+        sourceGradeDecisionPublicId: decisionId,
+        sourceGradeDecisionRevision: 1,
+        sourceTeacherScore: score,
+        sourcePointResultsJson: "{\"schema_version\":1}",
+        sourceSnapshotHash: "b".repeat(64),
+        studentResponseState: "recognized",
+        studentResponseText: index === 0
+          ? "{\"selected_labels\":[\"A\"]}"
+          : "{\"selected_labels\":[\"B\"]}",
+        cropPath: null,
+        targetAnswerJson: "{\"schema_version\":1,\"correct_labels\":[\"B\"]}",
+        targetComponents: [],
+        targetAnswerKeyVersionPublicId: "answer-v2",
+        targetAnswerKeyRevision: 2,
+        targetRubricVersionPublicId: "rubric-v2",
+        targetRubricRevision: 2,
+        targetLinkSetPublicId: "links-v2",
+        targetLinkSetRevision: 2,
+        preparedBy: "local_teacher",
+        preparedAt: "2026-07-19T21:03:00Z",
+        state: "open",
+        resolutionPublicId: null,
+        resolvedGradeDecisionPublicId: null,
+        resolvedTeacherScore: null,
+        resolvedAt: null,
+        activePublicationPublicId: "publication-1",
+        nextStepNote: "保存新评分后旧正式成绩仍保持不变，直到明确生成新的发布 revision。",
+        changesAssessmentBinding: false,
+        changesGrade: false,
+        changesPublication: false,
+        changesLearningEvidence: false
+      }));
       return {
         planPublicId: args.input.planPublicId,
         taskCount: 2,
         createdCount: 2,
         existingCount: 0,
-        cases: students.map(([studentNo, studentName, decisionId, score], index) => ({
-          publicId: `review-case-${index + 1}`,
-          impactTaskPublicId: `impact-task-${index + 1}`,
-          planPublicId: args.input.planPublicId,
-          caseKind: "published_review",
-          assessmentTitle: "第一单元检测",
-          className: "八年级一班",
-          studentNo,
-          studentName,
-          questionVersionPublicId: "question-version-1",
-          questionStem: "鸦片战争爆发于哪一年？",
-          questionNo: 1,
-          attemptPublicId: `attempt-${index + 1}`,
-          attemptState: "published",
-          publicationPublicId: "publication-1",
-          sourceGradeDecisionPublicId: decisionId,
-          sourceGradeDecisionRevision: 1,
-          sourceTeacherScore: score,
-          sourceSnapshotHash: "b".repeat(64),
-          targetAnswerKeyVersionPublicId: "answer-v2",
-          targetAnswerKeyRevision: 2,
-          targetRubricVersionPublicId: "rubric-v2",
-          targetRubricRevision: 2,
-          targetLinkSetPublicId: "links-v2",
-          targetLinkSetRevision: 2,
-          preparedBy: "local_teacher",
-          preparedAt: "2026-07-19T21:03:00Z",
-          state: "open",
-          nextStepNote: "下一步由老师核对正式发布证据，再决定是否创建复核评分与新的发布 revision；当前正式成绩保持不变。",
-          changesAssessmentBinding: false,
-          changesGrade: false,
-          changesPublication: false,
-          changesLearningEvidence: false
-        })),
+        cases: window.__impactCases,
         changesAssessmentBinding: false,
         changesGrade: false,
         changesPublication: false,
         changesLearningEvidence: false
+      };
+    }
+    if (cmd === "k1_question_impact_resolve") {
+      const reviewCase = window.__impactCases.find(
+        (item) => item.publicId === args.input.casePublicId
+      );
+      reviewCase.state = "grade_confirmed";
+      reviewCase.attemptState = "ready_to_publish";
+      reviewCase.resolutionPublicId = "resolution-1";
+      reviewCase.resolvedGradeDecisionPublicId = "decision-new-1";
+      reviewCase.resolvedTeacherScore = args.input.teacherScore;
+      reviewCase.resolvedAt = "2026-07-19T21:04:00Z";
+      reviewCase.changesGrade = true;
+      reviewCase.nextStepNote = "新评分 revision 已确认但尚未正式生效；请明确发布整份成绩。";
+      return {
+        casePublicId: reviewCase.publicId,
+        resolutionPublicId: reviewCase.resolutionPublicId,
+        gradeDecision: {
+          public_id: reviewCase.resolvedGradeDecisionPublicId,
+          revision: 2,
+          teacher_score: reviewCase.resolvedTeacherScore,
+          point_results_json: "{\"schema_version\":3}",
+          state: "active"
+        },
+        oldPublicationUnchanged: true,
+        learningEvidenceUnchanged: true,
+        requiresExplicitPublication: true
+      };
+    }
+    if (cmd === "k1_question_impact_publish") {
+      const reviewCase = window.__impactCases.find(
+        (item) => item.publicId === args.input.casePublicId
+      );
+      reviewCase.state = "republished";
+      reviewCase.attemptState = "published";
+      reviewCase.activePublicationPublicId = "publication-2";
+      reviewCase.changesPublication = true;
+      reviewCase.changesLearningEvidence = true;
+      reviewCase.nextStepNote = "新评分已由老师再次明确发布；旧发布快照保持审计。";
+      return {
+        casePublicId: reviewCase.publicId,
+        publication: {
+          public_id: "publication-2",
+          revision: 2,
+          state: "published",
+          total_score: 0
+        },
+        priorPublicationSuperseded: true,
+        learningEvidenceSwitched: true
       };
     }
     return [];
@@ -265,8 +331,23 @@ def test_k1_question_performance(base_url: str) -> None:
         expect(page.get_by_text("待处理记录 2 条", exact=True)).to_be_visible()
         expect(page.get_by_text("01 · 学生甲", exact=True)).to_be_visible()
         expect(page.get_by_text("已发布复核", exact=True).first).to_be_visible()
-        expect(page.get_by_text("当前正式成绩保持不变", exact=False).first).to_be_visible()
+        expect(page.get_by_text("旧正式成绩仍保持不变", exact=False).first).to_be_visible()
         page.screenshot(path=str(OUTPUT_DIR / "04-impact-review-cases.png"), full_page=True)
+
+        first_case = page.locator(".impact-review-card").first
+        first_case.get_by_label("学生甲 新评分").fill("0")
+        first_case.get_by_text("本次复核说明（必填）", exact=True).locator("..").get_by_role("textbox").fill(
+            "按修订后的答案核对"
+        )
+        first_case.get_by_test_id("impact-resolve-case").click()
+        expect(page.get_by_text("新评分 0 分已保存", exact=False)).to_be_visible()
+        expect(page.get_by_text("旧正式成绩仍然有效", exact=False)).to_be_visible()
+        page.screenshot(path=str(OUTPUT_DIR / "05-impact-grade-confirmed.png"), full_page=True)
+
+        page.get_by_test_id("impact-publish-case").click()
+        expect(page.get_by_text("新评分已经明确发布", exact=False)).to_be_visible()
+        expect(page.get_by_text("正式学习证据已按新版本切换", exact=False)).to_be_visible()
+        page.screenshot(path=str(OUTPUT_DIR / "06-impact-republished.png"), full_page=True)
 
         calls = page.evaluate(
             """window.__performanceCalls.filter((item) =>
@@ -274,7 +355,9 @@ def test_k1_question_performance(base_url: str) -> None:
               || item.cmd === "k1_question_impact_preview"
               || item.cmd === "k1_question_impact_confirm"
               || item.cmd === "k1_question_impact_cases"
-              || item.cmd === "k1_question_impact_prepare")"""
+              || item.cmd === "k1_question_impact_prepare"
+              || item.cmd === "k1_question_impact_resolve"
+              || item.cmd === "k1_question_impact_publish")"""
         )
         assert [item["cmd"] for item in calls] == [
             "k1_question_performance",
@@ -282,6 +365,11 @@ def test_k1_question_performance(base_url: str) -> None:
             "k1_question_impact_confirm",
             "k1_question_impact_cases",
             "k1_question_impact_prepare",
+            "k1_question_impact_resolve",
+            "k1_question_impact_cases",
+            "k1_question_impact_publish",
+            "k1_question_impact_cases",
+            "k1_question_performance",
         ]
         payload = calls[2]["args"]["input"]
         assert payload["action"] == "review_published"
@@ -291,6 +379,14 @@ def test_k1_question_performance(base_url: str) -> None:
         assert prepare_payload["planPublicId"] == "impact-plan-1"
         assert prepare_payload["expectedTaskCount"] == 2
         assert prepare_payload["preparedBy"] == "local_teacher"
+        resolve_payload = calls[5]["args"]["input"]
+        assert resolve_payload["teacherScore"] == 0
+        assert resolve_payload["components"] == []
+        assert resolve_payload["teacherNote"] == "按修订后的答案核对"
+        assert resolve_payload["resolvedBy"] == "local_teacher"
+        publish_payload = calls[7]["args"]["input"]
+        assert publish_payload["expectedGradeDecisionPublicId"] == "decision-new-1"
+        assert publish_payload["publishedBy"] == "local_teacher"
         browser.close()
 
 

@@ -6,16 +6,22 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::BTreeMap;
 use suite_core::db::repo::audit::{self, NewAuditEvent};
 use suite_core::db::repo::outbox::{self, NewOutboxEvent};
 use suite_core::domain::{hashing, ids, time};
 use suite_core::error::{CoreError, CoreResult};
 use suite_core::models::AuditActorType;
 
+use super::assessment::{self, GradeDecision, NewGradeDecision, Publication};
+
 pub const QUESTION_PERFORMANCE_SCHEMA_VERSION: i64 = 1;
 pub const QUESTION_PERFORMANCE_RULE_VERSION: &str = "k1-current-publication-performance-v1";
 pub const QUESTION_IMPACT_RULE_VERSION: &str = "k1-version-impact-plan-v1";
 pub const QUESTION_IMPACT_REVIEW_RULE_VERSION: &str = "k1-version-impact-review-case-v1";
+pub const QUESTION_IMPACT_RESOLUTION_RULE_VERSION: &str =
+    "k1-version-impact-teacher-resolution-v1";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -142,6 +148,17 @@ pub struct QuestionImpactPlan {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct QuestionImpactTargetComponent {
+    pub source_type: String,
+    pub source_public_id: String,
+    pub stable_id: String,
+    pub order_index: i64,
+    pub label: String,
+    pub max_score: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct QuestionImpactReviewCase {
     pub public_id: String,
     pub impact_task_public_id: String,
@@ -152,15 +169,23 @@ pub struct QuestionImpactReviewCase {
     pub student_no: String,
     pub student_name: String,
     pub question_version_public_id: String,
+    pub question_type: String,
     pub question_stem: String,
     pub question_no: i64,
+    pub max_score: f64,
     pub attempt_public_id: String,
     pub attempt_state: String,
     pub publication_public_id: Option<String>,
     pub source_grade_decision_public_id: Option<String>,
     pub source_grade_decision_revision: Option<i64>,
     pub source_teacher_score: Option<f64>,
+    pub source_point_results_json: Option<String>,
     pub source_snapshot_hash: String,
+    pub student_response_state: Option<String>,
+    pub student_response_text: Option<String>,
+    pub crop_path: Option<String>,
+    pub target_answer_json: String,
+    pub target_components: Vec<QuestionImpactTargetComponent>,
     pub target_answer_key_version_public_id: String,
     pub target_answer_key_revision: i64,
     pub target_rubric_version_public_id: String,
@@ -170,11 +195,65 @@ pub struct QuestionImpactReviewCase {
     pub prepared_by: String,
     pub prepared_at: String,
     pub state: String,
+    pub resolution_public_id: Option<String>,
+    pub resolved_grade_decision_public_id: Option<String>,
+    pub resolved_teacher_score: Option<f64>,
+    pub resolved_at: Option<String>,
+    pub active_publication_public_id: Option<String>,
     pub next_step_note: String,
     pub changes_assessment_binding: bool,
     pub changes_grade: bool,
     pub changes_publication: bool,
     pub changes_learning_evidence: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveQuestionImpactComponentInput {
+    pub source_public_id: String,
+    pub teacher_score: f64,
+    pub evidence_text: Option<String>,
+    pub teacher_note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveQuestionImpactReviewCaseRequest {
+    pub request_key: String,
+    pub case_public_id: String,
+    pub expected_source_snapshot_hash: String,
+    pub teacher_score: Option<f64>,
+    pub components: Vec<ResolveQuestionImpactComponentInput>,
+    pub teacher_note: String,
+    pub resolved_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveQuestionImpactReviewCaseResult {
+    pub case_public_id: String,
+    pub resolution_public_id: String,
+    pub grade_decision: GradeDecision,
+    pub old_publication_unchanged: bool,
+    pub learning_evidence_unchanged: bool,
+    pub requires_explicit_publication: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishQuestionImpactReviewCaseRequest {
+    pub case_public_id: String,
+    pub expected_grade_decision_public_id: String,
+    pub published_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishQuestionImpactReviewCaseResult {
+    pub case_public_id: String,
+    pub publication: Publication,
+    pub prior_publication_superseded: bool,
+    pub learning_evidence_switched: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -245,6 +324,43 @@ struct ReviewTaskSnapshot {
     target_link_set_id: i64,
 }
 
+#[derive(Debug, Clone)]
+struct ReviewResolutionScope {
+    case_id: i64,
+    case_kind: String,
+    attempt_id: i64,
+    assessment_item_id: i64,
+    publication_id: Option<i64>,
+    question_type: String,
+    max_score: f64,
+    source_grade_decision_id: Option<i64>,
+    source_grade_decision_revision: Option<i64>,
+    source_snapshot_hash: String,
+    target_answer_key_version_id: i64,
+    target_answer_key_version_public_id: String,
+    target_rubric_version_id: i64,
+    target_rubric_version_public_id: String,
+    target_link_set_id: i64,
+    target_link_set_public_id: String,
+    student_response_text: Option<String>,
+    attempt_state: String,
+    current_grade_decision_id: Option<i64>,
+    current_grade_decision_revision: Option<i64>,
+    max_grade_decision_revision: i64,
+    active_publication_id: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct PublishReviewScope {
+    attempt_id: i64,
+    grade_decision_id: i64,
+    grade_decision_public_id: String,
+    attempt_state: String,
+    active_publication_id: Option<i64>,
+    current_grade_decision_public_id: String,
+    original_publication_id: Option<i64>,
+}
+
 fn required(value: &str, label: &str) -> CoreResult<()> {
     if value.trim().is_empty() {
         Err(CoreError::Invalid(format!("{label}不能为空")))
@@ -260,6 +376,144 @@ fn canonical_rate(value: Option<f64>) -> Option<f64> {
 fn accessible_question_clause() -> &'static str {
     "(question.owner_scope='personal' AND question.owner_id=?1)
       OR (question.owner_scope='official' AND question.sharing_allowed=1)"
+}
+
+fn target_component_label(source_type: &str, raw_label: &str) -> String {
+    if source_type != "answer_slot" {
+        return raw_label.trim().to_owned();
+    }
+    let parsed: Option<Value> = serde_json::from_str(raw_label).ok();
+    let answers = parsed.as_ref().and_then(|value| {
+        value
+            .get("canonical_answers")
+            .or_else(|| value.get("answers"))
+            .and_then(Value::as_array)
+    });
+    let labels = answers
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if labels.is_empty() {
+        raw_label.trim().to_owned()
+    } else {
+        labels.join(" / ")
+    }
+}
+
+fn load_target_components(
+    conn: &Connection,
+    question_type: &str,
+    answer_key_version_public_id: &str,
+    rubric_version_public_id: &str,
+) -> CoreResult<Vec<QuestionImpactTargetComponent>> {
+    let (source_type, sql, version_public_id) = match question_type {
+        "single" | "multiple" | "true_false" => return Ok(Vec::new()),
+        "fill_blank" => (
+            "answer_slot",
+            "SELECT slot.public_id,slot.stable_id,slot.order_index,
+                    slot.canonical_answers_json,slot.max_score
+             FROM k1_answer_key_versions version
+             JOIN k1_answer_slots slot ON slot.answer_key_version_id=version.id
+             WHERE version.public_id=?1
+             ORDER BY slot.order_index,slot.id",
+            answer_key_version_public_id,
+        ),
+        "short_answer" => (
+            "rubric_point",
+            "SELECT point.public_id,point.stable_id,point.order_index,
+                    point.canonical_text,point.max_score
+             FROM k1_rubric_versions version
+             JOIN k1_rubric_points point ON point.rubric_version_id=version.id
+             WHERE version.public_id=?1
+             ORDER BY point.order_index,point.id",
+            rubric_version_public_id,
+        ),
+        _ => return Err(CoreError::Invalid("版本影响 case 的题型不受支持".into())),
+    };
+    let mut statement = conn.prepare(sql)?;
+    let rows = statement.query_map([version_public_id], |row| {
+        let raw_label: String = row.get(3)?;
+        Ok(QuestionImpactTargetComponent {
+            source_type: source_type.into(),
+            source_public_id: row.get(0)?,
+            stable_id: row.get(1)?,
+            order_index: row.get(2)?,
+            label: target_component_label(source_type, &raw_label),
+            max_score: row.get(4)?,
+        })
+    })?;
+    let components = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    if components.is_empty() {
+        return Err(CoreError::Invalid(
+            "目标答案或评分规则缺少可确认的逐项结构".into(),
+        ));
+    }
+    Ok(components)
+}
+
+fn grade_decision_by_id(conn: &Connection, id: i64) -> CoreResult<GradeDecision> {
+    conn.query_row(
+        "SELECT id,public_id,attempt_id,assessment_item_id,revision,
+                machine_grade_ai_run_id,teacher_score,point_results_json,teacher_note,
+                confirmation_level,state,decided_by,decided_at
+         FROM exam_grade_decisions_v2 WHERE id=?1",
+        [id],
+        |row| {
+            Ok(GradeDecision {
+                id: row.get(0)?,
+                public_id: row.get(1)?,
+                attempt_id: row.get(2)?,
+                assessment_item_id: row.get(3)?,
+                revision: row.get(4)?,
+                machine_grade_ai_run_id: row.get(5)?,
+                teacher_score: row.get(6)?,
+                point_results_json: row.get(7)?,
+                teacher_note: row.get(8)?,
+                confirmation_level: row.get(9)?,
+                state: row.get(10)?,
+                decided_by: row.get(11)?,
+                decided_at: row.get(12)?,
+            })
+        },
+    )
+    .map_err(CoreError::from)
+}
+
+fn publication_by_id(
+    conn: &Connection,
+    publication_id: i64,
+    attempt_id: i64,
+) -> CoreResult<Publication> {
+    conn.query_row(
+        "SELECT publication.id,publication.public_id,publication.assessment_version_id,
+                publication.revision,publication.state,publication_item.attempt_id,
+                publication_item.total_score,publication_item.grade_decision_set_hash,
+                publication.published_by,publication.published_at
+         FROM exam_grade_publications_v2 publication
+         JOIN exam_grade_publication_items_v2 publication_item
+           ON publication_item.publication_id=publication.id
+          AND publication_item.attempt_id=?2
+         WHERE publication.id=?1",
+        (publication_id, attempt_id),
+        |row| {
+            Ok(Publication {
+                id: row.get(0)?,
+                public_id: row.get(1)?,
+                assessment_version_id: row.get(2)?,
+                revision: row.get(3)?,
+                state: row.get(4)?,
+                attempt_id: row.get(5)?,
+                total_score: row.get(6)?,
+                grade_decision_set_hash: row.get(7)?,
+                published_by: row.get(8)?,
+                published_at: row.get(9)?,
+            })
+        },
+    )
+    .map_err(CoreError::from)
 }
 
 pub fn list_question_performance(
@@ -913,14 +1167,78 @@ pub fn list_question_impact_review_cases(
     let mut statement = conn.prepare(
         "SELECT review_case.public_id,task.public_id,plan.public_id,review_case.case_kind,
                 assessment.title,class.name,student.student_no,student.name,
-                question.public_id,question.stem,item.order_index+1,
+                question.public_id,question.question_type,question.stem,item.order_index+1,item.score,
                 attempt.public_id,attempt.state,publication.public_id,decision.public_id,
                 review_case.source_grade_decision_revision,review_case.source_teacher_score,
-                review_case.source_snapshot_hash,
-                target_answer.public_id,target_answer.revision,
+                review_case.source_point_results_json,review_case.source_snapshot_hash,
+                COALESCE(
+                  (SELECT transcription.result_state
+                   FROM exam_subjective_transcription_revisions_v2 transcription
+                   WHERE transcription.attempt_id=attempt.id
+                     AND transcription.assessment_item_id=item.id
+                     AND transcription.state='active'
+                   ORDER BY transcription.revision DESC,transcription.id DESC LIMIT 1),
+                  (SELECT observation.result_state
+                   FROM exam_objective_observation_revisions_v2 observation
+                   WHERE observation.attempt_id=attempt.id
+                     AND observation.assessment_item_id=item.id
+                     AND observation.state='active'
+                   ORDER BY observation.revision DESC,observation.id DESC LIMIT 1)
+                ),
+                COALESCE(
+                  (SELECT COALESCE(transcription.teacher_corrected_text,
+                                   transcription.normalized_text,
+                                   transcription.raw_ocr_text)
+                   FROM exam_subjective_transcription_revisions_v2 transcription
+                   WHERE transcription.attempt_id=attempt.id
+                     AND transcription.assessment_item_id=item.id
+                     AND transcription.state='active'
+                   ORDER BY transcription.revision DESC,transcription.id DESC LIMIT 1),
+                  (SELECT observation.observed_answer_json
+                   FROM exam_objective_observation_revisions_v2 observation
+                   WHERE observation.attempt_id=attempt.id
+                     AND observation.assessment_item_id=item.id
+                     AND observation.state='active'
+                   ORDER BY observation.revision DESC,observation.id DESC LIMIT 1)
+                ),
+                COALESCE(
+                  (SELECT artifact.archived_path
+                   FROM exam_subjective_transcription_revisions_v2 transcription
+                   JOIN exam_answer_region_revisions_v2 region
+                     ON region.id=transcription.answer_region_revision_id
+                   JOIN artifacts artifact ON artifact.id=region.crop_artifact_id
+                   WHERE transcription.attempt_id=attempt.id
+                     AND transcription.assessment_item_id=item.id
+                     AND transcription.state='active'
+                     AND artifact.archive_status='ready'
+                   ORDER BY transcription.revision DESC,transcription.id DESC LIMIT 1),
+                  (SELECT artifact.archived_path
+                   FROM exam_objective_observation_revisions_v2 observation
+                   JOIN exam_answer_region_revisions_v2 region
+                     ON region.id=observation.answer_region_revision_id
+                   JOIN artifacts artifact ON artifact.id=region.crop_artifact_id
+                   WHERE observation.attempt_id=attempt.id
+                     AND observation.assessment_item_id=item.id
+                     AND observation.state='active'
+                     AND artifact.archive_status='ready'
+                   ORDER BY observation.revision DESC,observation.id DESC LIMIT 1)
+                ),
+                target_answer.public_id,target_answer.revision,target_answer.answer_json,
                 target_rubric.public_id,target_rubric.revision,
                 target_link.public_id,target_link.revision,
-                review_case.prepared_by,review_case.prepared_at,review_case.state
+                review_case.prepared_by,review_case.prepared_at,review_case.state,
+                resolution.public_id,resolved_decision.public_id,resolved_decision.teacher_score,
+                resolution.resolved_at,active_publication.public_id,
+                CASE WHEN resolution.id IS NOT NULL AND EXISTS (
+                  SELECT 1
+                  FROM exam_grade_publication_items_v2 resolved_publication_item
+                  JOIN exam_grade_publication_decisions_v2 resolved_publication_decision
+                    ON resolved_publication_decision.publication_item_id=resolved_publication_item.id
+                   AND resolved_publication_decision.attempt_id=resolved_publication_item.attempt_id
+                  WHERE resolved_publication_item.publication_id=attempt.active_publication_id
+                    AND resolved_publication_item.attempt_id=attempt.id
+                    AND resolved_publication_decision.grade_decision_id=resolution.grade_decision_id
+                ) THEN 1 ELSE 0 END
          FROM exam_question_version_review_cases_v2 review_case
          JOIN exam_question_version_impact_tasks_v2 task
            ON task.id=review_case.impact_task_id
@@ -944,6 +1262,12 @@ pub fn list_question_impact_review_cases(
            ON publication.id=review_case.publication_id
          LEFT JOIN exam_grade_decisions_v2 decision
            ON decision.id=review_case.source_grade_decision_id
+         LEFT JOIN exam_question_version_review_resolutions_v2 resolution
+           ON resolution.review_case_id=review_case.id
+         LEFT JOIN exam_grade_decisions_v2 resolved_decision
+           ON resolved_decision.id=resolution.grade_decision_id
+         LEFT JOIN exam_grade_publications_v2 active_publication
+           ON active_publication.id=attempt.active_publication_id
          WHERE plan.public_id=?1 AND plan.planned_by=?2
          ORDER BY assessment.title,student.student_no,student.id,item.order_index,review_case.id",
     )?;
@@ -951,10 +1275,26 @@ pub fn list_question_impact_review_cases(
         params![plan_public_id.trim(), owner_id.trim()],
         |row| {
             let case_kind: String = row.get(3)?;
-            let next_step_note = if case_kind == "unpublished_recalculation" {
-                "下一步由老师对照新旧评分证据创建新的评分 revision；当前未发布评分保持不变。"
+            let resolved_is_published = row.get::<_, i64>(39)? != 0;
+            let resolution_public_id: Option<String> = row.get(34)?;
+            let state = if resolved_is_published {
+                "republished"
+            } else if resolution_public_id.is_some() {
+                "grade_confirmed"
             } else {
-                "下一步由老师核对正式发布证据，再决定是否创建复核评分与新的发布 revision；当前正式成绩保持不变。"
+                "open"
+            };
+            let next_step_note = match (state, case_kind.as_str()) {
+                ("republished", _) => "新评分已由老师再次明确发布；旧发布快照保持审计。",
+                ("grade_confirmed", _) => {
+                    "新评分 revision 已确认但尚未正式生效；请明确发布整份成绩。"
+                }
+                (_, "unpublished_recalculation") => {
+                    "请对照学生作答与新答案逐条确认；保存后仍须显式发布整份成绩。"
+                }
+                _ => {
+                    "请核对正式发布时的旧评分与学生作答；保存新评分后旧正式成绩仍保持不变，直到明确生成新的发布 revision。"
+                }
             };
             Ok(QuestionImpactReviewCase {
                 public_id: row.get(0)?,
@@ -966,40 +1306,699 @@ pub fn list_question_impact_review_cases(
                 student_no: row.get(6)?,
                 student_name: row.get(7)?,
                 question_version_public_id: row.get(8)?,
-                question_stem: row.get(9)?,
-                question_no: row.get(10)?,
-                attempt_public_id: row.get(11)?,
-                attempt_state: row.get(12)?,
-                publication_public_id: row.get(13)?,
-                source_grade_decision_public_id: row.get(14)?,
-                source_grade_decision_revision: row.get(15)?,
-                source_teacher_score: row.get(16)?,
-                source_snapshot_hash: row.get(17)?,
-                target_answer_key_version_public_id: row.get(18)?,
-                target_answer_key_revision: row.get(19)?,
-                target_rubric_version_public_id: row.get(20)?,
-                target_rubric_revision: row.get(21)?,
-                target_link_set_public_id: row.get(22)?,
-                target_link_set_revision: row.get(23)?,
-                prepared_by: row.get(24)?,
-                prepared_at: row.get(25)?,
-                state: row.get(26)?,
+                question_type: row.get(9)?,
+                question_stem: row.get(10)?,
+                question_no: row.get(11)?,
+                max_score: row.get(12)?,
+                attempt_public_id: row.get(13)?,
+                attempt_state: row.get(14)?,
+                publication_public_id: row.get(15)?,
+                source_grade_decision_public_id: row.get(16)?,
+                source_grade_decision_revision: row.get(17)?,
+                source_teacher_score: row.get(18)?,
+                source_point_results_json: row.get(19)?,
+                source_snapshot_hash: row.get(20)?,
+                student_response_state: row.get(21)?,
+                student_response_text: row.get(22)?,
+                crop_path: row.get(23)?,
+                target_answer_key_version_public_id: row.get(24)?,
+                target_answer_key_revision: row.get(25)?,
+                target_answer_json: row.get(26)?,
+                target_components: Vec::new(),
+                target_rubric_version_public_id: row.get(27)?,
+                target_rubric_revision: row.get(28)?,
+                target_link_set_public_id: row.get(29)?,
+                target_link_set_revision: row.get(30)?,
+                prepared_by: row.get(31)?,
+                prepared_at: row.get(32)?,
+                state: state.into(),
+                resolution_public_id,
+                resolved_grade_decision_public_id: row.get(35)?,
+                resolved_teacher_score: row.get(36)?,
+                resolved_at: row.get(37)?,
+                active_publication_public_id: row.get(38)?,
                 next_step_note: next_step_note.into(),
                 changes_assessment_binding: false,
-                changes_grade: false,
-                changes_publication: false,
-                changes_learning_evidence: false,
+                changes_grade: state != "open",
+                changes_publication: state == "republished",
+                changes_learning_evidence: state == "republished",
             })
         },
     )?;
+    let mut cases = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    for review_case in &mut cases {
+        review_case.target_components = load_target_components(
+            conn,
+            &review_case.question_type,
+            &review_case.target_answer_key_version_public_id,
+            &review_case.target_rubric_version_public_id,
+        )?;
+    }
     Ok(QuestionImpactReviewCaseCatalog {
         schema_version: QUESTION_PERFORMANCE_SCHEMA_VERSION,
         rule_version: QUESTION_IMPACT_REVIEW_RULE_VERSION.into(),
         plan_public_id: plan_public_id.trim().into(),
-        cases: rows.collect::<rusqlite::Result<Vec<_>>>()?,
+        cases,
         boundary_note:
-            "待处理 case 只冻结旧评分/发布证据与目标版本；建立 case 不会改作业绑定、成绩、发布结果或学习证据。"
+            "建立 case 不改任何成绩。老师保存新评分后仍不会自动发布；只有再次明确发布，正式成绩和学习证据才在同一事务中切换。"
                 .into(),
+    })
+}
+
+fn review_resolution_scope(
+    conn: &Connection,
+    owner_id: &str,
+    case_public_id: &str,
+) -> CoreResult<ReviewResolutionScope> {
+    conn.query_row(
+        "SELECT review_case.id,review_case.case_kind,attempt.id,item.id,
+                review_case.publication_id,question.question_type,item.score,
+                review_case.source_grade_decision_id,
+                review_case.source_grade_decision_revision,
+                review_case.source_snapshot_hash,
+                target_answer.id,target_answer.public_id,
+                target_rubric.id,target_rubric.public_id,
+                target_link.id,target_link.public_id,
+                COALESCE(
+                  (SELECT COALESCE(transcription.teacher_corrected_text,
+                                   transcription.normalized_text,
+                                   transcription.raw_ocr_text)
+                   FROM exam_subjective_transcription_revisions_v2 transcription
+                   WHERE transcription.attempt_id=attempt.id
+                     AND transcription.assessment_item_id=item.id
+                     AND transcription.state='active'
+                   ORDER BY transcription.revision DESC,transcription.id DESC LIMIT 1),
+                  (SELECT observation.observed_answer_json
+                   FROM exam_objective_observation_revisions_v2 observation
+                   WHERE observation.attempt_id=attempt.id
+                     AND observation.assessment_item_id=item.id
+                     AND observation.state='active'
+                   ORDER BY observation.revision DESC,observation.id DESC LIMIT 1)
+                ),
+                attempt.state,current_decision.id,current_decision.revision,
+                COALESCE((
+                  SELECT MAX(history.revision)
+                  FROM exam_grade_decisions_v2 history
+                  WHERE history.attempt_id=attempt.id
+                    AND history.assessment_item_id=item.id
+                ),0),
+                attempt.active_publication_id
+         FROM exam_question_version_review_cases_v2 review_case
+         JOIN exam_question_version_impact_tasks_v2 task
+           ON task.id=review_case.impact_task_id
+         JOIN exam_question_version_impact_plans_v2 plan
+           ON plan.id=task.impact_plan_id
+         JOIN exam_attempts_v2 attempt ON attempt.id=review_case.attempt_id
+         JOIN exam_assessment_items_v2 item ON item.id=review_case.assessment_item_id
+         JOIN k1_question_versions question ON question.id=item.question_version_id
+         JOIN k1_answer_key_versions target_answer
+           ON target_answer.id=review_case.target_answer_key_version_id
+         JOIN k1_rubric_versions target_rubric
+           ON target_rubric.id=review_case.target_rubric_version_id
+         JOIN k1_link_sets target_link
+           ON target_link.id=review_case.target_link_set_id
+         LEFT JOIN exam_grade_decisions_v2 current_decision
+           ON current_decision.attempt_id=attempt.id
+          AND current_decision.assessment_item_id=item.id
+          AND current_decision.state='active'
+         WHERE review_case.public_id=?1
+           AND review_case.state='open'
+           AND plan.planned_by=?2",
+        params![case_public_id.trim(), owner_id.trim()],
+        |row| {
+            Ok(ReviewResolutionScope {
+                case_id: row.get(0)?,
+                case_kind: row.get(1)?,
+                attempt_id: row.get(2)?,
+                assessment_item_id: row.get(3)?,
+                publication_id: row.get(4)?,
+                question_type: row.get(5)?,
+                max_score: row.get(6)?,
+                source_grade_decision_id: row.get(7)?,
+                source_grade_decision_revision: row.get(8)?,
+                source_snapshot_hash: row.get(9)?,
+                target_answer_key_version_id: row.get(10)?,
+                target_answer_key_version_public_id: row.get(11)?,
+                target_rubric_version_id: row.get(12)?,
+                target_rubric_version_public_id: row.get(13)?,
+                target_link_set_id: row.get(14)?,
+                target_link_set_public_id: row.get(15)?,
+                student_response_text: row.get(16)?,
+                attempt_state: row.get(17)?,
+                current_grade_decision_id: row.get(18)?,
+                current_grade_decision_revision: row.get(19)?,
+                max_grade_decision_revision: row.get(20)?,
+                active_publication_id: row.get(21)?,
+            })
+        },
+    )
+    .optional()?
+    .ok_or_else(|| CoreError::NotFound("未找到当前老师可处理的版本影响 case".into()))
+}
+
+fn resolution_result(
+    conn: &Connection,
+    case_public_id: &str,
+    resolution_public_id: String,
+    grade_decision_id: i64,
+) -> CoreResult<ResolveQuestionImpactReviewCaseResult> {
+    Ok(ResolveQuestionImpactReviewCaseResult {
+        case_public_id: case_public_id.trim().into(),
+        resolution_public_id,
+        grade_decision: grade_decision_by_id(conn, grade_decision_id)?,
+        old_publication_unchanged: true,
+        learning_evidence_unchanged: true,
+        requires_explicit_publication: true,
+    })
+}
+
+pub fn resolve_question_impact_review_case(
+    conn: &mut Connection,
+    owner_id: &str,
+    request: &ResolveQuestionImpactReviewCaseRequest,
+) -> CoreResult<ResolveQuestionImpactReviewCaseResult> {
+    required(owner_id, "题库老师")?;
+    required(&request.request_key, "请求标识")?;
+    required(&request.case_public_id, "待处理 case")?;
+    required(
+        &request.expected_source_snapshot_hash,
+        "来源快照校验值",
+    )?;
+    required(&request.teacher_note, "老师处理说明")?;
+    required(&request.resolved_by, "处理老师")?;
+    if request.resolved_by.trim() != owner_id.trim() {
+        return Err(CoreError::Invalid("只能以当前老师身份确认新评分".into()));
+    }
+    let scope = review_resolution_scope(conn, owner_id, &request.case_public_id)?;
+    if scope.source_snapshot_hash != request.expected_source_snapshot_hash.trim() {
+        return Err(CoreError::Invalid(
+            "case 来源快照已不匹配，请刷新后重新核对".into(),
+        ));
+    }
+    let target_components = load_target_components(
+        conn,
+        &scope.question_type,
+        &scope.target_answer_key_version_public_id,
+        &scope.target_rubric_version_public_id,
+    )?;
+    let teacher_note = request.teacher_note.trim();
+    let (teacher_score, component_results) =
+        if matches!(scope.question_type.as_str(), "single" | "multiple" | "true_false") {
+            if !request.components.is_empty() {
+                return Err(CoreError::Invalid("客观题不能提交逐项评分".into()));
+            }
+            let score = request
+                .teacher_score
+                .ok_or_else(|| CoreError::Invalid("客观题必须填写老师确认分数".into()))?;
+            if !score.is_finite() || score < 0.0 || score > scope.max_score + 0.000_001 {
+                return Err(CoreError::Invalid("老师确认分数超出题目分值".into()));
+            }
+            (score, Vec::<Value>::new())
+        } else {
+            if request.teacher_score.is_some() {
+                return Err(CoreError::Invalid(
+                    "填空和简答题总分由逐项分数自动汇总".into(),
+                ));
+            }
+            let target_total = target_components
+                .iter()
+                .map(|component| component.max_score)
+                .sum::<f64>();
+            if (target_total - scope.max_score).abs() > 0.000_001 {
+                return Err(CoreError::Invalid(
+                    "目标答案或评分点总分与作业题目分值不一致".into(),
+                ));
+            }
+            let mut inputs = BTreeMap::new();
+            for input in &request.components {
+                required(&input.source_public_id, "评分项")?;
+                if inputs
+                    .insert(input.source_public_id.trim().to_owned(), input)
+                    .is_some()
+                {
+                    return Err(CoreError::Invalid("同一评分项不能重复提交".into()));
+                }
+            }
+            if inputs.len() != target_components.len() {
+                return Err(CoreError::Invalid(
+                    "必须逐项确认目标答案槽位或评分点".into(),
+                ));
+            }
+            let response_text = scope
+                .student_response_text
+                .as_deref()
+                .unwrap_or_default()
+                .trim();
+            let mut total_score = 0.0;
+            let mut results = Vec::with_capacity(target_components.len());
+            for component in &target_components {
+                let input = inputs.get(&component.source_public_id).ok_or_else(|| {
+                    CoreError::Invalid(format!("缺少评分项：{}", component.label))
+                })?;
+                if !input.teacher_score.is_finite()
+                    || input.teacher_score < 0.0
+                    || input.teacher_score > component.max_score + 0.000_001
+                {
+                    return Err(CoreError::Invalid(format!(
+                        "评分项“{}”的得分超出范围",
+                        component.label
+                    )));
+                }
+                let evidence_text = input
+                    .evidence_text
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                if input.teacher_score > 0.000_001 {
+                    let evidence = evidence_text.ok_or_else(|| {
+                        CoreError::Invalid(format!(
+                            "评分项“{}”给分时必须引用学生原答案",
+                            component.label
+                        ))
+                    })?;
+                    if response_text.is_empty() || !response_text.contains(evidence) {
+                        return Err(CoreError::Invalid(format!(
+                            "评分项“{}”的证据必须来自当前学生答案",
+                            component.label
+                        )));
+                    }
+                }
+                let result_status = if input.teacher_score <= 0.000_001 {
+                    "incorrect"
+                } else if (input.teacher_score - component.max_score).abs() <= 0.000_001 {
+                    "correct"
+                } else {
+                    "partial"
+                };
+                total_score += input.teacher_score;
+                results.push(serde_json::json!({
+                    "source_type": component.source_type,
+                    "source_public_id": component.source_public_id,
+                    "stable_id": component.stable_id,
+                    "order_index": component.order_index,
+                    "label": component.label,
+                    "max_score": component.max_score,
+                    "teacher_score": input.teacher_score,
+                    "result_status": result_status,
+                    "evidence_text": evidence_text,
+                    "teacher_note": input.teacher_note.as_deref().map(str::trim)
+                        .filter(|value| !value.is_empty())
+                }));
+            }
+            (total_score, results)
+        };
+    let component_results_json = serde_json::json!({
+        "schema_version": 1,
+        "question_type": scope.question_type,
+        "components": component_results
+    })
+    .to_string();
+    let component_results_value: Value = serde_json::from_str(&component_results_json)
+        .map_err(|error| CoreError::Parse(format!("逐项评分序列化失败：{error}")))?;
+    let point_results_json = serde_json::json!({
+        "schema_version": 3,
+        "source": "question_version_review_teacher_resolution",
+        "review_case_public_id": request.case_public_id.trim(),
+        "expected_source_snapshot_hash": request.expected_source_snapshot_hash.trim(),
+        "target_answer_key_version_id": scope.target_answer_key_version_id,
+        "target_answer_key_version_public_id": scope.target_answer_key_version_public_id,
+        "target_rubric_version_id": scope.target_rubric_version_id,
+        "target_rubric_version_public_id": scope.target_rubric_version_public_id,
+        "target_link_set_id": scope.target_link_set_id,
+        "target_link_set_public_id": scope.target_link_set_public_id,
+        "component_results": component_results_value.clone()
+    })
+    .to_string();
+    let request_hash_input = serde_json::json!({
+        "schema_version": 1,
+        "rule_version": QUESTION_IMPACT_RESOLUTION_RULE_VERSION,
+        "case_public_id": request.case_public_id.trim(),
+        "expected_source_snapshot_hash": request.expected_source_snapshot_hash.trim(),
+        "teacher_score_millis": (teacher_score * 1000.0).round() as i64,
+        "component_results": component_results_value,
+        "teacher_note": teacher_note,
+        "resolved_by": request.resolved_by.trim()
+    });
+    let request_hash = hashing::sha256_hex(
+        &serde_json::to_vec(&request_hash_input)
+            .map_err(|error| CoreError::Parse(format!("处理请求校验失败：{error}")))?,
+    );
+    let request_key_conflict: Option<i64> = conn
+        .query_row(
+            "SELECT review_case_id
+             FROM exam_question_version_review_resolutions_v2 WHERE request_key=?1",
+            [request.request_key.trim()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if request_key_conflict.is_some_and(|case_id| case_id != scope.case_id) {
+        return Err(CoreError::Invalid("请求标识已用于其他待处理 case".into()));
+    }
+    let existing: Option<(String, String, i64)> = conn
+        .query_row(
+            "SELECT public_id,request_hash,grade_decision_id
+             FROM exam_question_version_review_resolutions_v2
+             WHERE review_case_id=?1",
+            [scope.case_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if let Some((resolution_public_id, existing_hash, grade_decision_id)) = existing {
+        if existing_hash != request_hash {
+            return Err(CoreError::Invalid(
+                "该 case 已按不同内容确认，不能覆盖原处理记录".into(),
+            ));
+        }
+        return resolution_result(
+            conn,
+            &request.case_public_id,
+            resolution_public_id,
+            grade_decision_id,
+        );
+    }
+    if scope.attempt_state == "voided" {
+        return Err(CoreError::Invalid("作答已作废，不能继续处理".into()));
+    }
+    if scope.current_grade_decision_id != scope.source_grade_decision_id
+        || scope.current_grade_decision_revision != scope.source_grade_decision_revision
+        || scope.max_grade_decision_revision != scope.source_grade_decision_revision.unwrap_or(0)
+    {
+        return Err(CoreError::Invalid(
+            "当前评分已在 case 建立后变化，请重新生成影响计划".into(),
+        ));
+    }
+    match scope.case_kind.as_str() {
+        "unpublished_recalculation" if scope.active_publication_id.is_none() => {}
+        "published_review"
+            if scope.publication_id.is_some()
+                && scope.active_publication_id == scope.publication_id => {}
+        _ => {
+            return Err(CoreError::Invalid(
+                "当前发布状态已在 case 建立后变化，请重新生成影响计划".into(),
+            ));
+        }
+    }
+    let tx = conn.transaction()?;
+    let evidence_count_before: i64 = tx.query_row(
+        "SELECT COUNT(*)
+         FROM learning_evidence evidence
+         JOIN exam_grade_decisions_v2 decision
+           ON evidence.decision_ref_type='grade_decision'
+          AND evidence.decision_ref_id=decision.public_id
+          AND evidence.decision_revision=decision.revision
+         WHERE decision.attempt_id=?1 AND evidence.state='active'",
+        [scope.attempt_id],
+        |row| row.get(0),
+    )?;
+    let decision = assessment::decide_grade_in_transaction(
+        &tx,
+        &NewGradeDecision {
+            attempt_id: scope.attempt_id,
+            assessment_item_id: scope.assessment_item_id,
+            machine_grade_ai_run_id: None,
+            teacher_score,
+            point_results_json: &point_results_json,
+            teacher_note: Some(teacher_note),
+            confirmation_level: "teacher_corrected",
+            decided_by: request.resolved_by.trim(),
+        },
+    )?;
+    let resolution_public_id = ids::new_public_id();
+    let now = time::utc_now_rfc3339();
+    tx.execute(
+        "INSERT INTO exam_question_version_review_resolutions_v2
+         (public_id,request_key,request_hash,review_case_id,grade_decision_id,
+          expected_source_snapshot_hash,component_results_json,teacher_note,
+          resolved_by,resolved_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        params![
+            &resolution_public_id,
+            request.request_key.trim(),
+            &request_hash,
+            scope.case_id,
+            decision.id,
+            request.expected_source_snapshot_hash.trim(),
+            &component_results_json,
+            teacher_note,
+            request.resolved_by.trim(),
+            &now
+        ],
+    )?;
+    let (active_publication_after, evidence_count_after): (Option<i64>, i64) = tx.query_row(
+        "SELECT attempt.active_publication_id,
+                (SELECT COUNT(*)
+                 FROM learning_evidence evidence
+                 JOIN exam_grade_decisions_v2 source_decision
+                   ON evidence.decision_ref_type='grade_decision'
+                  AND evidence.decision_ref_id=source_decision.public_id
+                  AND evidence.decision_revision=source_decision.revision
+                 WHERE source_decision.attempt_id=attempt.id
+                   AND evidence.state='active')
+         FROM exam_attempts_v2 attempt WHERE attempt.id=?1",
+        [scope.attempt_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if active_publication_after != scope.active_publication_id
+        || evidence_count_after != evidence_count_before
+    {
+        return Err(CoreError::Invalid(
+            "保存新评分时检测到正式发布或学习证据发生意外变化".into(),
+        ));
+    }
+    let payload = serde_json::json!({
+        "schema_version": QUESTION_PERFORMANCE_SCHEMA_VERSION,
+        "rule_version": QUESTION_IMPACT_RESOLUTION_RULE_VERSION,
+        "review_case_public_id": request.case_public_id.trim(),
+        "grade_decision_public_id": decision.public_id,
+        "teacher_score": teacher_score,
+        "target_answer_key_version_public_id": scope.target_answer_key_version_public_id,
+        "target_rubric_version_public_id": scope.target_rubric_version_public_id,
+        "target_link_set_public_id": scope.target_link_set_public_id,
+        "changes_assessment_binding": false,
+        "changes_publication": false,
+        "changes_learning_evidence": false
+    })
+    .to_string();
+    outbox::create_event(
+        &tx,
+        &NewOutboxEvent {
+            idempotency_key: &format!("{}:outbox", request.request_key.trim()),
+            event_type: "k1.question_version_impact.grade_confirmed",
+            event_version: 1,
+            aggregate_type: "exam_question_version_review_case",
+            aggregate_id: request.case_public_id.trim(),
+            aggregate_revision: decision.revision,
+            payload_json: &payload,
+            occurred_at: &now,
+        },
+    )?;
+    audit::append(
+        &tx,
+        &NewAuditEvent {
+            idempotency_key: &format!("{}:audit", request.request_key.trim()),
+            actor_type: AuditActorType::Teacher,
+            actor_id: Some(request.resolved_by.trim()),
+            action: "k1.question_version_impact.grade_confirmed",
+            object_type: "exam_question_version_review_case",
+            object_id: request.case_public_id.trim(),
+            object_revision: Some(decision.revision),
+            note: Some("新评分已确认；旧正式发布和学习证据保持不变，等待老师明确再发布"),
+            meta_json: Some(&payload),
+            occurred_at: &now,
+        },
+    )?;
+    tx.commit()?;
+    resolution_result(
+        conn,
+        &request.case_public_id,
+        resolution_public_id,
+        decision.id,
+    )
+}
+
+pub fn publish_question_impact_review_case(
+    conn: &Connection,
+    owner_id: &str,
+    request: &PublishQuestionImpactReviewCaseRequest,
+) -> CoreResult<PublishQuestionImpactReviewCaseResult> {
+    required(owner_id, "题库老师")?;
+    required(&request.case_public_id, "待处理 case")?;
+    required(
+        &request.expected_grade_decision_public_id,
+        "待发布评分",
+    )?;
+    required(&request.published_by, "发布老师")?;
+    if request.published_by.trim() != owner_id.trim() {
+        return Err(CoreError::Invalid("只能以当前老师身份发布成绩".into()));
+    }
+    let scope: Option<PublishReviewScope> = conn
+        .query_row(
+            "SELECT attempt.id,resolution.grade_decision_id,decision.public_id,
+                    attempt.state,attempt.active_publication_id,
+                    current_decision.public_id,review_case.publication_id
+             FROM exam_question_version_review_cases_v2 review_case
+             JOIN exam_question_version_impact_tasks_v2 task
+               ON task.id=review_case.impact_task_id
+             JOIN exam_question_version_impact_plans_v2 plan
+               ON plan.id=task.impact_plan_id
+             JOIN exam_question_version_review_resolutions_v2 resolution
+               ON resolution.review_case_id=review_case.id
+             JOIN exam_grade_decisions_v2 decision
+               ON decision.id=resolution.grade_decision_id
+             JOIN exam_attempts_v2 attempt ON attempt.id=review_case.attempt_id
+             LEFT JOIN exam_grade_decisions_v2 current_decision
+               ON current_decision.attempt_id=attempt.id
+              AND current_decision.assessment_item_id=review_case.assessment_item_id
+              AND current_decision.state='active'
+             WHERE review_case.public_id=?1 AND plan.planned_by=?2",
+            params![request.case_public_id.trim(), owner_id.trim()],
+            |row| {
+                Ok(PublishReviewScope {
+                    attempt_id: row.get(0)?,
+                    grade_decision_id: row.get(1)?,
+                    grade_decision_public_id: row.get(2)?,
+                    attempt_state: row.get(3)?,
+                    active_publication_id: row.get(4)?,
+                    current_grade_decision_public_id: row.get(5)?,
+                    original_publication_id: row.get(6)?,
+                })
+            },
+        )
+        .optional()?;
+    let Some(scope) = scope else {
+        return Err(CoreError::NotFound(
+            "未找到已确认新评分的版本影响 case".into(),
+        ));
+    };
+    let PublishReviewScope {
+        attempt_id,
+        grade_decision_id,
+        grade_decision_public_id,
+        attempt_state,
+        active_publication_id,
+        current_grade_decision_public_id,
+        original_publication_id,
+    } = scope;
+    if grade_decision_public_id != request.expected_grade_decision_public_id.trim()
+        || current_grade_decision_public_id != grade_decision_public_id
+    {
+        return Err(CoreError::Invalid(
+            "当前有效评分与待发布评分不一致，请刷新后核对".into(),
+        ));
+    }
+    if let Some(publication_id) = active_publication_id {
+        let already_published: bool = conn.query_row(
+            "SELECT EXISTS(
+               SELECT 1
+               FROM exam_grade_publication_items_v2 publication_item
+               JOIN exam_grade_publication_decisions_v2 publication_decision
+                 ON publication_decision.publication_item_id=publication_item.id
+                AND publication_decision.attempt_id=publication_item.attempt_id
+               WHERE publication_item.publication_id=?1
+                 AND publication_item.attempt_id=?2
+                 AND publication_decision.grade_decision_id=?3
+             )",
+            (publication_id, attempt_id, grade_decision_id),
+            |row| row.get(0),
+        )?;
+        if already_published {
+            let active_resolution_evidence: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM learning_evidence
+                 WHERE decision_ref_type='grade_decision'
+                   AND decision_ref_id=?1 AND state='active'",
+                [&grade_decision_public_id],
+                |row| row.get(0),
+            )?;
+            let reverted_original_evidence: i64 = if let Some(original_id) =
+                original_publication_id.filter(|old_id| *old_id != publication_id)
+            {
+                conn.query_row(
+                    "SELECT COUNT(*)
+                     FROM learning_evidence evidence
+                     JOIN exam_grade_decisions_v2 decision
+                       ON evidence.decision_ref_type='grade_decision'
+                      AND evidence.decision_ref_id=decision.public_id
+                      AND evidence.decision_revision=decision.revision
+                     JOIN exam_grade_publication_decisions_v2 publication_decision
+                       ON publication_decision.grade_decision_id=decision.id
+                     JOIN exam_grade_publication_items_v2 publication_item
+                       ON publication_item.id=publication_decision.publication_item_id
+                      AND publication_item.attempt_id=publication_decision.attempt_id
+                     WHERE publication_item.publication_id=?1
+                       AND publication_item.attempt_id=?2
+                       AND evidence.state='reverted'",
+                    (original_id, attempt_id),
+                    |row| row.get(0),
+                )?
+            } else {
+                0
+            };
+            return Ok(PublishQuestionImpactReviewCaseResult {
+                case_public_id: request.case_public_id.trim().into(),
+                publication: publication_by_id(conn, publication_id, attempt_id)?,
+                prior_publication_superseded: original_publication_id
+                    .is_some_and(|old_id| old_id != publication_id),
+                learning_evidence_switched: active_resolution_evidence > 0
+                    || reverted_original_evidence > 0,
+            });
+        }
+    }
+    if attempt_state != "ready_to_publish" {
+        return Err(CoreError::Invalid(
+            "整份作业仍有题目待终审，暂不能再次发布".into(),
+        ));
+    }
+    let old_active_evidence_count: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM learning_evidence evidence
+         JOIN exam_grade_decisions_v2 decision
+           ON evidence.decision_ref_type='grade_decision'
+          AND evidence.decision_ref_id=decision.public_id
+          AND evidence.decision_revision=decision.revision
+         JOIN exam_grade_publication_decisions_v2 publication_decision
+           ON publication_decision.grade_decision_id=decision.id
+         JOIN exam_grade_publication_items_v2 publication_item
+           ON publication_item.id=publication_decision.publication_item_id
+          AND publication_item.attempt_id=publication_decision.attempt_id
+         WHERE publication_item.publication_id=?1
+           AND publication_item.attempt_id=?2
+           AND evidence.state='active'",
+        (active_publication_id, attempt_id),
+        |row| row.get(0),
+    )?;
+    let publication = assessment::publish_attempt(conn, attempt_id, request.published_by.trim())?;
+    let new_active_evidence_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM learning_evidence
+         WHERE decision_ref_type='grade_decision'
+           AND decision_ref_id=?1 AND state='active'",
+        [&grade_decision_public_id],
+        |row| row.get(0),
+    )?;
+    let old_active_evidence_after: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM learning_evidence evidence
+         JOIN exam_grade_decisions_v2 decision
+           ON evidence.decision_ref_type='grade_decision'
+          AND evidence.decision_ref_id=decision.public_id
+          AND evidence.decision_revision=decision.revision
+         JOIN exam_grade_publication_decisions_v2 publication_decision
+           ON publication_decision.grade_decision_id=decision.id
+         JOIN exam_grade_publication_items_v2 publication_item
+           ON publication_item.id=publication_decision.publication_item_id
+          AND publication_item.attempt_id=publication_decision.attempt_id
+         WHERE publication_item.publication_id=?1
+           AND publication_item.attempt_id=?2
+           AND evidence.state='active'",
+        (active_publication_id, attempt_id),
+        |row| row.get(0),
+    )?;
+    Ok(PublishQuestionImpactReviewCaseResult {
+        case_public_id: request.case_public_id.trim().into(),
+        publication,
+        prior_publication_superseded: active_publication_id.is_some(),
+        learning_evidence_switched: new_active_evidence_count > 0
+            || old_active_evidence_count > old_active_evidence_after,
     })
 }
 
@@ -1298,7 +2297,7 @@ mod tests {
         old_link_id: i64,
     }
 
-    fn fixture() -> Fixture {
+    fn fixture_with_question_type(question_type: &str) -> Fixture {
         let conn = open_in_memory().unwrap();
         run_migrations(&conn, CORE_MIGRATIONS).unwrap();
         run_migrations(&conn, module_knowledge::knowledge_migrations()).unwrap();
@@ -1339,10 +2338,10 @@ mod tests {
             "INSERT INTO k1_question_versions
              (public_id,question_id,revision,question_type,stem,max_score,content_hash,
               quality_level,state,created_at)
-             VALUES (?1,?2,1,'single','鸦片战争爆发于哪一年？',2,
+             VALUES (?1,?2,1,?3,'鸦片战争爆发于哪一年？',2,
                      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                     'L3','published',?3)",
-            params![&version_public_id, question.id, NOW],
+                     'L3','published',?4)",
+            params![&version_public_id, question.id, question_type, NOW],
         )
         .unwrap();
         let version = QuestionVersion {
@@ -1350,7 +2349,7 @@ mod tests {
             public_id: version_public_id,
             question_id: question.id,
             revision: 1,
-            question_type: "single".into(),
+            question_type: question_type.into(),
             stem: "鸦片战争爆发于哪一年？".into(),
             material_text: None,
             max_score: 2.0,
@@ -1558,6 +2557,10 @@ mod tests {
             old_rubric_id: old_rubric.id,
             old_link_id: old_link.id,
         }
+    }
+
+    fn fixture() -> Fixture {
+        fixture_with_question_type("single")
     }
 
     #[test]
@@ -1778,6 +2781,300 @@ mod tests {
         assert!(prepared.cases[0]
             .next_step_note
             .contains("新的发布 revision"));
+    }
+
+    fn prepared_case(fixture: &mut Fixture, action: &str, request_key: &str) -> QuestionImpactReviewCase {
+        let preview = preview_question_version_impact(
+            &fixture.conn,
+            "local_teacher",
+            &fixture.question_version_public_id,
+        )
+        .unwrap();
+        let plan = confirm_question_impact_plan(
+            &mut fixture.conn,
+            "local_teacher",
+            &ConfirmQuestionImpactPlanRequest {
+                request_key: request_key.into(),
+                question_version_public_id: fixture.question_version_public_id.clone(),
+                expected_preview_hash: preview.preview_hash,
+                action: action.into(),
+                planned_by: "local_teacher".into(),
+            },
+        )
+        .unwrap();
+        prepare_question_impact_review_cases(
+            &mut fixture.conn,
+            "local_teacher",
+            &PrepareQuestionImpactReviewCasesRequest {
+                plan_public_id: plan.public_id,
+                expected_task_count: 1,
+                prepared_by: "local_teacher".into(),
+            },
+        )
+        .unwrap()
+        .cases
+        .remove(0)
+    }
+
+    #[test]
+    fn unpublished_case_confirms_new_grade_then_requires_explicit_publication() {
+        let mut fixture = fixture();
+        let review_case = prepared_case(
+            &mut fixture,
+            "recalculate_unpublished",
+            "impact-unpublished-resolution-plan",
+        );
+        let before: (i64, i64, i64) = fixture
+            .conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM exam_grade_publications_v2),
+                   (SELECT COUNT(*) FROM learning_evidence WHERE state='active'),
+                   (SELECT COUNT(*) FROM exam_question_version_review_resolutions_v2)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let request = ResolveQuestionImpactReviewCaseRequest {
+            request_key: "impact-unpublished-resolution".into(),
+            case_public_id: review_case.public_id.clone(),
+            expected_source_snapshot_hash: review_case.source_snapshot_hash.clone(),
+            teacher_score: Some(0.0),
+            components: vec![],
+            teacher_note: "按修订后的标准答案确认不得分".into(),
+            resolved_by: "local_teacher".into(),
+        };
+        let resolved = resolve_question_impact_review_case(
+            &mut fixture.conn,
+            "local_teacher",
+            &request,
+        )
+        .unwrap();
+        assert_eq!(resolved.grade_decision.revision, 2);
+        assert_eq!(resolved.grade_decision.teacher_score, 0.0);
+        assert!(resolved.old_publication_unchanged);
+        assert!(resolved.learning_evidence_unchanged);
+        assert!(resolved.requires_explicit_publication);
+        let after_resolution: (i64, i64, i64, Option<i64>, String) = fixture
+            .conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM exam_grade_publications_v2),
+                   (SELECT COUNT(*) FROM learning_evidence WHERE state='active'),
+                   (SELECT COUNT(*) FROM exam_question_version_review_resolutions_v2),
+                   attempt.active_publication_id,attempt.state
+                 FROM exam_attempts_v2 attempt WHERE attempt.public_id='attempt-1'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!((before.0, before.1, 1), (after_resolution.0, after_resolution.1, after_resolution.2));
+        assert_eq!(after_resolution.3, None);
+        assert_eq!(after_resolution.4, "ready_to_publish");
+        let repeated = resolve_question_impact_review_case(
+            &mut fixture.conn,
+            "local_teacher",
+            &request,
+        )
+        .unwrap();
+        assert_eq!(
+            repeated.grade_decision.public_id,
+            resolved.grade_decision.public_id
+        );
+        let catalog = list_question_impact_review_cases(
+            &fixture.conn,
+            "local_teacher",
+            &review_case.plan_public_id,
+        )
+        .unwrap();
+        assert_eq!(catalog.cases[0].state, "grade_confirmed");
+        assert!(!catalog.cases[0].changes_publication);
+        let published = publish_question_impact_review_case(
+            &fixture.conn,
+            "local_teacher",
+            &PublishQuestionImpactReviewCaseRequest {
+                case_public_id: review_case.public_id.clone(),
+                expected_grade_decision_public_id: resolved.grade_decision.public_id.clone(),
+                published_by: "local_teacher".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(published.publication.total_score, 0.0);
+        assert!(!published.prior_publication_superseded);
+        let final_catalog = list_question_impact_review_cases(
+            &fixture.conn,
+            "local_teacher",
+            &review_case.plan_public_id,
+        )
+        .unwrap();
+        assert_eq!(final_catalog.cases[0].state, "republished");
+        assert!(final_catalog.cases[0].changes_publication);
+    }
+
+    #[test]
+    fn published_case_keeps_old_evidence_until_republication_switches_it() {
+        let mut fixture = fixture();
+        let review_case = prepared_case(
+            &mut fixture,
+            "review_published",
+            "impact-published-resolution-plan",
+        );
+        let request = ResolveQuestionImpactReviewCaseRequest {
+            request_key: "impact-published-resolution".into(),
+            case_public_id: review_case.public_id.clone(),
+            expected_source_snapshot_hash: review_case.source_snapshot_hash.clone(),
+            teacher_score: Some(0.0),
+            components: vec![],
+            teacher_note: "复核正式成绩后按新答案改为不得分".into(),
+            resolved_by: "local_teacher".into(),
+        };
+        let resolved = resolve_question_impact_review_case(
+            &mut fixture.conn,
+            "local_teacher",
+            &request,
+        )
+        .unwrap();
+        let after_resolution: (String, String, i64, String) = fixture
+            .conn
+            .query_row(
+                "SELECT publication.public_id,publication.state,
+                        (SELECT COUNT(*) FROM learning_evidence
+                         WHERE decision_ref_id='decision-2' AND state='active'),
+                        attempt.state
+                 FROM exam_attempts_v2 attempt
+                 JOIN exam_grade_publications_v2 publication
+                   ON publication.id=attempt.active_publication_id
+                 WHERE attempt.public_id='attempt-2'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(after_resolution.0, "publication-1");
+        assert_eq!(after_resolution.1, "published");
+        assert_eq!(after_resolution.2, 1);
+        assert_eq!(after_resolution.3, "ready_to_publish");
+        let published = publish_question_impact_review_case(
+            &fixture.conn,
+            "local_teacher",
+            &PublishQuestionImpactReviewCaseRequest {
+                case_public_id: review_case.public_id.clone(),
+                expected_grade_decision_public_id: resolved.grade_decision.public_id.clone(),
+                published_by: "local_teacher".into(),
+            },
+        )
+        .unwrap();
+        assert!(published.prior_publication_superseded);
+        assert!(published.learning_evidence_switched);
+        let after_publication: (String, String, i64, String) = fixture
+            .conn
+            .query_row(
+                "SELECT old_publication.state,new_publication.state,
+                        (SELECT COUNT(*) FROM learning_evidence
+                         WHERE decision_ref_id='decision-2' AND state='reverted'),
+                        attempt.state
+                 FROM exam_attempts_v2 attempt
+                 JOIN exam_grade_publications_v2 new_publication
+                   ON new_publication.id=attempt.active_publication_id
+                 JOIN exam_grade_publications_v2 old_publication
+                   ON old_publication.public_id='publication-1'
+                 WHERE attempt.public_id='attempt-2'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(after_publication.0, "superseded");
+        assert_eq!(after_publication.1, "published");
+        assert_eq!(after_publication.2, 1);
+        assert_eq!(after_publication.3, "published");
+        let repeated = publish_question_impact_review_case(
+            &fixture.conn,
+            "local_teacher",
+            &PublishQuestionImpactReviewCaseRequest {
+                case_public_id: review_case.public_id,
+                expected_grade_decision_public_id: resolved.grade_decision.public_id,
+                published_by: "local_teacher".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            repeated.publication.public_id,
+            published.publication.public_id
+        );
+    }
+
+    #[test]
+    fn subjective_case_requires_complete_components_and_student_evidence_for_credit() {
+        let mut fixture = fixture_with_question_type("short_answer");
+        let review_case = prepared_case(
+            &mut fixture,
+            "recalculate_unpublished",
+            "impact-subjective-resolution-plan",
+        );
+        assert_eq!(review_case.target_components.len(), 1);
+        assert_eq!(review_case.target_components[0].source_type, "rubric_point");
+        let component = review_case.target_components[0].clone();
+        let unsupported_credit = resolve_question_impact_review_case(
+            &mut fixture.conn,
+            "local_teacher",
+            &ResolveQuestionImpactReviewCaseRequest {
+                request_key: "impact-subjective-without-evidence".into(),
+                case_public_id: review_case.public_id.clone(),
+                expected_source_snapshot_hash: review_case.source_snapshot_hash.clone(),
+                teacher_score: None,
+                components: vec![ResolveQuestionImpactComponentInput {
+                    source_public_id: component.source_public_id.clone(),
+                    teacher_score: component.max_score,
+                    evidence_text: None,
+                    teacher_note: None,
+                }],
+                teacher_note: "尝试无证据给分".into(),
+                resolved_by: "local_teacher".into(),
+            },
+        );
+        assert!(unsupported_credit.is_err());
+        let resolution_count: i64 = fixture
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM exam_question_version_review_resolutions_v2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(resolution_count, 0);
+        let resolved = resolve_question_impact_review_case(
+            &mut fixture.conn,
+            "local_teacher",
+            &ResolveQuestionImpactReviewCaseRequest {
+                request_key: "impact-subjective-zero".into(),
+                case_public_id: review_case.public_id,
+                expected_source_snapshot_hash: review_case.source_snapshot_hash,
+                teacher_score: None,
+                components: vec![ResolveQuestionImpactComponentInput {
+                    source_public_id: component.source_public_id,
+                    teacher_score: 0.0,
+                    evidence_text: None,
+                    teacher_note: Some("未找到该评分点".into()),
+                }],
+                teacher_note: "逐项核对后确认不得分".into(),
+                resolved_by: "local_teacher".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(resolved.grade_decision.teacher_score, 0.0);
+        let point_results: Value =
+            serde_json::from_str(&resolved.grade_decision.point_results_json).unwrap();
+        assert_eq!(
+            point_results["component_results"]["components"][0]["result_status"],
+            "incorrect"
+        );
     }
 
     #[test]
