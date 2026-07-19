@@ -19,7 +19,7 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 | `crates/core` 复习引擎 | ✅ 实现 + 单测 | `services/review`：pass/lapse 分账；补做通过从 stage 1 重启且保留 lapse |
 | `crates/module-recitation` M1 域 | ✅ M1.1 + M1.2-6 | 文件名解析、结构化 rubric/评分点、不可变 transcript/AI run、熟练度与评分编排、老师逐点评审、共享总体/逐点/保持学习证据、脱敏黄金集、老师成对试点指标合同、默认脱敏诊断出口和 M6 显式只读适配 |
 | `crates/module-recitation` M1 服务 | ✅ 实现 + 单测 | import 去重/归档、ASR 可恢复状态机、机器建议、老师总体/逐点终审、补背/到期复习/日切、跨日期保持窗口、同日去重、双向改判，以及 effect/review/evidence/retention 同事务回滚 |
-| `crates/module-knowledge` K1 | 🟡 T3 兼容底座 | 教材/知识/考点/能力稳定版本，题目/答案/rubric/link 不可变版本，C0～L4 质量闸门与旧表显式映射；导入、搜索和 UI 尚未接入 |
+| `crates/module-knowledge` K1 | 🟡 语义底座 + 可解释组卷纵切 | 教材/知识/考点/能力稳定版本，题目/答案/rubric/link 不可变版本，C0～L4 质量闸门与旧表显式映射；题库组卷只从已确认 L3/L4 题目推荐并解释知识/能力贡献，老师确认后冻结 M2 作业；导入、通用搜索、查重和完整题库 UI 尚未接入 |
 | `crates/module-exam` M2 | 🟡 A1 + B0/B1 + M2.5 + B2 + B3a1/B3a2/B3a5/B3c3 + M2-C0 | 普通卷、固定答题卡多页模板集/客观主观分流、答题卡主观区追加式 OCR、填空确定性建议、简答逐评分点建议与老师主观题工作台、逐槽/逐评分点人工终审账本、固定默写正式链、五类答案版本链、评分点结构变化映射、未来答案/知识/能力版本均已落；三材料黄金合同、真实闸门、受限数据权利演练、hash-only 影子会话、老师耗时观察合同和统一试点证据总包已落。真实脱敏样本/provider 阈值和真实老师影子试点仍缺 |
 | `crates/module-profile` M6 | 🟡 M6-1～4/M6.1 安全子集 | 个人/班级不可变快照、教材范围冻结、个人私有 HTML 报告、班级共性教学输入、热力图、完全同口径个人/班级趋势、课堂事件、老师确认行动和脱敏摘要；M1/M2 正式证据显式适配，M3 错题恢复事实冻结，追加式老师补充判断与系统结论并列且不反写 |
 | Tauri 应用外壳 `src-tauri` | ✅ 实现 + 独立检查 | DB+迁移、M1 终审，以及 T6 工作台/接受建议/人工记分/严格批量/显式发布、T6.1b 固定卷上传归档/PDF 真拆页、Ark 题区识别 run 和答题卡主观区答案隔离手写 OCR；在线备份恢复、按 hash 归档、凭据掩码、最小 asset scope 和默认脱敏诊断包 |
@@ -35,7 +35,7 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 | 音频回放 | ✅ app-managed archive | 按 hash 归档；原文件改名、重启和数据库恢复后仍可回放，原路径只兜底 |
 | ffmpeg 转码/时长探测 | ✅ 可选集成 | 装了 ffmpeg 则转 16k 单声道 wav + 探测时长，否则降级 |
 
-当前已验证：module-exam **182 tests**、module-knowledge **6 tests**、module-profile **42 tests**、module-recitation **101 tests** + e2e **1 test**、module-wrongbook **22 tests**、suite-core **74 tests**，workspace 合计 **428 tests**；Tauri 应用 **60 tests**（含 9 项诊断包专项，另有客观/主观/M1 独立夹具 2/3/2 项），两套 Clippy `-D warnings`、Tauri check、前端 build、班级教学重点模拟 Tauri 浏览器冒烟和 `git diff --check` 全通过。背诵合成黄金合同覆盖 19 类场景、13 个逐点状态、11 个疑点时间段和 7 个需完整回听样本；合成试点合同固定 4 对逐条观察、两种顺序、每日积压、ASR 调用/缓存和风险分账，固定报告 hash 为 `ce716328...80dfb`。设置页真实导出的默认诊断 ZIP 为 Unix `0600`，只含 manifest、诊断 JSON 和说明文件；扫描未发现姓名、绝对路径、音频、ASR、答案正文或凭据。个人报告专项覆盖角色门禁、stale 拒绝、幂等冲突、不可变审计、HTML 转义、`0600` 和拒绝覆盖；班级教学输入专项覆盖双门槛过滤、过期/非最新拒绝、节点子集与重复校验、不可变/幂等/audit/outbox 及零自动任务副作用。正式库 Online Backup 副本从 22 条迁移到 58 条后完整性 `ok`、FK=0，新表 2 张、保护触发器 6 个，正式源库 SHA-256 前后均为 `be3c97e4...34ab0`，未写入源库。真实答题卡/默写/答案文件、真实 provider、跨日期学生纵向录音、真实黄金音频、阈值、真实老师并行耗时、真实敏感内容诊断演练、独立 `.app` 报告保存/打印和真实课堂 M6-4 使用仍未验证。
+当前已验证：module-exam **186 tests**、module-knowledge **6 tests**、module-profile **42 tests**、module-recitation **101 tests** + e2e **1 test**、module-wrongbook **22 tests**、suite-core **74 tests**，workspace 合计 **432 tests**；Tauri 应用 **60 tests**（含 9 项诊断包专项，另有客观/主观/M1 独立夹具 2/3/2 项），两套 Clippy `-D warnings`、Tauri check、前端 build、班级教学重点与 K1 题库组卷模拟 Tauri 浏览器冒烟和 `git diff --check` 全通过。K1 组卷专项覆盖 L3/L4 候选门禁、题量/分值失败零半套、候选目录漂移拒绝，以及确认后即使题库变化仍按相同请求幂等回读；确认不创建 attempt、任务、成绩或 publication。背诵合成黄金合同覆盖 19 类场景、13 个逐点状态、11 个疑点时间段和 7 个需完整回听样本；合成试点合同固定 4 对逐条观察、两种顺序、每日积压、ASR 调用/缓存和风险分账，固定报告 hash 为 `ce716328...80dfb`。设置页真实导出的默认诊断 ZIP 为 Unix `0600`，只含 manifest、诊断 JSON 和说明文件；扫描未发现姓名、绝对路径、音频、ASR、答案正文或凭据。正式库 Online Backup 副本从 22 条迁移到 **59 条**后完整性 `ok`、FK=0，K1 组卷新增表 2 张、保护触发器 6 个且空表启动正常，正式源库 SHA-256 前后均为 `be3c97e4...34ab0`，未写入源库。真实答题卡/默写/答案文件、真实 provider、跨日期学生纵向录音、真实黄金音频、阈值、真实老师并行耗时、真实敏感内容诊断演练、独立 `.app` 组卷点击/报告保存打印和真实课堂 M6-4 使用仍未验证。
 
 > 这些结果不等于授权发布。异模型复核、tag、合并和安装包发布仍需单独放行。
 
