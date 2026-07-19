@@ -224,37 +224,45 @@ fn structured_score_card(
     }))
 }
 
-fn task_card(conn: &rusqlite::Connection, task: &suite_core::models::Task) -> R<TaskCard> {
+fn submission_card(
+    conn: &rusqlite::Connection,
+    content: Option<&RecContent>,
+    submission: Submission,
+) -> R<SubmissionCard> {
+    let verdict = verdicts::get_by_submission(conn, submission.id).map_err(e)?;
+    let audio_path = playback_path(&submission);
+    let structured_score = structured_score_card(conn, submission.id)?;
+    Ok(SubmissionCard {
+        submission_id: submission.id,
+        status: submission.status,
+        recognize_status: submission.recognize_status,
+        pending_review: is_pending_teacher_review(verdict.as_ref()),
+        file_path: audio_path,
+        recognized_text: submission.recognized_text,
+        answer_text: content.map(|value| value.answer_text.clone()),
+        answer_version: content.map(|value| value.answer_version),
+        scored_answer_version: verdict.as_ref().map(|value| value.answer_version),
+        accuracy: verdict.as_ref().and_then(|value| value.primary_score),
+        pass: verdict.as_ref().and_then(|value| value.pass),
+        fluency: verdict.as_ref().and_then(|value| value.secondary_score),
+        quality: verdict.as_ref().and_then(|value| value.quality.clone()),
+        human_result: verdict.as_ref().and_then(|value| value.human_result.clone()),
+        human_note: verdict.as_ref().and_then(|value| value.human_note.clone()),
+        machine_note: verdict.as_ref().and_then(|value| value.machine_note.clone()),
+        structured_score,
+    })
+}
+
+fn task_card_with_submission(
+    conn: &rusqlite::Connection,
+    task: &suite_core::models::Task,
+    submission: Option<Submission>,
+) -> R<TaskCard> {
     let student = students::get_by_id(conn, task.student_id).map_err(e)?;
     let content = contents::get_by_id(conn, task.ref_id).map_err(e)?;
-    let sub = submissions::find_by_task(conn, task.id).map_err(e)?;
-    let submission = match sub {
-        Some(submission) => {
-            let verdict = verdicts::get_by_submission(conn, submission.id).map_err(e)?;
-            let audio_path = playback_path(&submission);
-            let structured_score = structured_score_card(conn, submission.id)?;
-            Some(SubmissionCard {
-                submission_id: submission.id,
-                status: submission.status,
-                recognize_status: submission.recognize_status,
-                pending_review: is_pending_teacher_review(verdict.as_ref()),
-                file_path: audio_path,
-                recognized_text: submission.recognized_text,
-                answer_text: content.as_ref().map(|value| value.answer_text.clone()),
-                answer_version: content.as_ref().map(|value| value.answer_version),
-                scored_answer_version: verdict.as_ref().map(|value| value.answer_version),
-                accuracy: verdict.as_ref().and_then(|value| value.primary_score),
-                pass: verdict.as_ref().and_then(|value| value.pass),
-                fluency: verdict.as_ref().and_then(|value| value.secondary_score),
-                quality: verdict.as_ref().and_then(|value| value.quality.clone()),
-                human_result: verdict.as_ref().and_then(|value| value.human_result.clone()),
-                human_note: verdict.as_ref().and_then(|value| value.human_note.clone()),
-                machine_note: verdict.as_ref().and_then(|value| value.machine_note.clone()),
-                structured_score,
-            })
-        }
-        None => None,
-    };
+    let submission = submission
+        .map(|value| submission_card(conn, content.as_ref(), value))
+        .transpose()?;
 
     Ok(TaskCard {
         task_id: task.id,
@@ -269,7 +277,40 @@ fn task_card(conn: &rusqlite::Connection, task: &suite_core::models::Task) -> R<
     })
 }
 
+fn task_card(conn: &rusqlite::Connection, task: &suite_core::models::Task) -> R<TaskCard> {
+    let submission = submissions::find_by_task(conn, task.id).map_err(e)?;
+    task_card_with_submission(conn, task, submission)
+}
+
 // ───────────────────────── 命令 ─────────────────────────
+
+/// 按提交 ID 回看背诵终审证据。必须使用该次历史提交，不能退化成任务的最新提交。
+#[tauri::command]
+pub fn recitation_submission_detail(
+    state: State<'_, AppState>,
+    submission_id: i64,
+) -> R<TaskCard> {
+    let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    let submission = submissions::get(&conn, submission_id)
+        .map_err(e)?
+        .ok_or_else(|| format!("找不到提交 #{submission_id}"))?;
+    if submission.module != MODULE {
+        return Err("该记录不是背诵提交".into());
+    }
+    let task_id = submission
+        .task_id
+        .ok_or_else(|| "该记录尚未绑定背诵任务，无法展示终审证据".to_string())?;
+    let task = tasks::get(&conn, task_id)
+        .map_err(e)?
+        .ok_or_else(|| format!("找不到关联任务 #{task_id}"))?;
+    if task.module != MODULE
+        || submission.student_id != Some(task.student_id)
+        || submission.ref_id != Some(task.ref_id)
+    {
+        return Err("历史提交与关联任务不一致，请先人工核对".into());
+    }
+    task_card_with_submission(&conn, &task, Some(submission))
+}
 
 /// 今日看板：按 新背/补背/复习 分组，含提交与判定。
 #[tauri::command]
@@ -905,6 +946,7 @@ pub struct ImportHistoryRow {
     content: Option<String>,   // 道法8上-04课-05 为什么要以礼待人
     status: String,            // 已评分 / 未识别·待改派 / 待分析 …
     recognized: Option<String>,
+    has_evidence_detail: bool,
 }
 
 fn history_status(s: &str) -> String {
@@ -955,6 +997,9 @@ pub fn import_history(state: State<'_, AppState>, limit: Option<i64>) -> R<Vec<I
                 history_status(&s.status)
             },
             recognized: s.recognized_text,
+            has_evidence_detail: s.task_id.is_some()
+                && s.student_id.is_some()
+                && s.ref_id.is_some(),
         });
     }
     Ok(out)

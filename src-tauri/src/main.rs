@@ -85,6 +85,7 @@ fn main() {
             commands::tasks_reassign,
             commands::tasks_remove,
             commands::import_history,
+            commands::recitation_submission_detail,
             commands::import_stage,
             commands::import_autoname,
             commands::asr_and_score,

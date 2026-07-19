@@ -311,7 +311,7 @@ export default function Today() {
   );
 }
 
-function TaskRow({
+export function TaskRow({
   t,
   busy,
   expanded,
