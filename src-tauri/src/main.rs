@@ -114,6 +114,8 @@ fn main() {
             learning_commands::generate_student_profile,
             learning_commands::latest_student_profile,
             learning_commands::save_profile_teacher_assessment,
+            learning_commands::create_student_profile_report_snapshot,
+            learning_commands::write_student_profile_report_snapshot,
             learning_commands::preview_class_profile,
             learning_commands::generate_class_profile,
             learning_commands::latest_class_profile,

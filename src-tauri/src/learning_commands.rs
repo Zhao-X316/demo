@@ -19,6 +19,10 @@ use module_profile::profile::{
     self, GenerateScopedStudentProfileInput, ProfileScopeOption, ProfileScopeSelectionInput,
     StudentProfilePreview, StudentProfileScope, StudentProfileSnapshot,
 };
+use module_profile::student_reports::{
+    self, CreateStudentProfileReportInput, StudentProfileReportSnapshot,
+    WrittenStudentProfileReport,
+};
 use module_profile::teacher_assessments::{
     self, ProfileTeacherAssessment, SaveProfileTeacherAssessmentInput,
 };
@@ -137,6 +141,14 @@ pub struct SaveProfileTeacherAssessmentRequest {
     expected_revision: i64,
     assessment: Option<String>,
     note: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateStudentProfileReportRequest {
+    request_key: String,
+    snapshot_public_id: String,
+    expected_snapshot_payload_sha256: String,
 }
 
 #[derive(Deserialize)]
@@ -494,6 +506,38 @@ pub fn save_profile_teacher_assessment(
         },
     )
     .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn create_student_profile_report_snapshot(
+    state: State<'_, AppState>,
+    input: CreateStudentProfileReportRequest,
+) -> Result<StudentProfileReportSnapshot, String> {
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    student_reports::create_report_snapshot(
+        &mut connection,
+        &CreateStudentProfileReportInput {
+            request_key: &input.request_key,
+            snapshot_public_id: &input.snapshot_public_id,
+            expected_snapshot_payload_sha256: &input.expected_snapshot_payload_sha256,
+            report_kind: "student_learning_summary",
+            purpose: "teacher_internal_feedback",
+            actor_role: "local_teacher",
+            actor_id: LOCAL_TEACHER_ACTOR_ID,
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn write_student_profile_report_snapshot(
+    state: State<'_, AppState>,
+    report_public_id: String,
+    output_path: String,
+) -> Result<WrittenStudentProfileReport, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    student_reports::write_report_snapshot_html(&connection, &report_public_id, &output_path)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

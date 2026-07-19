@@ -9,6 +9,7 @@ import {
   CorrectionAssignmentStatus,
   createWrongbookReportSnapshot,
   createWrongbookSingleCorrection,
+  createStudentProfileReportSnapshot,
   ErrorCauseReview,
   loadClassWrongbookDashboard,
   loadWrongbookSchedulePolicy,
@@ -37,6 +38,7 @@ import {
   StudentProfileSnapshot,
   saveProfileTeacherAssessment,
   writeWrongbookReportSnapshot,
+  writeStudentProfileReportSnapshot,
 } from "../api/learning";
 import { Class, Student, classesList, studentsList } from "../api/manage";
 
@@ -142,6 +144,18 @@ function shiftShanghaiDate(date: string, days: number) {
   const value = new Date(`${date}T00:00:00+08:00`);
   value.setUTCDate(value.getUTCDate() + days);
   return shanghaiDate(value);
+}
+
+function newRequestKey(prefix: string) {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `${prefix}-${crypto.randomUUID()}`;
+  }
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function profileReportFileName(snapshot: StudentProfileSnapshot) {
+  return `${snapshot.student.student_no}号${snapshot.student.name}_个人学习报告_${snapshot.range_start}至${snapshot.range_end}.html`
+    .replace(/[<>:"/\\|?*]/g, "_");
 }
 
 function reportFileName(
@@ -716,7 +730,9 @@ function StudentProfilePanel({
   const [snapshot, setSnapshot] = useState<StudentProfileSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [reporting, setReporting] = useState(false);
   const [profileError, setProfileError] = useState("");
+  const [reportSuccess, setReportSuccess] = useState("");
   const [generatedRefreshToken, setGeneratedRefreshToken] = useState(0);
   const selectedScope = useMemo(
     () => scopeOptions.find((item) => item.selector_key === scopeSelectorKey)
@@ -763,6 +779,7 @@ function StudentProfilePanel({
     let current = true;
     setLoading(true);
     setProfileError("");
+    setReportSuccess("");
     Promise.all([
       previewStudentProfile({
         classId,
@@ -831,6 +848,31 @@ function StudentProfilePanel({
       next.push(saved);
       return { ...current, teacher_assessments: next };
     });
+  };
+
+  const exportProfileReport = async () => {
+    if (!snapshot || snapshot.is_stale) return;
+    setReporting(true);
+    setProfileError("");
+    setReportSuccess("");
+    try {
+      const outputPath = await save({
+        defaultPath: profileReportFileName(snapshot),
+        filters: [{ name: "可打印网页", extensions: ["html"] }],
+      });
+      if (!outputPath) return;
+      const report = await createStudentProfileReportSnapshot(
+        newRequestKey("student-profile-report"),
+        snapshot.public_id,
+        snapshot.payload_sha256,
+      );
+      const written = await writeStudentProfileReportSnapshot(report.public_id, outputPath);
+      setReportSuccess(`已导出 ${written.file_name}。这是教师内部文件，不会自动发送。`);
+    } catch (reason) {
+      setProfileError(String(reason));
+    } finally {
+      setReporting(false);
+    }
   };
 
   if (students.length === 0) {
@@ -957,11 +999,22 @@ function StudentProfilePanel({
                 {" "}· 规则第 {snapshot.policy.revision} 版
               </span>
             </div>
-            <span className={snapshot.is_stale ? "tag fail" : "tag pass"}>
-              {snapshot.is_stale ? "有新证据，建议重生成" : "当前快照"}
-            </span>
+            <div className="profile-snapshot-actions">
+              <span className={snapshot.is_stale ? "tag fail" : "tag pass"}>
+                {snapshot.is_stale ? "有新证据，建议重生成" : "当前快照"}
+              </span>
+              <button
+                className="primary"
+                disabled={snapshot.is_stale || reporting}
+                onClick={exportProfileReport}
+                title={snapshot.is_stale ? "请先重新生成当前掌握快照" : "生成教师内部可打印报告"}
+              >
+                {reporting ? "导出中…" : "导出个人学习报告"}
+              </button>
+            </div>
           </div>
           {snapshot.stale_reason && <div className="profile-stale">{snapshot.stale_reason}</div>}
+          {reportSuccess && <div className="success">{reportSuccess}</div>}
           <div className="profile-snapshot-summary">
             <div>
               <span>知识已评估</span>
@@ -994,6 +1047,7 @@ function StudentProfilePanel({
             onAssessmentSaved={updateTeacherAssessment} />
           <div className="profile-footnote">
             本快照不修改成绩、任务、错题或上游证据；历史版本保留，不生成学生排名。
+            个人报告只供教师内部使用，由老师核对后决定是否线下提供。
           </div>
         </section>
       )}

@@ -400,6 +400,8 @@ button.dashboard-action { display: grid; grid-template-columns: 34px minmax(0, 1
 .profile-snapshot { display: flex; flex-direction: column; gap: 12px; }
 .profile-snapshot-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 14px; border: 1px solid #CFE3D9; border-radius: 9px; background: #F5FBF8; }
 .profile-snapshot-head > div { display: flex; flex-direction: column; gap: 3px; }
+.profile-snapshot-head > .profile-snapshot-actions { align-items: center; flex-direction: row; }
+.profile-snapshot-actions button { min-height: 30px; padding: 5px 9px; font-size: 10.5px; }
 .profile-snapshot-head b { font-size: 14px; }
 .profile-snapshot-head span { color: var(--muted); font-size: 10.5px; }
 .profile-stale { padding: 9px 10px; border: 1px solid #E7B8B8; border-radius: 7px; background: #FFF5F5; color: #9E3E3E; font-size: 11px; }
@@ -925,6 +927,7 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
   .profile-toolbar > div:last-child { align-items: stretch; flex-direction: column; }
   .profile-toolbar select, .profile-toolbar input { width: 100%; }
   .profile-preview-head, .profile-snapshot-head, .profile-metric-title { align-items: stretch; flex-direction: column; }
+  .profile-snapshot-head > .profile-snapshot-actions { align-items: stretch; justify-content: space-between; }
   .profile-preview-stats, .profile-snapshot-summary, .profile-recitation-stats { grid-template-columns: 1fr 1fr; }
   .profile-metric summary { grid-template-columns: 1fr; }
   .profile-metric-numbers { grid-column: auto; justify-content: flex-start; }

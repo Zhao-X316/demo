@@ -8,6 +8,7 @@ pub mod action_drafts;
 pub mod class_exports;
 pub mod class_profile;
 pub mod profile;
+pub mod student_reports;
 pub mod teacher_assessments;
 pub mod teaching_events;
 
@@ -42,6 +43,10 @@ static MIGRATIONS: &[Migration] = &[
     Migration {
         id: "profile_0007",
         sql: include_str!("../migrations/0007_wrongbook_and_teacher_assessments.sql"),
+    },
+    Migration {
+        id: "profile_0008",
+        sql: include_str!("../migrations/0008_student_profile_reports.sql"),
     },
 ];
 
