@@ -79,6 +79,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [],
         |row| row.get(0),
     )?;
+    let review_case_table_count: i64 = copy.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type='table' AND name='exam_question_version_review_cases_v2'",
+        [],
+        |row| row.get(0),
+    )?;
+    let review_case_trigger_count: i64 = copy.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type='trigger' AND name LIKE 'trg_exam_question_review_case_%'",
+        [],
+        |row| row.get(0),
+    )?;
+    let review_case_business_rows: i64 = copy.query_row(
+        "SELECT COUNT(*) FROM exam_question_version_review_cases_v2",
+        [],
+        |row| row.get(0),
+    )?;
 
     println!("source_migrations={before_count}");
     println!("copy_migrations={after_count}");
@@ -87,5 +104,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("new_table_count={new_table_count}");
     println!("new_trigger_count={new_trigger_count}");
     println!("new_business_rows={new_business_rows}");
+    println!("review_case_table_count={review_case_table_count}");
+    println!("review_case_trigger_count={review_case_trigger_count}");
+    println!("review_case_business_rows={review_case_business_rows}");
     Ok(())
 }

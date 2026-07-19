@@ -1,7 +1,8 @@
 """K1-5 题目实际表现与版本变更影响浏览器冒烟测试。
 
 验证页面只展示已发布的老师确认统计，老师可查看新版对历史作业、学习证据和
-图谱快照的影响；确认时只建立复核计划，不宣称自动改分或覆盖旧图谱。
+图谱快照的影响；确认时先建立复核计划，再冻结逐份待处理证据，不宣称已经
+自动改分、重新发布或覆盖旧图谱。
 """
 
 from pathlib import Path
@@ -125,8 +126,8 @@ window.__TAURI_INTERNALS__ = {
         affectedAssessmentVersionCount: 2,
         affectedItemCount: 2,
         unpublishedAttemptCount: 3,
-        publishedAttemptCount: 40,
-        activeLearningEvidenceCount: 38,
+        publishedAttemptCount: 2,
+        activeLearningEvidenceCount: 2,
         profileSnapshotCount: 12,
         rows: [{
           assessmentPublicId: "assessment-1",
@@ -141,8 +142,8 @@ window.__TAURI_INTERNALS__ = {
           rubricChanged: true,
           linkChanged: true,
           unpublishedAttemptCount: 3,
-          publishedAttemptCount: 40,
-          activeLearningEvidenceCount: 38,
+          publishedAttemptCount: 2,
+          activeLearningEvidenceCount: 2,
           profileSnapshotCount: 12
         }],
         boundaryNote: "预览只识别影响，不改写任何历史事实。"
@@ -154,9 +155,68 @@ window.__TAURI_INTERNALS__ = {
         questionVersionPublicId: "question-version-1",
         expectedPreviewHash: "a".repeat(64),
         action: args.input.action,
-        taskCount: args.input.action === "review_published" ? 40 : 0,
+        taskCount: args.input.action === "review_published" ? 2 : 0,
         plannedBy: "local_teacher",
         plannedAt: "2026-07-19T21:02:00Z",
+        changesAssessmentBinding: false,
+        changesGrade: false,
+        changesPublication: false,
+        changesLearningEvidence: false
+      };
+    }
+    if (cmd === "k1_question_impact_cases") {
+      return {
+        schemaVersion: 1,
+        ruleVersion: "k1-version-impact-review-case-v1",
+        planPublicId: args.planPublicId,
+        cases: [],
+        boundaryNote: "只冻结证据，不改分。"
+      };
+    }
+    if (cmd === "k1_question_impact_prepare") {
+      const students = [
+        ["01", "学生甲", "decision-1", 2],
+        ["02", "学生乙", "decision-2", 1]
+      ];
+      return {
+        planPublicId: args.input.planPublicId,
+        taskCount: 2,
+        createdCount: 2,
+        existingCount: 0,
+        cases: students.map(([studentNo, studentName, decisionId, score], index) => ({
+          publicId: `review-case-${index + 1}`,
+          impactTaskPublicId: `impact-task-${index + 1}`,
+          planPublicId: args.input.planPublicId,
+          caseKind: "published_review",
+          assessmentTitle: "第一单元检测",
+          className: "八年级一班",
+          studentNo,
+          studentName,
+          questionVersionPublicId: "question-version-1",
+          questionStem: "鸦片战争爆发于哪一年？",
+          questionNo: 1,
+          attemptPublicId: `attempt-${index + 1}`,
+          attemptState: "published",
+          publicationPublicId: "publication-1",
+          sourceGradeDecisionPublicId: decisionId,
+          sourceGradeDecisionRevision: 1,
+          sourceTeacherScore: score,
+          sourceSnapshotHash: "b".repeat(64),
+          targetAnswerKeyVersionPublicId: "answer-v2",
+          targetAnswerKeyRevision: 2,
+          targetRubricVersionPublicId: "rubric-v2",
+          targetRubricRevision: 2,
+          targetLinkSetPublicId: "links-v2",
+          targetLinkSetRevision: 2,
+          preparedBy: "local_teacher",
+          preparedAt: "2026-07-19T21:03:00Z",
+          state: "open",
+          nextStepNote: "下一步由老师核对正式发布证据，再决定是否创建复核评分与新的发布 revision；当前正式成绩保持不变。",
+          changesAssessmentBinding: false,
+          changesGrade: false,
+          changesPublication: false,
+          changesLearningEvidence: false
+        })),
         changesAssessmentBinding: false,
         changesGrade: false,
         changesPublication: false,
@@ -191,31 +251,46 @@ def test_k1_question_performance(base_url: str) -> None:
         page.get_by_role("button", name="查看新版影响").click()
         expect(page.get_by_text("版本变更影响预览", exact=True)).to_be_visible()
         expect(page.get_by_text("已发布作答", exact=True).last).to_be_visible()
-        expect(page.get_by_text("证据 38", exact=True)).to_be_visible()
+        expect(page.get_by_text("证据 2", exact=True)).to_be_visible()
         expect(page.get_by_text("图谱 12", exact=True)).to_be_visible()
         expect(page.get_by_text("不会切换作业版本", exact=False)).to_be_visible()
         page.screenshot(path=str(OUTPUT_DIR / "02-impact-preview.png"), full_page=True)
 
         page.get_by_text("复核已发布成绩", exact=True).click()
         page.get_by_role("button", name="确认处理方式").click()
-        expect(page.get_by_text("已冻结处理计划，共 40 条待办", exact=False)).to_be_visible()
+        expect(page.get_by_text("已冻结处理计划，共 2 条待办", exact=False)).to_be_visible()
         page.screenshot(path=str(OUTPUT_DIR / "03-impact-plan.png"), full_page=True)
+
+        page.get_by_test_id("impact-prepare-cases").click()
+        expect(page.get_by_text("待处理记录 2 条", exact=True)).to_be_visible()
+        expect(page.get_by_text("01 · 学生甲", exact=True)).to_be_visible()
+        expect(page.get_by_text("已发布复核", exact=True).first).to_be_visible()
+        expect(page.get_by_text("当前正式成绩保持不变", exact=False).first).to_be_visible()
+        page.screenshot(path=str(OUTPUT_DIR / "04-impact-review-cases.png"), full_page=True)
 
         calls = page.evaluate(
             """window.__performanceCalls.filter((item) =>
               item.cmd === "k1_question_performance"
               || item.cmd === "k1_question_impact_preview"
-              || item.cmd === "k1_question_impact_confirm")"""
+              || item.cmd === "k1_question_impact_confirm"
+              || item.cmd === "k1_question_impact_cases"
+              || item.cmd === "k1_question_impact_prepare")"""
         )
         assert [item["cmd"] for item in calls] == [
             "k1_question_performance",
             "k1_question_impact_preview",
             "k1_question_impact_confirm",
+            "k1_question_impact_cases",
+            "k1_question_impact_prepare",
         ]
         payload = calls[2]["args"]["input"]
         assert payload["action"] == "review_published"
         assert payload["plannedBy"] == "local_teacher"
         assert payload["expectedPreviewHash"] == "a" * 64
+        prepare_payload = calls[4]["args"]["input"]
+        assert prepare_payload["planPublicId"] == "impact-plan-1"
+        assert prepare_payload["expectedTaskCount"] == 2
+        assert prepare_payload["preparedBy"] == "local_teacher"
         browser.close()
 
 

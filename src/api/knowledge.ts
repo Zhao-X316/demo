@@ -925,6 +925,67 @@ export interface QuestionImpactPlan {
   changesLearningEvidence: false;
 }
 
+export interface QuestionImpactReviewCase {
+  publicId: string;
+  impactTaskPublicId: string;
+  planPublicId: string;
+  caseKind: "unpublished_recalculation" | "published_review";
+  assessmentTitle: string;
+  className: string;
+  studentNo: string;
+  studentName: string;
+  questionVersionPublicId: string;
+  questionStem: string;
+  questionNo: number;
+  attemptPublicId: string;
+  attemptState: string;
+  publicationPublicId: string | null;
+  sourceGradeDecisionPublicId: string | null;
+  sourceGradeDecisionRevision: number | null;
+  sourceTeacherScore: number | null;
+  sourceSnapshotHash: string;
+  targetAnswerKeyVersionPublicId: string;
+  targetAnswerKeyRevision: number;
+  targetRubricVersionPublicId: string;
+  targetRubricRevision: number;
+  targetLinkSetPublicId: string;
+  targetLinkSetRevision: number;
+  preparedBy: string;
+  preparedAt: string;
+  state: "open";
+  nextStepNote: string;
+  changesAssessmentBinding: false;
+  changesGrade: false;
+  changesPublication: false;
+  changesLearningEvidence: false;
+}
+
+export interface QuestionImpactReviewCaseCatalog {
+  schemaVersion: number;
+  ruleVersion: string;
+  planPublicId: string;
+  cases: QuestionImpactReviewCase[];
+  boundaryNote: string;
+}
+
+export interface PrepareQuestionImpactReviewCasesInput {
+  planPublicId: string;
+  expectedTaskCount: number;
+  preparedBy: "local_teacher";
+}
+
+export interface PrepareQuestionImpactReviewCasesResult {
+  planPublicId: string;
+  taskCount: number;
+  createdCount: number;
+  existingCount: number;
+  cases: QuestionImpactReviewCase[];
+  changesAssessmentBinding: false;
+  changesGrade: false;
+  changesPublication: false;
+  changesLearningEvidence: false;
+}
+
 export const loadQuestionPerformance = (limit = 200) =>
   call<QuestionPerformanceCatalog>("k1_question_performance", { limit });
 
@@ -935,3 +996,16 @@ export const previewQuestionImpact = (questionVersionPublicId: string) =>
 
 export const confirmQuestionImpact = (input: ConfirmQuestionImpactPlanInput) =>
   call<QuestionImpactPlan>("k1_question_impact_confirm", { input });
+
+export const loadQuestionImpactCases = (planPublicId: string) =>
+  call<QuestionImpactReviewCaseCatalog>("k1_question_impact_cases", {
+    planPublicId,
+  });
+
+export const prepareQuestionImpactCases = (
+  input: PrepareQuestionImpactReviewCasesInput,
+) =>
+  call<PrepareQuestionImpactReviewCasesResult>(
+    "k1_question_impact_prepare",
+    { input },
+  );

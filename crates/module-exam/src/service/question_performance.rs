@@ -15,6 +15,7 @@ use suite_core::models::AuditActorType;
 pub const QUESTION_PERFORMANCE_SCHEMA_VERSION: i64 = 1;
 pub const QUESTION_PERFORMANCE_RULE_VERSION: &str = "k1-current-publication-performance-v1";
 pub const QUESTION_IMPACT_RULE_VERSION: &str = "k1-version-impact-plan-v1";
+pub const QUESTION_IMPACT_REVIEW_RULE_VERSION: &str = "k1-version-impact-review-case-v1";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -139,6 +140,75 @@ pub struct QuestionImpactPlan {
     pub changes_learning_evidence: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionImpactReviewCase {
+    pub public_id: String,
+    pub impact_task_public_id: String,
+    pub plan_public_id: String,
+    pub case_kind: String,
+    pub assessment_title: String,
+    pub class_name: String,
+    pub student_no: String,
+    pub student_name: String,
+    pub question_version_public_id: String,
+    pub question_stem: String,
+    pub question_no: i64,
+    pub attempt_public_id: String,
+    pub attempt_state: String,
+    pub publication_public_id: Option<String>,
+    pub source_grade_decision_public_id: Option<String>,
+    pub source_grade_decision_revision: Option<i64>,
+    pub source_teacher_score: Option<f64>,
+    pub source_snapshot_hash: String,
+    pub target_answer_key_version_public_id: String,
+    pub target_answer_key_revision: i64,
+    pub target_rubric_version_public_id: String,
+    pub target_rubric_revision: i64,
+    pub target_link_set_public_id: String,
+    pub target_link_set_revision: i64,
+    pub prepared_by: String,
+    pub prepared_at: String,
+    pub state: String,
+    pub next_step_note: String,
+    pub changes_assessment_binding: bool,
+    pub changes_grade: bool,
+    pub changes_publication: bool,
+    pub changes_learning_evidence: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionImpactReviewCaseCatalog {
+    pub schema_version: i64,
+    pub rule_version: String,
+    pub plan_public_id: String,
+    pub cases: Vec<QuestionImpactReviewCase>,
+    pub boundary_note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareQuestionImpactReviewCasesRequest {
+    pub plan_public_id: String,
+    pub expected_task_count: i64,
+    pub prepared_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareQuestionImpactReviewCasesResult {
+    pub plan_public_id: String,
+    pub task_count: i64,
+    pub created_count: i64,
+    pub existing_count: i64,
+    pub cases: Vec<QuestionImpactReviewCase>,
+    pub changes_assessment_binding: bool,
+    pub changes_grade: bool,
+    pub changes_publication: bool,
+    pub changes_learning_evidence: bool,
+}
+
 #[derive(Debug, Clone)]
 struct TargetIds {
     question_version_id: i64,
@@ -155,6 +225,24 @@ struct TaskScope {
     source_answer_key_version_id: i64,
     source_rubric_version_id: i64,
     source_link_set_id: i64,
+}
+
+#[derive(Debug, Clone)]
+struct ReviewTaskSnapshot {
+    task_id: i64,
+    task_public_id: String,
+    task_kind: String,
+    attempt_id: i64,
+    assessment_item_id: i64,
+    publication_id: Option<i64>,
+    source_grade_decision_id: Option<i64>,
+    source_grade_decision_public_id: Option<String>,
+    source_grade_decision_revision: Option<i64>,
+    source_teacher_score: Option<f64>,
+    source_point_results_json: Option<String>,
+    target_answer_key_version_id: i64,
+    target_rubric_version_id: i64,
+    target_link_set_id: i64,
 }
 
 fn required(value: &str, label: &str) -> CoreResult<()> {
@@ -804,6 +892,392 @@ pub fn confirm_question_impact_plan(
     plan_by_id(conn, plan_id)
 }
 
+pub fn list_question_impact_review_cases(
+    conn: &Connection,
+    owner_id: &str,
+    plan_public_id: &str,
+) -> CoreResult<QuestionImpactReviewCaseCatalog> {
+    required(owner_id, "题库老师")?;
+    required(plan_public_id, "影响计划")?;
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM exam_question_version_impact_plans_v2
+             WHERE public_id=?1 AND planned_by=?2",
+            params![plan_public_id.trim(), owner_id.trim()],
+            |_| Ok(()),
+        )
+        .optional()?;
+    if exists.is_none() {
+        return Err(CoreError::NotFound("未找到当前老师的版本影响计划".into()));
+    }
+    let mut statement = conn.prepare(
+        "SELECT review_case.public_id,task.public_id,plan.public_id,review_case.case_kind,
+                assessment.title,class.name,student.student_no,student.name,
+                question.public_id,question.stem,item.order_index+1,
+                attempt.public_id,attempt.state,publication.public_id,decision.public_id,
+                review_case.source_grade_decision_revision,review_case.source_teacher_score,
+                review_case.source_snapshot_hash,
+                target_answer.public_id,target_answer.revision,
+                target_rubric.public_id,target_rubric.revision,
+                target_link.public_id,target_link.revision,
+                review_case.prepared_by,review_case.prepared_at,review_case.state
+         FROM exam_question_version_review_cases_v2 review_case
+         JOIN exam_question_version_impact_tasks_v2 task
+           ON task.id=review_case.impact_task_id
+         JOIN exam_question_version_impact_plans_v2 plan
+           ON plan.id=task.impact_plan_id
+         JOIN exam_attempts_v2 attempt ON attempt.id=review_case.attempt_id
+         JOIN students student ON student.id=attempt.student_id
+         JOIN exam_assessment_items_v2 item ON item.id=review_case.assessment_item_id
+         JOIN exam_assessment_versions_v2 assessment_version
+           ON assessment_version.id=item.assessment_version_id
+         JOIN exam_assessments_v2 assessment
+           ON assessment.id=assessment_version.assessment_id
+         JOIN classes class ON class.id=assessment.class_id
+         JOIN k1_question_versions question ON question.id=item.question_version_id
+         JOIN k1_answer_key_versions target_answer
+           ON target_answer.id=review_case.target_answer_key_version_id
+         JOIN k1_rubric_versions target_rubric
+           ON target_rubric.id=review_case.target_rubric_version_id
+         JOIN k1_link_sets target_link ON target_link.id=review_case.target_link_set_id
+         LEFT JOIN exam_grade_publications_v2 publication
+           ON publication.id=review_case.publication_id
+         LEFT JOIN exam_grade_decisions_v2 decision
+           ON decision.id=review_case.source_grade_decision_id
+         WHERE plan.public_id=?1 AND plan.planned_by=?2
+         ORDER BY assessment.title,student.student_no,student.id,item.order_index,review_case.id",
+    )?;
+    let rows = statement.query_map(
+        params![plan_public_id.trim(), owner_id.trim()],
+        |row| {
+            let case_kind: String = row.get(3)?;
+            let next_step_note = if case_kind == "unpublished_recalculation" {
+                "下一步由老师对照新旧评分证据创建新的评分 revision；当前未发布评分保持不变。"
+            } else {
+                "下一步由老师核对正式发布证据，再决定是否创建复核评分与新的发布 revision；当前正式成绩保持不变。"
+            };
+            Ok(QuestionImpactReviewCase {
+                public_id: row.get(0)?,
+                impact_task_public_id: row.get(1)?,
+                plan_public_id: row.get(2)?,
+                case_kind,
+                assessment_title: row.get(4)?,
+                class_name: row.get(5)?,
+                student_no: row.get(6)?,
+                student_name: row.get(7)?,
+                question_version_public_id: row.get(8)?,
+                question_stem: row.get(9)?,
+                question_no: row.get(10)?,
+                attempt_public_id: row.get(11)?,
+                attempt_state: row.get(12)?,
+                publication_public_id: row.get(13)?,
+                source_grade_decision_public_id: row.get(14)?,
+                source_grade_decision_revision: row.get(15)?,
+                source_teacher_score: row.get(16)?,
+                source_snapshot_hash: row.get(17)?,
+                target_answer_key_version_public_id: row.get(18)?,
+                target_answer_key_revision: row.get(19)?,
+                target_rubric_version_public_id: row.get(20)?,
+                target_rubric_revision: row.get(21)?,
+                target_link_set_public_id: row.get(22)?,
+                target_link_set_revision: row.get(23)?,
+                prepared_by: row.get(24)?,
+                prepared_at: row.get(25)?,
+                state: row.get(26)?,
+                next_step_note: next_step_note.into(),
+                changes_assessment_binding: false,
+                changes_grade: false,
+                changes_publication: false,
+                changes_learning_evidence: false,
+            })
+        },
+    )?;
+    Ok(QuestionImpactReviewCaseCatalog {
+        schema_version: QUESTION_PERFORMANCE_SCHEMA_VERSION,
+        rule_version: QUESTION_IMPACT_REVIEW_RULE_VERSION.into(),
+        plan_public_id: plan_public_id.trim().into(),
+        cases: rows.collect::<rusqlite::Result<Vec<_>>>()?,
+        boundary_note:
+            "待处理 case 只冻结旧评分/发布证据与目标版本；建立 case 不会改作业绑定、成绩、发布结果或学习证据。"
+                .into(),
+    })
+}
+
+pub fn prepare_question_impact_review_cases(
+    conn: &mut Connection,
+    owner_id: &str,
+    request: &PrepareQuestionImpactReviewCasesRequest,
+) -> CoreResult<PrepareQuestionImpactReviewCasesResult> {
+    required(owner_id, "题库老师")?;
+    required(&request.plan_public_id, "影响计划")?;
+    required(&request.prepared_by, "准备老师")?;
+    if request.prepared_by.trim() != owner_id.trim() {
+        return Err(CoreError::Invalid(
+            "只能以当前老师身份建立待处理 case".into(),
+        ));
+    }
+    if request.expected_task_count < 0 {
+        return Err(CoreError::Invalid("预期待办数不能为负数".into()));
+    }
+    let (plan_id, action, task_count): (i64, String, i64) = conn
+        .query_row(
+            "SELECT plan.id,plan.action,
+                    (SELECT COUNT(*) FROM exam_question_version_impact_tasks_v2 task
+                     WHERE task.impact_plan_id=plan.id)
+             FROM exam_question_version_impact_plans_v2 plan
+             WHERE plan.public_id=?1 AND plan.planned_by=?2",
+            params![request.plan_public_id.trim(), owner_id.trim()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?
+        .ok_or_else(|| CoreError::NotFound("未找到当前老师的版本影响计划".into()))?;
+    if task_count != request.expected_task_count {
+        return Err(CoreError::Invalid(
+            "影响计划待办数量已变化，请刷新后重试".into(),
+        ));
+    }
+    if action == "future_only" || task_count == 0 {
+        return Err(CoreError::Invalid(
+            "“只用于以后新作业”没有历史待办，无需建立 case".into(),
+        ));
+    }
+
+    let now = time::utc_now_rfc3339();
+    let tx = conn.transaction()?;
+    let tasks = {
+        let mut statement = tx.prepare(
+            "SELECT task.id,task.public_id,task.task_kind,task.attempt_id,
+                    task.assessment_item_id,task.publication_id,
+                    task.target_answer_key_version_id,task.target_rubric_version_id,
+                    task.target_link_set_id
+             FROM exam_question_version_impact_tasks_v2 task
+             WHERE task.impact_plan_id=?1 AND task.state='open'
+             ORDER BY task.id",
+        )?;
+        let rows = statement.query_map([plan_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, i64>(8)?,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if tasks.len() as i64 != task_count {
+        return Err(CoreError::Invalid(
+            "影响计划待办状态已变化，请刷新后重试".into(),
+        ));
+    }
+
+    let mut created_count = 0_i64;
+    let mut existing_count = 0_i64;
+    for (
+        task_id,
+        task_public_id,
+        task_kind,
+        attempt_id,
+        assessment_item_id,
+        publication_id,
+        target_answer_key_version_id,
+        target_rubric_version_id,
+        target_link_set_id,
+    ) in tasks
+    {
+        let existing = tx
+            .query_row(
+                "SELECT 1 FROM exam_question_version_review_cases_v2
+                 WHERE impact_task_id=?1",
+                [task_id],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if existing.is_some() {
+            existing_count += 1;
+            continue;
+        }
+
+        let source = if task_kind == "recalculate_unpublished" {
+            tx.query_row(
+                "SELECT id,public_id,revision,teacher_score,point_results_json
+                 FROM exam_grade_decisions_v2
+                 WHERE attempt_id=?1 AND assessment_item_id=?2 AND state='active'",
+                params![attempt_id, assessment_item_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, f64>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?
+        } else if task_kind == "review_published" {
+            let publication_id = publication_id
+                .ok_or_else(|| CoreError::Invalid("已发布复核待办缺少正式发布版本".into()))?;
+            Some(
+                tx.query_row(
+                    "SELECT decision.id,decision.public_id,decision.revision,
+                            decision.teacher_score,decision.point_results_json
+                     FROM exam_grade_publication_items_v2 publication_item
+                     JOIN exam_grade_publication_decisions_v2 publication_decision
+                       ON publication_decision.publication_item_id=publication_item.id
+                      AND publication_decision.attempt_id=publication_item.attempt_id
+                     JOIN exam_grade_decisions_v2 decision
+                       ON decision.id=publication_decision.grade_decision_id
+                     WHERE publication_item.publication_id=?1
+                       AND publication_item.attempt_id=?2
+                       AND decision.assessment_item_id=?3",
+                    params![publication_id, attempt_id, assessment_item_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, f64>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or_else(|| CoreError::Invalid("正式发布版本未引用该题的老师评分".into()))?,
+            )
+        } else {
+            return Err(CoreError::Invalid("影响计划待办类型非法".into()));
+        };
+        let snapshot = ReviewTaskSnapshot {
+            task_id,
+            task_public_id,
+            task_kind: task_kind.clone(),
+            attempt_id,
+            assessment_item_id,
+            publication_id,
+            source_grade_decision_id: source.as_ref().map(|value| value.0),
+            source_grade_decision_public_id: source.as_ref().map(|value| value.1.clone()),
+            source_grade_decision_revision: source.as_ref().map(|value| value.2),
+            source_teacher_score: source.as_ref().map(|value| value.3),
+            source_point_results_json: source.as_ref().map(|value| value.4.clone()),
+            target_answer_key_version_id,
+            target_rubric_version_id,
+            target_link_set_id,
+        };
+        let snapshot_hash = hashing::sha256_hex(
+            &serde_json::to_vec(&serde_json::json!({
+                "schema_version": QUESTION_PERFORMANCE_SCHEMA_VERSION,
+                "rule_version": QUESTION_IMPACT_REVIEW_RULE_VERSION,
+                "task_public_id": snapshot.task_public_id,
+                "task_kind": snapshot.task_kind,
+                "attempt_id": snapshot.attempt_id,
+                "assessment_item_id": snapshot.assessment_item_id,
+                "publication_id": snapshot.publication_id,
+                "source_grade_decision_public_id": snapshot.source_grade_decision_public_id,
+                "source_grade_decision_revision": snapshot.source_grade_decision_revision,
+                "source_teacher_score": snapshot.source_teacher_score,
+                "source_point_results_json": snapshot.source_point_results_json,
+                "target_answer_key_version_id": snapshot.target_answer_key_version_id,
+                "target_rubric_version_id": snapshot.target_rubric_version_id,
+                "target_link_set_id": snapshot.target_link_set_id
+            }))
+            .map_err(|error| CoreError::Parse(format!("待处理快照序列化失败：{error}")))?,
+        );
+        let case_kind = if task_kind == "recalculate_unpublished" {
+            "unpublished_recalculation"
+        } else {
+            "published_review"
+        };
+        tx.execute(
+            "INSERT INTO exam_question_version_review_cases_v2
+             (public_id,impact_task_id,case_kind,attempt_id,assessment_item_id,publication_id,
+              source_grade_decision_id,source_grade_decision_revision,source_teacher_score,
+              source_point_results_json,source_snapshot_hash,
+              target_answer_key_version_id,target_rubric_version_id,target_link_set_id,
+              prepared_by,prepared_at,state)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,'open')",
+            params![
+                ids::new_public_id(),
+                snapshot.task_id,
+                case_kind,
+                snapshot.attempt_id,
+                snapshot.assessment_item_id,
+                snapshot.publication_id,
+                snapshot.source_grade_decision_id,
+                snapshot.source_grade_decision_revision,
+                snapshot.source_teacher_score,
+                snapshot.source_point_results_json,
+                snapshot_hash,
+                snapshot.target_answer_key_version_id,
+                snapshot.target_rubric_version_id,
+                snapshot.target_link_set_id,
+                request.prepared_by.trim(),
+                &now
+            ],
+        )?;
+        created_count += 1;
+    }
+
+    if created_count > 0 {
+        let payload = serde_json::json!({
+            "schema_version": QUESTION_PERFORMANCE_SCHEMA_VERSION,
+            "rule_version": QUESTION_IMPACT_REVIEW_RULE_VERSION,
+            "plan_public_id": request.plan_public_id.trim(),
+            "task_count": task_count,
+            "changes_assessment_binding": false,
+            "changes_grade": false,
+            "changes_publication": false,
+            "changes_learning_evidence": false
+        })
+        .to_string();
+        outbox::create_event(
+            &tx,
+            &NewOutboxEvent {
+                idempotency_key: &format!("{}:review-cases:outbox", request.plan_public_id.trim()),
+                event_type: "k1.question_version_impact.review_cases_prepared",
+                event_version: 1,
+                aggregate_type: "exam_question_version_impact_plan",
+                aggregate_id: request.plan_public_id.trim(),
+                aggregate_revision: 1,
+                payload_json: &payload,
+                occurred_at: &now,
+            },
+        )?;
+        audit::append(
+            &tx,
+            &NewAuditEvent {
+                idempotency_key: &format!("{}:review-cases:audit", request.plan_public_id.trim()),
+                actor_type: AuditActorType::Teacher,
+                actor_id: Some(request.prepared_by.trim()),
+                action: "k1.question_version_impact.review_cases_prepared",
+                object_type: "exam_question_version_impact_plan",
+                object_id: request.plan_public_id.trim(),
+                object_revision: Some(1),
+                note: Some("只冻结待重评/已发布复核证据；未改作业绑定、成绩、发布或图谱"),
+                meta_json: Some(&payload),
+                occurred_at: &now,
+            },
+        )?;
+    }
+    tx.commit()?;
+    let catalog = list_question_impact_review_cases(conn, owner_id, &request.plan_public_id)?;
+    Ok(PrepareQuestionImpactReviewCasesResult {
+        plan_public_id: request.plan_public_id.trim().into(),
+        task_count,
+        created_count,
+        existing_count,
+        cases: catalog.cases,
+        changes_assessment_binding: false,
+        changes_grade: false,
+        changes_publication: false,
+        changes_learning_evidence: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1158,6 +1632,41 @@ mod tests {
         let repeated =
             confirm_question_impact_plan(&mut fixture.conn, "local_teacher", &request).unwrap();
         assert_eq!(plan.public_id, repeated.public_id);
+        let prepare = PrepareQuestionImpactReviewCasesRequest {
+            plan_public_id: plan.public_id.clone(),
+            expected_task_count: 1,
+            prepared_by: "local_teacher".into(),
+        };
+        let prepared =
+            prepare_question_impact_review_cases(&mut fixture.conn, "local_teacher", &prepare)
+                .unwrap();
+        assert_eq!(prepared.created_count, 1);
+        assert_eq!(prepared.existing_count, 0);
+        assert_eq!(prepared.cases.len(), 1);
+        assert_eq!(prepared.cases[0].case_kind, "unpublished_recalculation");
+        assert_eq!(
+            prepared.cases[0].source_grade_decision_public_id.as_deref(),
+            Some("decision-1")
+        );
+        assert_eq!(prepared.cases[0].source_teacher_score, Some(2.0));
+        assert!(!prepared.changes_grade);
+        let retried =
+            prepare_question_impact_review_cases(&mut fixture.conn, "local_teacher", &prepare)
+                .unwrap();
+        assert_eq!(retried.created_count, 0);
+        assert_eq!(retried.existing_count, 1);
+        assert_eq!(retried.cases[0].public_id, prepared.cases[0].public_id);
+        assert!(fixture
+            .conn
+            .execute(
+                "UPDATE exam_question_version_review_cases_v2 SET state='open'",
+                [],
+            )
+            .is_err());
+        assert!(fixture
+            .conn
+            .execute("DELETE FROM exam_question_version_review_cases_v2", [])
+            .is_err());
         let after: (i64, i64, i64) = fixture
             .conn
             .query_row(
@@ -1247,5 +1756,76 @@ mod tests {
             .unwrap();
         assert_eq!(kind.0, "review_published");
         assert!(kind.1.is_some());
+        let prepared = prepare_question_impact_review_cases(
+            &mut fixture.conn,
+            "local_teacher",
+            &PrepareQuestionImpactReviewCasesRequest {
+                plan_public_id: plan.public_id,
+                expected_task_count: 1,
+                prepared_by: "local_teacher".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(prepared.cases[0].case_kind, "published_review");
+        assert_eq!(
+            prepared.cases[0].publication_public_id.as_deref(),
+            Some("publication-1")
+        );
+        assert_eq!(
+            prepared.cases[0].source_grade_decision_public_id.as_deref(),
+            Some("decision-2")
+        );
+        assert!(prepared.cases[0]
+            .next_step_note
+            .contains("新的发布 revision"));
+    }
+
+    #[test]
+    fn review_case_preparation_rejects_attempt_scope_drift() {
+        let mut fixture = fixture();
+        let preview = preview_question_version_impact(
+            &fixture.conn,
+            "local_teacher",
+            &fixture.question_version_public_id,
+        )
+        .unwrap();
+        let plan = confirm_question_impact_plan(
+            &mut fixture.conn,
+            "local_teacher",
+            &ConfirmQuestionImpactPlanRequest {
+                request_key: "impact-drift-before-case".into(),
+                question_version_public_id: fixture.question_version_public_id.clone(),
+                expected_preview_hash: preview.preview_hash,
+                action: "recalculate_unpublished".into(),
+                planned_by: "local_teacher".into(),
+            },
+        )
+        .unwrap();
+        fixture
+            .conn
+            .execute(
+                "UPDATE exam_attempts_v2 SET state='voided' WHERE public_id='attempt-1'",
+                [],
+            )
+            .unwrap();
+        let result = prepare_question_impact_review_cases(
+            &mut fixture.conn,
+            "local_teacher",
+            &PrepareQuestionImpactReviewCasesRequest {
+                plan_public_id: plan.public_id,
+                expected_task_count: 1,
+                prepared_by: "local_teacher".into(),
+            },
+        );
+        assert!(result.is_err());
+        let case_count: i64 = fixture
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM exam_question_version_review_cases_v2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(case_count, 0);
     }
 }

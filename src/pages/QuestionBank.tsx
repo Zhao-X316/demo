@@ -24,6 +24,7 @@ import {
   QuestionSearchResponse,
   QuestionImpactAction,
   QuestionImpactPlan,
+  QuestionImpactReviewCase,
   QuestionPerformanceCatalog,
   QuestionPerformanceItem,
   QuestionVersionImpactPreview,
@@ -54,6 +55,8 @@ import {
   searchQuestions,
   suggestKnowledgeLinks,
   loadQuestionPerformance,
+  loadQuestionImpactCases,
+  prepareQuestionImpactCases,
 } from "../api/knowledge";
 
 const TYPE_LABEL: Record<K1QuestionType, string> = {
@@ -2213,6 +2216,8 @@ function QuestionPerformancePanel() {
   const [preview, setPreview] = useState<QuestionVersionImpactPreview | null>(null);
   const [action, setAction] = useState<QuestionImpactAction>("future_only");
   const [plan, setPlan] = useState<QuestionImpactPlan | null>(null);
+  const [reviewCases, setReviewCases] = useState<QuestionImpactReviewCase[]>([]);
+  const [caseBoundary, setCaseBoundary] = useState("");
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
@@ -2237,6 +2242,8 @@ function QuestionPerformancePanel() {
     setSelected(item);
     setPreview(null);
     setPlan(null);
+    setReviewCases([]);
+    setCaseBoundary("");
     setAction("future_only");
     setWorking(true);
     setError("");
@@ -2254,13 +2261,40 @@ function QuestionPerformancePanel() {
     setWorking(true);
     setError("");
     try {
-      setPlan(await confirmQuestionImpact({
+      const nextPlan = await confirmQuestionImpact({
         requestKey: newImpactRequestKey(),
         questionVersionPublicId: preview.questionVersionPublicId,
         expectedPreviewHash: preview.previewHash,
         action,
         plannedBy: "local_teacher",
-      }));
+      });
+      setPlan(nextPlan);
+      if (nextPlan.taskCount > 0) {
+        const existing = await loadQuestionImpactCases(nextPlan.publicId);
+        setReviewCases(existing.cases);
+        setCaseBoundary(existing.boundaryNote);
+      }
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const prepareCases = async () => {
+    if (!plan || plan.taskCount === 0) return;
+    setWorking(true);
+    setError("");
+    try {
+      const result = await prepareQuestionImpactCases({
+        planPublicId: plan.publicId,
+        expectedTaskCount: plan.taskCount,
+        preparedBy: "local_teacher",
+      });
+      setReviewCases(result.cases);
+      setCaseBoundary(
+        "待处理 case 已冻结旧评分/发布证据与目标版本；当前成绩、发布结果和学习证据均未改变。",
+      );
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -2349,6 +2383,8 @@ function QuestionPerformancePanel() {
               setSelected(null);
               setPreview(null);
               setPlan(null);
+              setReviewCases([]);
+              setCaseBoundary("");
             }}>关闭</button>
           </div>
           {working && !preview ? <div className="loading">正在核对历史使用范围…</div> : preview && (
@@ -2412,9 +2448,63 @@ function QuestionPerformancePanel() {
                 确认只冻结影响计划和待办清单，不会切换作业版本，不会改分、重新发布、改写学习证据或覆盖旧图谱。
               </div>
               {plan ? (
-                <div className="ok-banner">
-                  已冻结处理计划，共 {plan.taskCount} 条待办；本次没有修改任何成绩和学习证据。
-                </div>
+                <>
+                  <div className="ok-banner">
+                    已冻结处理计划，共 {plan.taskCount} 条待办；本次没有修改任何成绩和学习证据。
+                  </div>
+                  {plan.taskCount > 0 && reviewCases.length === 0 && (
+                    <div className="impact-prepare-row">
+                      <div>
+                        <b>下一步：建立逐份待处理记录</b>
+                        <span>冻结每名学生当前评分或正式发布快照，供老师后续逐条重评。</span>
+                      </div>
+                      <button
+                        className="primary"
+                        data-testid="impact-prepare-cases"
+                        disabled={working}
+                        onClick={prepareCases}
+                      >
+                        {working ? "正在建立…" : `建立 ${plan.taskCount} 条待处理`}
+                      </button>
+                    </div>
+                  )}
+                  {reviewCases.length > 0 && (
+                    <div className="impact-case-section" data-testid="impact-case-list">
+                      <div className="impact-case-section-head">
+                        <b>待处理记录 {reviewCases.length} 条</b>
+                        <span>全部保持 open，后续由老师核对后再产生新评分 revision。</span>
+                      </div>
+                      <div className="impact-case-list">
+                        {reviewCases.map((reviewCase) => (
+                          <article key={reviewCase.publicId}>
+                            <div className="impact-case-head">
+                              <div>
+                                <b>{reviewCase.studentNo} · {reviewCase.studentName}</b>
+                                <span>{reviewCase.className} · {reviewCase.assessmentTitle} · 第 {reviewCase.questionNo} 题</span>
+                              </div>
+                              <span className={reviewCase.caseKind === "published_review" ? "tag warning" : "tag subtle"}>
+                                {reviewCase.caseKind === "published_review" ? "已发布复核" : "未发布重评准备"}
+                              </span>
+                            </div>
+                            <div className="impact-case-meta">
+                              <span>
+                                旧评分：
+                                {reviewCase.sourceTeacherScore == null
+                                  ? "暂无"
+                                  : `${reviewCase.sourceTeacherScore} 分（第 ${reviewCase.sourceGradeDecisionRevision} 版）`}
+                              </span>
+                              <span>目标答案第 {reviewCase.targetAnswerKeyRevision} 版</span>
+                              <span>目标评分点第 {reviewCase.targetRubricRevision} 版</span>
+                              <span>目标知识链接第 {reviewCase.targetLinkSetRevision} 版</span>
+                            </div>
+                            <p>{reviewCase.nextStepNote}</p>
+                          </article>
+                        ))}
+                      </div>
+                      {caseBoundary && <div className="hint">{caseBoundary}</div>}
+                    </div>
+                  )}
+                </>
               ) : (
                 <button className="primary impact-confirm" disabled={working} onClick={confirmImpact}>
                   {working ? "正在冻结计划…" : "确认处理方式"}

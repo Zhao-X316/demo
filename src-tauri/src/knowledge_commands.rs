@@ -12,8 +12,9 @@ use module_exam::service::question_candidate_review::{
     PromoteCandidateRequest,
 };
 use module_exam::service::question_performance::{
-    self, ConfirmQuestionImpactPlanRequest, QuestionImpactPlan, QuestionPerformanceCatalog,
-    QuestionVersionImpactPreview,
+    self, ConfirmQuestionImpactPlanRequest, PrepareQuestionImpactReviewCasesRequest,
+    PrepareQuestionImpactReviewCasesResult, QuestionImpactPlan, QuestionImpactReviewCaseCatalog,
+    QuestionPerformanceCatalog, QuestionVersionImpactPreview,
 };
 use module_knowledge::db::answer_sources::{
     self, AnswerMatchReview, AnswerSourceInboxItem, AnswerTargetSet, ConfirmAnswerMatchRequest,
@@ -276,6 +277,34 @@ pub fn k1_question_impact_confirm(
 ) -> Result<QuestionImpactPlan, String> {
     let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     question_performance::confirm_question_impact_plan(
+        &mut connection,
+        LOCAL_TEACHER_ACTOR_ID,
+        &input,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn k1_question_impact_cases(
+    state: State<'_, AppState>,
+    plan_public_id: String,
+) -> Result<QuestionImpactReviewCaseCatalog, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    question_performance::list_question_impact_review_cases(
+        &connection,
+        LOCAL_TEACHER_ACTOR_ID,
+        &plan_public_id,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn k1_question_impact_prepare(
+    state: State<'_, AppState>,
+    input: PrepareQuestionImpactReviewCasesRequest,
+) -> Result<PrepareQuestionImpactReviewCasesResult, String> {
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    question_performance::prepare_question_impact_review_cases(
         &mut connection,
         LOCAL_TEACHER_ACTOR_ID,
         &input,

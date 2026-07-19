@@ -1204,6 +1204,59 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
   line-height: 1.6;
 }
 .impact-confirm { align-self: flex-end; }
+.impact-prepare-row, .impact-case-section-head, .impact-case-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.impact-prepare-row {
+  padding: 12px;
+  border: 1px solid var(--brand);
+  border-radius: 9px;
+  background: var(--brand-weak);
+}
+.impact-prepare-row > div, .impact-case-section-head, .impact-case-head > div {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+.impact-prepare-row b, .impact-case-section-head b, .impact-case-head b { font-size: 13px; }
+.impact-prepare-row span, .impact-case-section-head span, .impact-case-head span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.impact-case-section { display: flex; flex-direction: column; gap: 10px; }
+.impact-case-list { display: flex; flex-direction: column; gap: 8px; }
+.impact-case-list article {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--bg-sub);
+}
+.impact-case-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.impact-case-meta span {
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text-2);
+  font-size: 11px;
+}
+.impact-case-list p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
 
 @media (max-width: 920px) {
   .dashboard-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1245,6 +1298,7 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
   .knowledge-link-toolbar, .knowledge-link-confirm { grid-template-columns: 1fr; }
   .question-impact-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .impact-actions { grid-template-columns: 1fr; }
+  .impact-prepare-row, .impact-case-head { align-items: stretch; flex-direction: column; }
   .knowledge-link-add-row, .knowledge-link-add-row.ability-row {
     grid-template-columns: 1fr 1fr;
   }

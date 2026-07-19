@@ -147,6 +147,8 @@ fn main() {
             knowledge_commands::k1_question_performance,
             knowledge_commands::k1_question_impact_preview,
             knowledge_commands::k1_question_impact_confirm,
+            knowledge_commands::k1_question_impact_cases,
+            knowledge_commands::k1_question_impact_prepare,
             knowledge_commands::k1_candidate_review_list,
             knowledge_commands::k1_candidate_promote_l1,
             knowledge_commands::k1_candidate_discard,
