@@ -18,6 +18,7 @@ use suite_core::services::review::{self, ReviewRef};
 
 use crate::db::contents;
 use crate::db::point_reviews::{self, TeacherPointReviewInput};
+use crate::db::retention;
 use crate::domain::fluency::FluencyCfg;
 use crate::grader::{RecitationGradeInput, RecitationGrader};
 use crate::service::learning_evidence;
@@ -544,6 +545,13 @@ pub fn human_decide_with_point_review(
         .ok_or_else(|| CoreError::NotFound("尚无判定，无法人工确认".into()))?;
     let content = contents::get_by_id(&tx, content_id)?
         .ok_or_else(|| CoreError::NotFound(format!("content {content_id}")))?;
+    let decision_task = match sub.task_id {
+        Some(task_id) => Some(
+            tasks::get(&tx, task_id)?
+                .ok_or_else(|| CoreError::NotFound(format!("task {task_id}")))?,
+        ),
+        None => None,
+    };
     let existing_result = verdict.human_result.as_deref();
     let prior_submission_effect =
         decision_effects::latest_active_for_submission(&tx, submission_id)?;
@@ -614,12 +622,15 @@ pub fn human_decide_with_point_review(
             };
         learning_evidence::activate_for_decision(
             &tx,
-            submission_id,
-            student_id,
-            &verdict,
-            &active_effect,
-            recorded_review.as_ref(),
-            decision_actor,
+            &learning_evidence::DecisionEvidenceInput {
+                submission_id,
+                student_id,
+                verdict: &verdict,
+                effect: &active_effect,
+                review: recorded_review.as_ref(),
+                timing: None,
+                actor: decision_actor,
+            },
         )?;
         submissions::set_status(&tx, submission_id, "confirmed")?;
         tx.commit()?;
@@ -656,6 +667,7 @@ pub fn human_decide_with_point_review(
         }
         restore_effect(&tx, &effect)?;
         learning_evidence::revert_for_effect(&tx, &effect)?;
+        retention::revert_for_effect(&tx, &effect)?;
         point_reviews::revert_for_effect_inner(&tx, effect.id)?;
         decision_effects::mark_reverted(&tx, effect.id)?;
     } else if existing_result.is_some() {
@@ -704,12 +716,18 @@ pub fn human_decide_with_point_review(
         .ok_or_else(|| CoreError::Db("新终审效果账本写入后无法读取".into()))?;
     learning_evidence::activate_for_decision(
         &tx,
-        submission_id,
-        student_id,
-        &verdict,
-        &active_effect,
-        recorded_review.as_ref(),
-        decision_actor,
+        &learning_evidence::DecisionEvidenceInput {
+            submission_id,
+            student_id,
+            verdict: &verdict,
+            effect: &active_effect,
+            review: recorded_review.as_ref(),
+            timing: Some(learning_evidence::DecisionTiming {
+                decision_date: today,
+                task: decision_task.as_ref(),
+            }),
+            actor: decision_actor,
+        },
     )?;
     submissions::set_status(&tx, submission_id, "confirmed")?;
     tx.commit()?;
@@ -801,6 +819,54 @@ mod tests {
             o => panic!("import failed: {o:?}"),
         };
         (conn, s.id, c.id, sub_id)
+    }
+
+    fn import_scored_task(
+        conn: &Connection,
+        student_id: i64,
+        content_id: i64,
+        answer: &str,
+        date: NaiveDate,
+        kind: TaskKind,
+        hash: &str,
+    ) -> i64 {
+        let due_date = date.format("%Y-%m-%d").to_string();
+        tasks::insert(
+            conn,
+            &NewTask {
+                module: MODULE,
+                student_id,
+                subject_id: None,
+                ref_type: REF_TYPE,
+                ref_id: content_id,
+                kind,
+                due_date: &due_date,
+                source_task_id: None,
+                card_id: None,
+            },
+        )
+        .unwrap();
+        let audio_path = std::env::temp_dir().join(format!("jiaofu-retention-{hash}.m4a"));
+        std::fs::write(&audio_path, format!("retention audio {hash}")).unwrap();
+        let file_stem = format!("{}_2023001_张三_C012", date.format("%Y%m%d"));
+        let imported = import_one(
+            conn,
+            &ImportItem {
+                file_path: &audio_path.to_string_lossy(),
+                file_stem: &file_stem,
+                file_hash: hash,
+                duration_ms: Some(5_000),
+            },
+        )
+        .unwrap();
+        let submission_id = match imported {
+            ImportOutcome::Imported { submission_id, .. } => submission_id,
+            other => panic!("retention import failed: {other:?}"),
+        };
+        submissions::set_recognition(conn, submission_id, Some(answer), "ok", None, Some(5_000))
+            .unwrap();
+        score_submission(conn, submission_id, &[], date, &ScoreCfg::default()).unwrap();
+        submission_id
     }
 
     type StructuredSetup = (
@@ -1447,6 +1513,11 @@ mod tests {
             learning_evidence::revert_for_effect(&conn, &effect).unwrap(),
             2
         );
+        let context_error = decision_effects::mark_reverted(&conn, effect.id)
+            .unwrap_err()
+            .to_string();
+        assert!(context_error.contains("M1_RETENTION_CONTEXT_MUST_REVERT_FIRST"));
+        assert_eq!(retention::revert_for_effect(&conn, &effect).unwrap(), 1);
         decision_effects::mark_reverted(&conn, effect.id).unwrap();
     }
 
@@ -1735,6 +1806,421 @@ mod tests {
                 .unwrap()
                 .status,
             TaskStatus::Passed
+        );
+        let retention: (i64, i64, i64, i64, String, f64) = conn
+            .query_row(
+                "SELECT actual_interval_days,planned_interval_days,recovered_after_lapse,
+                        revision,result,evidence.value
+                 FROM rec_retention_windows window
+                 JOIN learning_evidence evidence
+                   ON evidence.source_ref_type='recitation_retention_window'
+                  AND evidence.source_ref_id=window.public_id
+                  AND evidence.source_revision=window.revision
+                 WHERE window.state='active' AND evidence.state='active'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(retention, (1, 1, 1, 1, "pass".into(), 1.0));
+        let prior_failure: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM learning_evidence
+                 WHERE source_module='recitation'
+                   AND source_type='recitation_overall'
+                   AND evidence_kind='accuracy'
+                   AND value=0.0
+                   AND state='active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(prior_failure, 1, "补背恢复不能抹去此前老师确认的失败事实");
+    }
+
+    #[test]
+    fn retention_strengthens_across_two_seven_and_twenty_one_day_windows() {
+        let answer = "床前明月光";
+        let (conn, sid, cid, first_sub) = setup_imported(answer);
+        let day1 = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        submissions::set_recognition(&conn, first_sub, Some(answer), "ok", None, Some(5_000))
+            .unwrap();
+        score_submission(&conn, first_sub, &[], day1, &ScoreCfg::default()).unwrap();
+        human_decide(
+            &conn,
+            first_sub,
+            "pass",
+            None,
+            Some("teacher"),
+            day1,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM rec_retention_windows", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            0,
+            "首次确认只有日期上下文，不能伪造保持证据"
+        );
+
+        for (date, expected_days, expected_quality, hash) in [
+            (
+                NaiveDate::from_ymd_opt(2026, 6, 27).unwrap(),
+                2,
+                0.6,
+                "retention-2d",
+            ),
+            (
+                NaiveDate::from_ymd_opt(2026, 7, 4).unwrap(),
+                7,
+                0.8,
+                "retention-7d",
+            ),
+            (
+                NaiveDate::from_ymd_opt(2026, 7, 25).unwrap(),
+                21,
+                1.0,
+                "retention-21d",
+            ),
+        ] {
+            let submission_id =
+                import_scored_task(&conn, sid, cid, answer, date, TaskKind::Review, hash);
+            human_decide(
+                &conn,
+                submission_id,
+                "pass",
+                None,
+                Some("teacher"),
+                date,
+                &ScoreCfg::default(),
+            )
+            .unwrap();
+            let (actual_days, planned_days, value, quality, confidence): (i64, i64, f64, f64, f64) =
+                conn.query_row(
+                    "SELECT window.actual_interval_days,window.planned_interval_days,
+                            evidence.value,evidence.evidence_quality,verdict.confidence
+                     FROM rec_retention_windows window
+                     JOIN learning_evidence evidence
+                       ON evidence.source_ref_type='recitation_retention_window'
+                      AND evidence.source_ref_id=window.public_id
+                      AND evidence.source_revision=window.revision
+                     JOIN decision_effects effect ON effect.id=window.current_effect_id
+                     JOIN verdicts verdict ON verdict.id=effect.verdict_id
+                     WHERE window.window_date=?1
+                       AND window.state='active' AND evidence.state='active'",
+                    [date.format("%Y-%m-%d").to_string()],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                (actual_days, planned_days, value),
+                (expected_days, expected_days, 1.0)
+            );
+            let expected_quality = expected_quality * (0.5 + 0.5 * confidence);
+            assert!(
+                (quality - expected_quality).abs() < 0.000_001,
+                "{expected_days} 天窗口质量应为 {expected_quality}，实际为 {quality}"
+            );
+        }
+        let active_retention: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM learning_evidence
+                 WHERE source_module='recitation'
+                   AND source_type='recitation_retention'
+                   AND state='active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active_retention, 3);
+    }
+
+    #[test]
+    fn same_day_repeat_supersedes_retention_instead_of_counting_twice() {
+        let answer = "床前明月光";
+        let (conn, sid, cid, first_sub) = setup_imported(answer);
+        let day1 = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        submissions::set_recognition(&conn, first_sub, Some(answer), "ok", None, Some(5_000))
+            .unwrap();
+        score_submission(&conn, first_sub, &[], day1, &ScoreCfg::default()).unwrap();
+        human_decide(
+            &conn,
+            first_sub,
+            "pass",
+            None,
+            Some("teacher"),
+            day1,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+
+        let day2 = NaiveDate::from_ymd_opt(2026, 6, 27).unwrap();
+        let first_day2 = import_scored_task(
+            &conn,
+            sid,
+            cid,
+            answer,
+            day2,
+            TaskKind::Review,
+            "retention-same-day-1",
+        );
+        human_decide(
+            &conn,
+            first_day2,
+            "pass",
+            None,
+            Some("teacher"),
+            day2,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        let second_day2 = import_scored_task(
+            &conn,
+            sid,
+            cid,
+            answer,
+            day2,
+            TaskKind::Normal,
+            "retention-same-day-2",
+        );
+        human_decide(
+            &conn,
+            second_day2,
+            "pass",
+            None,
+            Some("teacher"),
+            day2,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+
+        let window_states: (i64, i64, i64) = conn
+            .query_row(
+                "SELECT count(*),
+                        sum(CASE WHEN state='active' THEN 1 ELSE 0 END),
+                        sum(CASE WHEN state='superseded' THEN 1 ELSE 0 END)
+                 FROM rec_retention_windows WHERE window_date='2026-06-27'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(window_states, (2, 1, 1));
+        let evidence_states: (i64, i64) = conn
+            .query_row(
+                "SELECT sum(CASE WHEN state='active' THEN 1 ELSE 0 END),
+                        sum(CASE WHEN state='superseded' THEN 1 ELSE 0 END)
+                 FROM learning_evidence
+                 WHERE source_module='recitation'
+                   AND source_type='recitation_retention'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(evidence_states, (1, 1));
+        let active_revision: i64 = conn
+            .query_row(
+                "SELECT revision FROM rec_retention_windows
+                 WHERE window_date='2026-06-27' AND state='active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active_revision, 2);
+    }
+
+    #[test]
+    fn latest_retention_rejudge_reverts_old_window_and_appends_revision() {
+        let answer = "床前明月光";
+        let (conn, sid, cid, first_sub) = setup_imported(answer);
+        let day1 = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        submissions::set_recognition(&conn, first_sub, Some(answer), "ok", None, Some(5_000))
+            .unwrap();
+        score_submission(&conn, first_sub, &[], day1, &ScoreCfg::default()).unwrap();
+        human_decide(
+            &conn,
+            first_sub,
+            "pass",
+            None,
+            Some("teacher"),
+            day1,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+
+        let day2 = NaiveDate::from_ymd_opt(2026, 6, 27).unwrap();
+        let second_sub = import_scored_task(
+            &conn,
+            sid,
+            cid,
+            answer,
+            day2,
+            TaskKind::Review,
+            "retention-rejudge",
+        );
+        human_decide(
+            &conn,
+            second_sub,
+            "pass",
+            None,
+            Some("teacher"),
+            day2,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        human_decide(
+            &conn,
+            second_sub,
+            "fail",
+            Some("老师改判"),
+            Some("teacher"),
+            day2,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+
+        let windows: (i64, i64) = conn
+            .query_row(
+                "SELECT sum(CASE WHEN state='active' THEN 1 ELSE 0 END),
+                        sum(CASE WHEN state='reverted' THEN 1 ELSE 0 END)
+                 FROM rec_retention_windows WHERE window_date='2026-06-27'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(windows, (1, 1));
+        let evidence: (i64, i64, f64) = conn
+            .query_row(
+                "SELECT sum(CASE WHEN state='active' THEN 1 ELSE 0 END),
+                        sum(CASE WHEN state='reverted' THEN 1 ELSE 0 END),
+                        max(CASE WHEN state='active' THEN value END)
+                 FROM learning_evidence
+                 WHERE source_module='recitation'
+                   AND source_type='recitation_retention'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(evidence, (1, 1, 0.0));
+        let contexts: (i64, i64) = conn
+            .query_row(
+                "SELECT sum(CASE WHEN state='active' THEN 1 ELSE 0 END),
+                        sum(CASE WHEN state='reverted' THEN 1 ELSE 0 END)
+                 FROM rec_decision_contexts WHERE decision_date='2026-06-27'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(contexts, (1, 1));
+    }
+
+    #[test]
+    fn retention_evidence_failure_rolls_back_window_effect_and_schedule() {
+        let answer = "床前明月光";
+        let (conn, sid, cid, first_sub) = setup_imported(answer);
+        let day1 = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        submissions::set_recognition(&conn, first_sub, Some(answer), "ok", None, Some(5_000))
+            .unwrap();
+        score_submission(&conn, first_sub, &[], day1, &ScoreCfg::default()).unwrap();
+        human_decide(
+            &conn,
+            first_sub,
+            "pass",
+            None,
+            Some("teacher"),
+            day1,
+            &ScoreCfg::default(),
+        )
+        .unwrap();
+        let card_before = memory_cards::get(&conn, MODULE, sid, REF_TYPE, cid)
+            .unwrap()
+            .unwrap();
+
+        let day2 = NaiveDate::from_ymd_opt(2026, 6, 27).unwrap();
+        let second_sub = import_scored_task(
+            &conn,
+            sid,
+            cid,
+            answer,
+            day2,
+            TaskKind::Review,
+            "retention-failure",
+        );
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER fail_retention_evidence
+             BEFORE INSERT ON learning_evidence
+             WHEN NEW.source_module='recitation'
+               AND NEW.source_type='recitation_retention'
+             BEGIN SELECT RAISE(ABORT,'forced retention evidence failure'); END;",
+        )
+        .unwrap();
+        let error = human_decide(
+            &conn,
+            second_sub,
+            "pass",
+            None,
+            Some("teacher"),
+            day2,
+            &ScoreCfg::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("forced retention evidence failure"));
+
+        let verdict = verdicts::get_by_submission(&conn, second_sub)
+            .unwrap()
+            .unwrap();
+        assert!(verdict.human_result.is_none());
+        assert!(decision_effects::active_for_verdict(&conn, verdict.id)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM rec_decision_contexts
+                 WHERE decision_date='2026-06-27'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM rec_retention_windows", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
+        let card_after = memory_cards::get(&conn, MODULE, sid, REF_TYPE, cid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(card_after.stage, card_before.stage);
+        assert_eq!(card_after.reps, card_before.reps);
+        assert_eq!(
+            tasks::get(&conn, score_task_id(&conn, second_sub))
+                .unwrap()
+                .unwrap()
+                .status,
+            TaskStatus::Submitted
         );
     }
 

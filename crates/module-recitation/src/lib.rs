@@ -34,6 +34,10 @@ static MIGRATIONS: &[Migration] = &[
         id: "recitation_0004",
         sql: include_str!("../migrations/0004_learning_evidence_guard.sql"),
     },
+    Migration {
+        id: "recitation_0005",
+        sql: include_str!("../migrations/0005_retention_windows.sql"),
+    },
 ];
 
 /// 模块迁移（供外壳/测试在 core 迁移之后运行）。

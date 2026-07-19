@@ -3,6 +3,7 @@
 //! 本层不自行开启事务。调用方必须把人工终审、效果账本、逐点评审、证据、
 //! outbox 与 audit 放在同一个 SQLite transaction 中提交。
 
+use chrono::NaiveDate;
 use rusqlite::Connection;
 use suite_core::db::repo::audit::{self, NewAuditEvent};
 use suite_core::db::repo::decision_effects::DecisionEffect;
@@ -11,16 +12,33 @@ use suite_core::db::repo::outbox::{self, NewOutboxEvent};
 use suite_core::error::{CoreError, CoreResult};
 use suite_core::models::{
     AssessmentContext, AuditActorType, ConfirmationLevel, EvidenceKind, EvidenceSourceModule,
-    EvidenceState, Verdict,
+    EvidenceState, Task, Verdict,
 };
 
 use crate::db::point_reviews::RecPointReviewRevision;
+use crate::db::retention::{self, RecRetentionWindow};
 
 const DECISION_REF_TYPE: &str = "recitation_decision_effect";
 const UNMAPPED_VERSION: &str = "unmapped:r1";
 const OVERALL_RULE_VERSION: &str = "recitation-overall-v1";
 const FLUENCY_RULE_VERSION: &str = "recitation-fluency-v1";
 const POINT_RULE_VERSION: &str = "recitation-rubric-point-v1";
+const RETENTION_RULE_VERSION: &str = "recitation-retention-v1";
+
+pub(crate) struct DecisionTiming<'a> {
+    pub decision_date: NaiveDate,
+    pub task: Option<&'a Task>,
+}
+
+pub(crate) struct DecisionEvidenceInput<'a> {
+    pub submission_id: i64,
+    pub student_id: i64,
+    pub verdict: &'a Verdict,
+    pub effect: &'a DecisionEffect,
+    pub review: Option<&'a RecPointReviewRevision>,
+    pub timing: Option<DecisionTiming<'a>>,
+    pub actor: &'a str,
+}
 
 struct PointEvidenceSource {
     point_public_id: String,
@@ -91,6 +109,7 @@ fn emit_activation(
             note: Some(match evidence.source_type.as_str() {
                 "recitation_rubric_point" => "老师接受或修正逐点评审后激活背诵评分点正式学习证据",
                 "recitation_fluency" => "老师确认总体结论后激活背诵流畅度证据",
+                "recitation_retention" => "跨日期老师终审形成背诵保持稳定性证据",
                 _ => "老师确认总体结论后激活背诵内容级证据",
             }),
             meta_json: Some(&payload),
@@ -326,33 +345,99 @@ fn activate_points(
     Ok(())
 }
 
-pub(crate) fn activate_for_decision(
+fn retention_interval_strength(actual_interval_days: i64) -> f64 {
+    match actual_interval_days {
+        21.. => 1.0,
+        7..=20 => 0.8,
+        2..=6 => 0.6,
+        _ => 0.4,
+    }
+}
+
+fn activate_retention(
     conn: &Connection,
-    submission_id: i64,
-    student_id: i64,
     verdict: &Verdict,
     effect: &DecisionEffect,
-    review: Option<&RecPointReviewRevision>,
+    window: &RecRetentionWindow,
     actor: &str,
+    occurred_at: &str,
 ) -> CoreResult<()> {
-    let actor = actor.trim();
+    if window.state != "active" || window.current_effect_id != effect.id {
+        return Err(CoreError::Invalid(
+            "只能从当前终审效果下仍生效的跨日期窗口生成保持证据".into(),
+        ));
+    }
+    let effect_id = effect.id.to_string();
+    let key = format!(
+        "recitation:evidence:retention:{}:r{}",
+        window.public_id, window.revision
+    );
+    create_and_emit(
+        conn,
+        &NewLearningEvidence {
+            idempotency_key: &key,
+            student_id: effect.student_id,
+            source_module: EvidenceSourceModule::Recitation,
+            source_type: "recitation_retention",
+            source_ref_type: "recitation_retention_window",
+            source_ref_id: &window.public_id,
+            source_revision: window.revision,
+            decision_ref_type: Some(DECISION_REF_TYPE),
+            decision_ref_id: Some(&effect_id),
+            decision_revision: Some(effect.revision),
+            knowledge_node_id: None,
+            ability_dimension_id: None,
+            evidence_kind: EvidenceKind::Retention,
+            value: if effect.result == "pass" { 1.0 } else { 0.0 },
+            confirmation_level: ConfirmationLevel::TeacherOverall,
+            evidence_quality: (confirmed_quality(verdict.confidence)
+                * retention_interval_strength(window.actual_interval_days))
+            .clamp(0.0, 1.0),
+            assessment_context: AssessmentContext::Homework,
+            occurred_at,
+            rule_version: RETENTION_RULE_VERSION,
+            knowledge_map_version: UNMAPPED_VERSION,
+        },
+        actor,
+    )
+}
+
+pub(crate) fn activate_for_decision(
+    conn: &Connection,
+    input: &DecisionEvidenceInput<'_>,
+) -> CoreResult<()> {
+    let actor = input.actor.trim();
     if actor.is_empty() {
         return Err(CoreError::Invalid(
             "正式背诵学习证据必须记录终审老师".into(),
         ));
     }
-    let occurred_at = effect_occurred_at(conn, effect.id)?;
+    let occurred_at = effect_occurred_at(conn, input.effect.id)?;
     activate_overall(
         conn,
-        submission_id,
-        student_id,
-        verdict,
-        effect,
+        input.submission_id,
+        input.student_id,
+        input.verdict,
+        input.effect,
         actor,
         &occurred_at,
     )?;
-    if let Some(review) = review {
-        activate_points(conn, student_id, effect, review, actor)?;
+    if let Some(review) = input.review {
+        activate_points(conn, input.student_id, input.effect, review, actor)?;
+    }
+    if let Some(timing) = input.timing.as_ref() {
+        let context =
+            retention::record_context(conn, input.effect, timing.decision_date, timing.task)?;
+        if let Some(window) = retention::record_window(conn, input.effect, &context, timing.task)? {
+            activate_retention(
+                conn,
+                input.verdict,
+                input.effect,
+                &window,
+                actor,
+                &occurred_at,
+            )?;
+        }
     }
     Ok(())
 }
