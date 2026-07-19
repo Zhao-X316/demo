@@ -1,7 +1,8 @@
 //! M6-1 个人学习掌握快照。
 //!
 //! 计算规则刻意保守：
-//! - 只读取 active + teacher_accepted/teacher_corrected 的正式逐点证据；
+//! - 只读取 active + teacher_accepted/teacher_corrected 且契约明确的正式逐点证据；
+//! - 背诵总体、流畅度和保持度只进入内容级历史，不扩散为知识或能力结论；
 //! - 只接受仍存在于 confirmed K1 map 的知识/能力节点；
 //! - 同一来源同一天折叠为一个独立组，组内取最低表现，订正不覆盖首次错误；
 //! - 少于 3 个独立组、2 个日期或 2 个来源时，只显示“证据不足”；
@@ -18,8 +19,8 @@ use suite_core::domain::{hashing, ids, time};
 use suite_core::error::{CoreError, CoreResult};
 use suite_core::models::AuditActorType;
 
-pub const PROFILE_SCHEMA_VERSION: i64 = 1;
-pub const PROFILE_RULE_VERSION: &str = "m6-confirmed-evidence-profile-v1";
+pub const PROFILE_SCHEMA_VERSION: i64 = 2;
+pub const PROFILE_RULE_VERSION: &str = "m6-confirmed-evidence-profile-v2";
 const MAX_RANGE_DAYS: i64 = 366;
 
 #[derive(Debug, Clone)]
@@ -68,6 +69,7 @@ pub struct ProfilePreviewCounts {
     pub machine_only_excluded: i64,
     pub teacher_overall_excluded: i64,
     pub unmapped_formal_excluded: i64,
+    pub unsupported_contract_excluded: i64,
     pub referenced_knowledge_map_count: i64,
 }
 
@@ -81,6 +83,7 @@ pub struct StudentProfilePreview {
     pub range_end: String,
     pub policy: ProfilePolicy,
     pub counts: ProfilePreviewCounts,
+    pub recitation_summary: ProfileRecitationSummary,
     pub source_watermark: String,
     pub can_generate: bool,
     pub blocker: Option<String>,
@@ -106,6 +109,33 @@ pub struct ProfileEvidenceView {
     pub occurred_at: String,
     pub independence_group_key: String,
     pub effective_weight: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProfileRecitationEvidenceView {
+    pub public_id: String,
+    pub source_type: String,
+    pub source_ref_type: String,
+    pub source_ref_id: String,
+    pub decision_ref_id: Option<String>,
+    pub decision_revision: Option<i64>,
+    pub evidence_kind: String,
+    pub value: f64,
+    pub evidence_quality: f64,
+    pub assessment_context: String,
+    pub occurred_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProfileRecitationSummary {
+    pub overall_count: i64,
+    pub fluency_count: i64,
+    pub retention_count: i64,
+    pub latest_overall_value: Option<f64>,
+    pub latest_fluency_value: Option<f64>,
+    pub latest_retention_value: Option<f64>,
+    pub latest_at: Option<String>,
+    pub evidence: Vec<ProfileRecitationEvidenceView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -154,6 +184,7 @@ pub struct StudentProfileSnapshot {
     pub confirmed_at: String,
     pub is_stale: bool,
     pub stale_reason: Option<String>,
+    pub recitation_summary: ProfileRecitationSummary,
     pub knowledge_metrics: Vec<ProfileNodeMetric>,
     pub ability_metrics: Vec<ProfileNodeMetric>,
 }
@@ -173,6 +204,20 @@ struct EvidenceWatermarkRow {
     decision_ref_id: Option<String>,
     decision_revision: Option<i64>,
     knowledge_map_version: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RecitationWatermarkRow {
+    public_id: String,
+    source_type: String,
+    source_ref_type: String,
+    source_ref_id: String,
+    decision_ref_id: Option<String>,
+    decision_revision: Option<i64>,
+    evidence_kind: String,
+    value_micros: i64,
+    quality_micros: i64,
+    occurred_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -195,6 +240,22 @@ struct EvidenceTarget {
     occurred_at: String,
     occurred_date: NaiveDate,
     knowledge_map_version: String,
+}
+
+#[derive(Debug, Clone)]
+struct RecitationEvidence {
+    id: i64,
+    public_id: String,
+    source_type: String,
+    source_ref_type: String,
+    source_ref_id: String,
+    decision_ref_id: Option<String>,
+    decision_revision: Option<i64>,
+    evidence_kind: String,
+    value: f64,
+    evidence_quality: f64,
+    assessment_context: String,
+    occurred_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -239,6 +300,7 @@ struct Computation {
     counts: ProfilePreviewCounts,
     source_watermark: String,
     evidence_ids: HashSet<i64>,
+    recitation_evidence: Vec<RecitationEvidence>,
     knowledge_map_versions: BTreeSet<String>,
     calculated_at: String,
 }
@@ -385,10 +447,57 @@ fn map_public_id(version: &str) -> &str {
     version.split(":r").next().unwrap_or(version)
 }
 
+fn supports_formal_target(
+    source_module: &str,
+    source_type: &str,
+    source_ref_type: &str,
+    evidence_kind: &str,
+    target_type: &str,
+) -> bool {
+    match source_module {
+        "grading" => {
+            evidence_kind == "accuracy"
+                && matches!(
+                    (source_type, source_ref_type),
+                    ("objective_question", "assessment_item")
+                        | ("fill_blank_slot", "answer_slot")
+                        | ("question_rubric_point", "rubric_point")
+                        | ("dictation_rubric_point", "rubric_point")
+                )
+                && matches!(target_type, "knowledge_node" | "ability_dimension")
+        }
+        "recitation" => {
+            source_type == "recitation_rubric_point"
+                && source_ref_type == "recitation_point_review"
+                && matches!(evidence_kind, "coverage" | "accuracy" | "contradiction")
+                && target_type == "knowledge_node"
+        }
+        _ => false,
+    }
+}
+
+fn supports_recitation_history(
+    source_type: &str,
+    source_ref_type: &str,
+    evidence_kind: &str,
+) -> bool {
+    matches!(
+        (source_type, source_ref_type, evidence_kind),
+        ("recitation_overall", "recitation_submission", "accuracy")
+            | ("recitation_fluency", "recitation_submission", "fluency")
+            | (
+                "recitation_retention",
+                "recitation_retention_window",
+                "retention"
+            )
+    )
+}
+
 type LoadedEvidenceTargets = (
     Vec<EvidenceTarget>,
     BTreeMap<i64, String>,
     BTreeSet<String>,
+    i64,
 );
 
 fn load_evidence_targets(
@@ -430,6 +539,7 @@ fn load_evidence_targets(
     let mut targets = Vec::new();
     let mut map_ids = BTreeMap::new();
     let mut map_versions = BTreeSet::new();
+    let mut unsupported_evidence_ids = HashSet::new();
     for row in rows {
         let (
             id,
@@ -455,6 +565,30 @@ fn load_evidence_targets(
         if occurred_date < validated.range_start || occurred_date > validated.range_end {
             continue;
         }
+        let knowledge_supported = knowledge_node_id.is_some()
+            && supports_formal_target(
+                &source_module,
+                &source_type,
+                &source_ref_type,
+                &evidence_kind,
+                "knowledge_node",
+            );
+        let ability_supported = ability_dimension_id.is_some()
+            && supports_formal_target(
+                &source_module,
+                &source_type,
+                &source_ref_type,
+                &evidence_kind,
+                "ability_dimension",
+            );
+        if (knowledge_node_id.is_some() && !knowledge_supported)
+            || (ability_dimension_id.is_some() && !ability_supported)
+        {
+            unsupported_evidence_ids.insert(id);
+        }
+        if !knowledge_supported && !ability_supported {
+            continue;
+        }
         let map_id = conn
             .query_row(
                 "SELECT id FROM k1_knowledge_maps
@@ -468,7 +602,8 @@ fn load_evidence_targets(
         };
         map_ids.insert(map_id, knowledge_map_version.clone());
         map_versions.insert(knowledge_map_version.clone());
-        if let Some(node) = knowledge_node_id {
+        if knowledge_supported {
+            let node = knowledge_node_id.expect("supported knowledge target must exist");
             let title = conn
                 .query_row(
                     "SELECT title FROM k1_knowledge_nodes
@@ -500,7 +635,8 @@ fn load_evidence_targets(
                 });
             }
         }
-        if let Some(dimension) = ability_dimension_id {
+        if ability_supported {
+            let dimension = ability_dimension_id.expect("supported ability target must exist");
             let title = conn
                 .query_row(
                     "SELECT title FROM k1_ability_dimensions
@@ -533,7 +669,108 @@ fn load_evidence_targets(
             }
         }
     }
-    Ok((targets, map_ids, map_versions))
+    Ok((
+        targets,
+        map_ids,
+        map_versions,
+        unsupported_evidence_ids.len() as i64,
+    ))
+}
+
+type LoadedRecitationHistory = (Vec<RecitationEvidence>, i64);
+
+fn load_recitation_history(
+    conn: &Connection,
+    validated: &ValidatedScope,
+) -> CoreResult<LoadedRecitationHistory> {
+    let mut stmt = conn.prepare(
+        "SELECT id,public_id,source_type,source_ref_type,source_ref_id,
+                decision_ref_id,decision_revision,evidence_kind,value,evidence_quality,
+                assessment_context,occurred_at
+         FROM learning_evidence
+         WHERE student_id=?1 AND source_module='recitation' AND state='active'
+           AND confirmation_level='teacher_overall'
+         ORDER BY occurred_at,id",
+    )?;
+    let rows = stmt.query_map([validated.student.id], |row| {
+        Ok(RecitationEvidence {
+            id: row.get(0)?,
+            public_id: row.get(1)?,
+            source_type: row.get(2)?,
+            source_ref_type: row.get(3)?,
+            source_ref_id: row.get(4)?,
+            decision_ref_id: row.get(5)?,
+            decision_revision: row.get(6)?,
+            evidence_kind: row.get(7)?,
+            value: row.get(8)?,
+            evidence_quality: row.get(9)?,
+            assessment_context: row.get(10)?,
+            occurred_at: row.get(11)?,
+        })
+    })?;
+    let mut history = Vec::new();
+    let mut unsupported = 0_i64;
+    for row in rows {
+        let evidence = row?;
+        let occurred_date = shanghai_date(&evidence.occurred_at)?;
+        if occurred_date < validated.range_start || occurred_date > validated.range_end {
+            continue;
+        }
+        if supports_recitation_history(
+            &evidence.source_type,
+            &evidence.source_ref_type,
+            &evidence.evidence_kind,
+        ) {
+            history.push(evidence);
+        } else {
+            unsupported += 1;
+        }
+    }
+    Ok((history, unsupported))
+}
+
+fn recitation_summary(evidence: &[RecitationEvidence]) -> ProfileRecitationSummary {
+    let latest_value = |kind: &str| {
+        evidence
+            .iter()
+            .rev()
+            .find(|item| item.evidence_kind == kind)
+            .map(|item| item.value)
+    };
+    ProfileRecitationSummary {
+        overall_count: evidence
+            .iter()
+            .filter(|item| item.source_type == "recitation_overall")
+            .count() as i64,
+        fluency_count: evidence
+            .iter()
+            .filter(|item| item.source_type == "recitation_fluency")
+            .count() as i64,
+        retention_count: evidence
+            .iter()
+            .filter(|item| item.source_type == "recitation_retention")
+            .count() as i64,
+        latest_overall_value: latest_value("accuracy"),
+        latest_fluency_value: latest_value("fluency"),
+        latest_retention_value: latest_value("retention"),
+        latest_at: evidence.last().map(|item| item.occurred_at.clone()),
+        evidence: evidence
+            .iter()
+            .map(|item| ProfileRecitationEvidenceView {
+                public_id: item.public_id.clone(),
+                source_type: item.source_type.clone(),
+                source_ref_type: item.source_ref_type.clone(),
+                source_ref_id: item.source_ref_id.clone(),
+                decision_ref_id: item.decision_ref_id.clone(),
+                decision_revision: item.decision_revision,
+                evidence_kind: item.evidence_kind.clone(),
+                value: item.value,
+                evidence_quality: item.evidence_quality,
+                assessment_context: item.assessment_context.clone(),
+                occurred_at: item.occurred_at.clone(),
+            })
+            .collect(),
+    }
 }
 
 fn load_scope_nodes(
@@ -767,7 +1004,10 @@ fn excluded_count(
 fn compute(conn: &Connection, scope: &StudentProfileScope<'_>) -> CoreResult<Computation> {
     let validated = validate_scope(conn, scope)?;
     let (policy_id, policy) = active_policy(conn)?;
-    let (targets, map_ids, map_versions) = load_evidence_targets(conn, &validated)?;
+    let (targets, map_ids, map_versions, unsupported_formal_excluded) =
+        load_evidence_targets(conn, &validated)?;
+    let (recitation_evidence, unsupported_history_excluded) =
+        load_recitation_history(conn, &validated)?;
     let scope_nodes = load_scope_nodes(conn, &map_ids)?;
     let mut by_target: HashMap<(String, String), Vec<EvidenceTarget>> = HashMap::new();
     for target in targets {
@@ -836,17 +1076,14 @@ fn compute(conn: &Connection, scope: &StudentProfileScope<'_>) -> CoreResult<Com
             &validated,
             "confirmation_level='machine_only'",
         )?,
-        teacher_overall_excluded: excluded_count(
-            conn,
-            &validated,
-            "confirmation_level='teacher_overall'",
-        )?,
+        teacher_overall_excluded: recitation_evidence.len() as i64,
         unmapped_formal_excluded: excluded_count(
             conn,
             &validated,
             "confirmation_level IN ('teacher_accepted','teacher_corrected')
              AND knowledge_node_id IS NULL AND ability_dimension_id IS NULL",
         )?,
+        unsupported_contract_excluded: unsupported_formal_excluded + unsupported_history_excluded,
         referenced_knowledge_map_count: map_ids.len() as i64,
     };
     let mut watermark_rows = Vec::new();
@@ -875,6 +1112,21 @@ fn compute(conn: &Connection, scope: &StudentProfileScope<'_>) -> CoreResult<Com
             .then(left.target_type.cmp(&right.target_type))
             .then(left.target_public_id.cmp(&right.target_public_id))
     });
+    let recitation_watermark_rows = recitation_evidence
+        .iter()
+        .map(|item| RecitationWatermarkRow {
+            public_id: item.public_id.clone(),
+            source_type: item.source_type.clone(),
+            source_ref_type: item.source_ref_type.clone(),
+            source_ref_id: item.source_ref_id.clone(),
+            decision_ref_id: item.decision_ref_id.clone(),
+            decision_revision: item.decision_revision,
+            evidence_kind: item.evidence_kind.clone(),
+            value_micros: (item.value * 1_000_000.0).round() as i64,
+            quality_micros: (item.evidence_quality * 1_000_000.0).round() as i64,
+            occurred_at: item.occurred_at.clone(),
+        })
+        .collect::<Vec<_>>();
     let scope_identity = scope_nodes
         .iter()
         .map(|node| {
@@ -889,6 +1141,7 @@ fn compute(conn: &Connection, scope: &StudentProfileScope<'_>) -> CoreResult<Com
         "schema_version": PROFILE_SCHEMA_VERSION,
         "rule_version": PROFILE_RULE_VERSION,
         "evidence": watermark_rows,
+        "recitation_history": recitation_watermark_rows,
         "scope_nodes": scope_identity,
         "knowledge_map_versions": map_versions,
         "policy_public_id": policy.public_id,
@@ -907,6 +1160,7 @@ fn compute(conn: &Connection, scope: &StudentProfileScope<'_>) -> CoreResult<Com
         counts,
         source_watermark,
         evidence_ids,
+        recitation_evidence,
         knowledge_map_versions: map_versions,
         calculated_at: time::utc_now_rfc3339(),
     })
@@ -927,14 +1181,14 @@ pub fn preview_student_profile(
         range_end: computation.validated.range_end.to_string(),
         policy: computation.policy,
         counts: computation.counts,
+        recitation_summary: recitation_summary(&computation.recitation_evidence),
         source_watermark: computation.source_watermark,
         can_generate,
         blocker: (!can_generate)
             .then(|| "所选范围还没有老师确认、已发布且知识/能力链接明确的逐点证据。".into()),
         scope_note: "范围为当前正式证据引用的已确认 K1 知识图谱版本；未覆盖节点保留为“未评估”。"
             .into(),
-        evidence_note: "M1 总体通过/不通过不会扩散成逐知识点证据；订正、开卷和旧证据会降权。"
-            .into(),
+        evidence_note: "M1 总体、流畅度和保持度只显示为背诵内容历史；只有老师接受或修正且链接明确的评分点进入知识掌握，背诵不推导高阶能力。".into(),
     })
 }
 
@@ -993,7 +1247,7 @@ fn insert_snapshot(
     let now = time::utc_now_rfc3339();
     let payload_sha256 = payload_hash(computation)?;
     let scope_json = serde_json::json!({
-        "schema_version": 1,
+        "schema_version": PROFILE_SCHEMA_VERSION,
         "scope_kind": "confirmed_evidence_maps",
         "knowledge_map_versions": computation.knowledge_map_versions,
         "range_start": computation.validated.range_start.to_string(),
@@ -1001,8 +1255,13 @@ fn insert_snapshot(
     })
     .to_string();
     let source_config_json = serde_json::json!({
-        "schema_version": 1,
+        "schema_version": PROFILE_SCHEMA_VERSION,
         "formal_confirmation_levels": ["teacher_accepted","teacher_corrected"],
+        "formal_adapters": {
+            "grading": ["objective_question","fill_blank_slot","question_rubric_point","dictation_rubric_point"],
+            "recitation": ["recitation_rubric_point:knowledge_only"]
+        },
+        "recitation_history": ["recitation_overall","recitation_fluency","recitation_retention"],
         "active_only": true,
         "same_source_same_day": "collapse_minimum",
         "context_weights": {
@@ -1090,6 +1349,14 @@ fn insert_snapshot(
                 params![snapshot_id, metric_id, item.id, group_key, weight],
             )?;
         }
+    }
+    for item in &computation.recitation_evidence {
+        tx.execute(
+            "INSERT INTO profile_recitation_evidence_links
+              (snapshot_id,learning_evidence_id)
+             VALUES (?1,?2)",
+            params![snapshot_id, item.id],
+        )?;
     }
     Ok((public_id, revision, now))
 }
@@ -1188,6 +1455,39 @@ fn load_metric_evidence(
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn load_recitation_summary(
+    conn: &Connection,
+    snapshot_id: i64,
+) -> CoreResult<ProfileRecitationSummary> {
+    let mut stmt = conn.prepare(
+        "SELECT e.id,e.public_id,e.source_type,e.source_ref_type,e.source_ref_id,
+                e.decision_ref_id,e.decision_revision,e.evidence_kind,e.value,
+                e.evidence_quality,e.assessment_context,e.occurred_at
+         FROM profile_recitation_evidence_links l
+         JOIN learning_evidence e ON e.id=l.learning_evidence_id
+         WHERE l.snapshot_id=?1
+         ORDER BY e.occurred_at,e.id",
+    )?;
+    let rows = stmt.query_map([snapshot_id], |row| {
+        Ok(RecitationEvidence {
+            id: row.get(0)?,
+            public_id: row.get(1)?,
+            source_type: row.get(2)?,
+            source_ref_type: row.get(3)?,
+            source_ref_id: row.get(4)?,
+            decision_ref_id: row.get(5)?,
+            decision_revision: row.get(6)?,
+            evidence_kind: row.get(7)?,
+            value: row.get(8)?,
+            evidence_quality: row.get(9)?,
+            assessment_context: row.get(10)?,
+            occurred_at: row.get(11)?,
+        })
+    })?;
+    let evidence = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(recitation_summary(&evidence))
 }
 
 fn load_metrics(
@@ -1356,6 +1656,7 @@ pub fn get_student_profile(
     } else {
         None
     };
+    let recitation_summary = load_recitation_summary(conn, snapshot_id)?;
     let (knowledge_metrics, ability_metrics) = load_metrics(conn, snapshot_id)?;
     Ok(Some(StudentProfileSnapshot {
         public_id,
@@ -1382,6 +1683,7 @@ pub fn get_student_profile(
         confirmed_at,
         is_stale,
         stale_reason,
+        recitation_summary,
         knowledge_metrics,
         ability_metrics,
     }))
@@ -1537,6 +1839,82 @@ mod tests {
                 occurred_at,
                 rule_version: "exam-v1",
                 knowledge_map_version: &format!("{}:r1", fixture.map_public_id),
+            },
+        )
+        .unwrap();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_recitation_point(
+        fixture: &Fixture,
+        key: &str,
+        target: &str,
+        ability: Option<&str>,
+        kind: EvidenceKind,
+        occurred_at: &str,
+        value: f64,
+        confirmation: ConfirmationLevel,
+    ) {
+        create_or_get(
+            &fixture.conn,
+            &NewLearningEvidence {
+                idempotency_key: key,
+                student_id: fixture.student_id,
+                source_module: EvidenceSourceModule::Recitation,
+                source_type: "recitation_rubric_point",
+                source_ref_type: "recitation_point_review",
+                source_ref_id: key,
+                source_revision: 1,
+                decision_ref_type: Some("recitation_review"),
+                decision_ref_id: Some(key),
+                decision_revision: Some(1),
+                knowledge_node_id: Some(target),
+                ability_dimension_id: ability,
+                evidence_kind: kind,
+                value,
+                confirmation_level: confirmation,
+                evidence_quality: 1.0,
+                assessment_context: AssessmentContext::Homework,
+                occurred_at,
+                rule_version: "recitation-point-evidence-v1",
+                knowledge_map_version: &format!("{}:r1", fixture.map_public_id),
+            },
+        )
+        .unwrap();
+    }
+
+    fn add_recitation_history(
+        fixture: &Fixture,
+        key: &str,
+        source_type: &str,
+        source_ref_type: &str,
+        kind: EvidenceKind,
+        occurred_at: &str,
+        value: f64,
+    ) {
+        create_or_get(
+            &fixture.conn,
+            &NewLearningEvidence {
+                idempotency_key: key,
+                student_id: fixture.student_id,
+                source_module: EvidenceSourceModule::Recitation,
+                source_type,
+                source_ref_type,
+                source_ref_id: key,
+                source_revision: 1,
+                decision_ref_type: Some("recitation_review"),
+                decision_ref_id: Some(key),
+                decision_revision: Some(1),
+                knowledge_node_id: None,
+                ability_dimension_id: None,
+                evidence_kind: kind,
+                value,
+                confirmation_level: ConfirmationLevel::TeacherOverall,
+                evidence_quality: 0.9,
+                assessment_context: AssessmentContext::Homework,
+                occurred_at,
+                rule_version: "recitation-history-v1",
+                knowledge_map_version: "unmapped:r1",
             },
         )
         .unwrap();
@@ -1769,5 +2147,229 @@ mod tests {
             .unwrap();
         assert_eq!(ability.status, "unassessed");
         assert!(ability.mastery_score.is_none());
+    }
+
+    #[test]
+    fn recitation_point_adapter_projects_knowledge_but_never_ability() {
+        let fixture = setup();
+        add_recitation_point(
+            &fixture,
+            "recitation-point",
+            &fixture.knowledge[0],
+            Some(&fixture.ability),
+            EvidenceKind::Accuracy,
+            "2026-07-10T00:00:00.000Z",
+            1.0,
+            ConfirmationLevel::TeacherAccepted,
+        );
+        let computation = compute(&fixture.conn, &scope(&fixture)).unwrap();
+        let knowledge = computation
+            .metrics
+            .iter()
+            .find(|metric| metric.target_public_id == fixture.knowledge[0])
+            .unwrap();
+        let ability = computation
+            .metrics
+            .iter()
+            .find(|metric| metric.target_public_id == fixture.ability)
+            .unwrap();
+        assert_eq!(knowledge.evidence_count, 1);
+        assert_eq!(knowledge.source_breakdown.get("recitation"), Some(&1));
+        assert_eq!(ability.evidence_count, 0);
+        assert_eq!(computation.counts.unsupported_contract_excluded, 1);
+    }
+
+    #[test]
+    fn recitation_overall_fluency_and_retention_are_read_only_history_only() {
+        let fixture = setup();
+        add_recitation_history(
+            &fixture,
+            "overall-1",
+            "recitation_overall",
+            "recitation_submission",
+            EvidenceKind::Accuracy,
+            "2026-07-10T00:00:00.000Z",
+            1.0,
+        );
+        add_recitation_history(
+            &fixture,
+            "fluency-1",
+            "recitation_fluency",
+            "recitation_submission",
+            EvidenceKind::Fluency,
+            "2026-07-10T00:00:00.000Z",
+            0.72,
+        );
+        add_recitation_history(
+            &fixture,
+            "retention-1",
+            "recitation_retention",
+            "recitation_retention_window",
+            EvidenceKind::Retention,
+            "2026-07-18T00:00:00.000Z",
+            1.0,
+        );
+        let before: i64 = fixture
+            .conn
+            .query_row("SELECT total_changes()", [], |row| row.get(0))
+            .unwrap();
+        let preview = preview_student_profile(&fixture.conn, &scope(&fixture)).unwrap();
+        let after: i64 = fixture
+            .conn
+            .query_row("SELECT total_changes()", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(after, before);
+        assert!(!preview.can_generate);
+        assert_eq!(preview.counts.mapped_formal_evidence, 0);
+        assert_eq!(preview.counts.teacher_overall_excluded, 3);
+        assert_eq!(preview.recitation_summary.overall_count, 1);
+        assert_eq!(preview.recitation_summary.fluency_count, 1);
+        assert_eq!(preview.recitation_summary.retention_count, 1);
+        assert_eq!(preview.recitation_summary.latest_fluency_value, Some(0.72));
+        assert_eq!(preview.recitation_summary.evidence.len(), 3);
+    }
+
+    #[test]
+    fn snapshot_freezes_recitation_history_and_new_history_marks_it_stale() {
+        let mut fixture = setup();
+        add_recitation_point(
+            &fixture,
+            "point-for-snapshot",
+            &fixture.knowledge[0],
+            None,
+            EvidenceKind::Accuracy,
+            "2026-07-10T00:00:00.000Z",
+            1.0,
+            ConfirmationLevel::TeacherCorrected,
+        );
+        add_recitation_history(
+            &fixture,
+            "overall-before",
+            "recitation_overall",
+            "recitation_submission",
+            EvidenceKind::Accuracy,
+            "2026-07-10T00:00:00.000Z",
+            1.0,
+        );
+        add_recitation_history(
+            &fixture,
+            "retention-before",
+            "recitation_retention",
+            "recitation_retention_window",
+            EvidenceKind::Retention,
+            "2026-07-18T00:00:00.000Z",
+            1.0,
+        );
+        let class_id = fixture.class_id;
+        let student_id = fixture.student_id;
+        let generated = generate_student_profile(
+            &mut fixture.conn,
+            &GenerateStudentProfileInput {
+                scope: StudentProfileScope {
+                    class_id,
+                    student_id,
+                    range_start: "2026-07-01",
+                    range_end: "2026-07-31",
+                },
+                confirmed_by: "teacher-1",
+            },
+        )
+        .unwrap();
+        assert_eq!(generated.recitation_summary.overall_count, 1);
+        assert_eq!(generated.recitation_summary.retention_count, 1);
+        assert!(fixture
+            .conn
+            .execute(
+                "DELETE FROM profile_recitation_evidence_links
+                 WHERE snapshot_id=(SELECT id FROM profile_snapshots WHERE public_id=?1)",
+                [&generated.public_id],
+            )
+            .is_err());
+
+        add_recitation_history(
+            &fixture,
+            "overall-after",
+            "recitation_overall",
+            "recitation_submission",
+            EvidenceKind::Accuracy,
+            "2026-07-20T00:00:00.000Z",
+            0.0,
+        );
+        let loaded = get_student_profile(&fixture.conn, &generated.public_id)
+            .unwrap()
+            .unwrap();
+        assert!(loaded.is_stale);
+        assert_eq!(loaded.recitation_summary.overall_count, 1);
+        let preview = preview_student_profile(&fixture.conn, &scope(&fixture)).unwrap();
+        assert_eq!(preview.recitation_summary.overall_count, 2);
+    }
+
+    #[test]
+    fn unsupported_and_non_active_recitation_contracts_fail_closed() {
+        let fixture = setup();
+        add_recitation_point(
+            &fixture,
+            "active-supported",
+            &fixture.knowledge[0],
+            None,
+            EvidenceKind::Coverage,
+            "2026-07-10T00:00:00.000Z",
+            1.0,
+            ConfirmationLevel::TeacherAccepted,
+        );
+        add_recitation_point(
+            &fixture,
+            "reverted-supported",
+            &fixture.knowledge[0],
+            None,
+            EvidenceKind::Accuracy,
+            "2026-07-11T00:00:00.000Z",
+            1.0,
+            ConfirmationLevel::TeacherAccepted,
+        );
+        fixture
+            .conn
+            .execute(
+                "UPDATE learning_evidence SET state='reverted'
+                 WHERE idempotency_key='reverted-supported'",
+                [],
+            )
+            .unwrap();
+        create_or_get(
+            &fixture.conn,
+            &NewLearningEvidence {
+                idempotency_key: "unsupported-source-type",
+                student_id: fixture.student_id,
+                source_module: EvidenceSourceModule::Recitation,
+                source_type: "recitation_fluency",
+                source_ref_type: "recitation_point_review",
+                source_ref_id: "unsupported-source-type",
+                source_revision: 1,
+                decision_ref_type: Some("recitation_review"),
+                decision_ref_id: Some("unsupported-source-type"),
+                decision_revision: Some(1),
+                knowledge_node_id: Some(&fixture.knowledge[0]),
+                ability_dimension_id: None,
+                evidence_kind: EvidenceKind::Accuracy,
+                value: 1.0,
+                confirmation_level: ConfirmationLevel::TeacherAccepted,
+                evidence_quality: 1.0,
+                assessment_context: AssessmentContext::Homework,
+                occurred_at: "2026-07-12T00:00:00.000Z",
+                rule_version: "unsupported-v1",
+                knowledge_map_version: &format!("{}:r1", fixture.map_public_id),
+            },
+        )
+        .unwrap();
+        let preview = preview_student_profile(&fixture.conn, &scope(&fixture)).unwrap();
+        assert_eq!(preview.counts.mapped_formal_evidence, 1);
+        assert_eq!(preview.counts.unsupported_contract_excluded, 1);
+        let computation = compute(&fixture.conn, &scope(&fixture)).unwrap();
+        let metric = computation
+            .metrics
+            .iter()
+            .find(|metric| metric.target_public_id == fixture.knowledge[0])
+            .unwrap();
+        assert_eq!(metric.evidence_count, 1);
     }
 }

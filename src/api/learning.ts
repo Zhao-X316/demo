@@ -398,7 +398,33 @@ export interface ProfilePreviewCounts {
   machine_only_excluded: number;
   teacher_overall_excluded: number;
   unmapped_formal_excluded: number;
+  unsupported_contract_excluded: number;
   referenced_knowledge_map_count: number;
+}
+
+export interface ProfileRecitationEvidenceView {
+  public_id: string;
+  source_type: string;
+  source_ref_type: string;
+  source_ref_id: string;
+  decision_ref_id: string | null;
+  decision_revision: number | null;
+  evidence_kind: string;
+  value: number;
+  evidence_quality: number;
+  assessment_context: string;
+  occurred_at: string;
+}
+
+export interface ProfileRecitationSummary {
+  overall_count: number;
+  fluency_count: number;
+  retention_count: number;
+  latest_overall_value: number | null;
+  latest_fluency_value: number | null;
+  latest_retention_value: number | null;
+  latest_at: string | null;
+  evidence: ProfileRecitationEvidenceView[];
 }
 
 export interface StudentProfilePreview {
@@ -410,6 +436,7 @@ export interface StudentProfilePreview {
   range_end: string;
   policy: ProfilePolicy;
   counts: ProfilePreviewCounts;
+  recitation_summary: ProfileRecitationSummary;
   source_watermark: string;
   can_generate: boolean;
   blocker: string | null;
@@ -487,6 +514,7 @@ export interface StudentProfileSnapshot {
   confirmed_at: string;
   is_stale: boolean;
   stale_reason: string | null;
+  recitation_summary: ProfileRecitationSummary;
   knowledge_metrics: ProfileNodeMetric[];
   ability_metrics: ProfileNodeMetric[];
 }

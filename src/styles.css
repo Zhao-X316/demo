@@ -437,6 +437,14 @@ button.dashboard-action { display: grid; grid-template-columns: 34px minmax(0, 1
 .profile-evidence-list > div > div { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .profile-evidence-list b { font-size: 10.5px; }
 .profile-evidence-list > div > div span { color: var(--muted); }
+.profile-recitation-history { padding: 14px; border: 1px solid #D7E3EC; border-radius: 10px; background: #F8FBFD; }
+.profile-recitation-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.profile-recitation-stats > div { display: flex; flex-direction: column; gap: 3px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); }
+.profile-recitation-stats span { color: var(--muted); font-size: 10px; }
+.profile-recitation-stats b { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.profile-recitation-history > details { margin-top: 8px; }
+.profile-recitation-history > details > summary { color: var(--text-2); cursor: pointer; font-size: 10.5px; }
+.profile-recitation-history > details[open] > summary { margin-bottom: 7px; }
 .profile-footnote { padding: 9px 10px; border-radius: 7px; background: var(--bg-sub); color: var(--muted); font-size: 10.5px; }
 .schedule-policy-panel { margin: 12px 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
 .schedule-policy-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
@@ -838,7 +846,7 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
   .wrongbook-student-facts-list > div span:nth-of-type(n+3) { display: none; }
   .profile-toolbar { align-items: stretch; flex-direction: column; }
   .profile-toolbar > div:last-child { flex-wrap: wrap; }
-  .profile-preview-stats, .profile-snapshot-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .profile-preview-stats, .profile-snapshot-summary, .profile-recitation-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .profile-metric summary { grid-template-columns: minmax(0, 1fr) auto; }
   .profile-metric-numbers { grid-column: 1 / -1; justify-content: flex-start; }
 }
@@ -888,7 +896,7 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
   .profile-toolbar > div:last-child { align-items: stretch; flex-direction: column; }
   .profile-toolbar select, .profile-toolbar input { width: 100%; }
   .profile-preview-head, .profile-snapshot-head, .profile-metric-title { align-items: stretch; flex-direction: column; }
-  .profile-preview-stats, .profile-snapshot-summary { grid-template-columns: 1fr 1fr; }
+  .profile-preview-stats, .profile-snapshot-summary, .profile-recitation-stats { grid-template-columns: 1fr 1fr; }
   .profile-metric summary { grid-template-columns: 1fr; }
   .profile-metric-numbers { grid-column: auto; justify-content: flex-start; }
   .profile-evidence-list > div { grid-template-columns: 1fr 1fr; }

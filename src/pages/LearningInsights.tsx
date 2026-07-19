@@ -18,6 +18,7 @@ import {
   previewStudentProfile,
   ProfileNodeMetric,
   ProfileNodeStatus,
+  ProfileRecitationSummary,
   previewWrongbookReinforcement,
   ReinforcementAssignment,
   ReinforcementAssignmentStatus,
@@ -409,7 +410,7 @@ function ProfileMetricList({
                     ))}
                   </div>
                 )}
-                {metric.evidence.length > 0 && (
+                {metric.evidence.some((evidence) => evidence.source_module === "grading") && (
                   <button onClick={onOpenExam}>回到题目批改查看原始证据</button>
                 )}
               </div>
@@ -417,6 +418,59 @@ function ProfileMetricList({
           );
         })}
       </div>
+    </section>
+  );
+}
+
+const RECITATION_EVIDENCE_LABELS: Record<string, string> = {
+  recitation_overall: "总体终审",
+  recitation_fluency: "表达流畅度",
+  recitation_retention: "跨日保持",
+};
+
+function RecitationHistory({
+  summary,
+  frozen,
+}: {
+  summary: ProfileRecitationSummary;
+  frozen: boolean;
+}) {
+  const total = summary.overall_count + summary.fluency_count + summary.retention_count;
+  if (total === 0) return null;
+  const valueLabel = (sourceType: string, value: number) =>
+    sourceType === "recitation_overall"
+      ? (value >= 0.5 ? "通过" : "未通过")
+      : `${Math.round(value * 100)}%`;
+  return (
+    <section className="profile-recitation-history">
+      <div className="profile-metric-title">
+        <b>背诵内容记录</b>
+        <span>
+          {frozen ? "随本版快照冻结" : "生成前只读预览"} · 不扩散为具体知识点或高阶能力
+        </span>
+      </div>
+      <div className="profile-recitation-stats">
+        <div><span>总体终审</span><b>{summary.overall_count}</b></div>
+        <div><span>流畅度</span><b>{summary.fluency_count}</b></div>
+        <div><span>跨日保持</span><b>{summary.retention_count}</b></div>
+        <div><span>最近记录</span><b>{summary.latest_at ? formatTime(summary.latest_at) : "暂无"}</b></div>
+      </div>
+      <details>
+        <summary>查看 {total} 条内容级证据</summary>
+        <div className="profile-evidence-list">
+          {summary.evidence.map((evidence) => (
+            <div key={evidence.public_id}>
+              <div>
+                <b>{RECITATION_EVIDENCE_LABELS[evidence.source_type] ?? evidence.source_type}</b>
+                <span>{formatTime(evidence.occurred_at)}</span>
+              </div>
+              <span>{valueLabel(evidence.source_type, evidence.value)}</span>
+              <span>质量 {Math.round(evidence.evidence_quality * 100)}%</span>
+              <span>{CONTEXT_LABELS[evidence.assessment_context] ?? evidence.assessment_context}</span>
+            </div>
+          ))}
+        </div>
+      </details>
     </section>
   );
 }
@@ -562,23 +616,34 @@ function StudentProfilePanel({
           <div className="profile-preview-stats">
             <div><span>正式逐点证据</span><b>{preview.counts.mapped_formal_evidence}</b></div>
             <div><span>知识覆盖</span><b>{preview.counts.knowledge_node_assessed} / {preview.counts.knowledge_node_total}</b></div>
+            <div><span>背诵内容记录</span><b>
+              {preview.recitation_summary.overall_count
+                + preview.recitation_summary.fluency_count
+                + preview.recitation_summary.retention_count}
+            </b></div>
             <div><span>知识达门槛</span><b>{preview.counts.knowledge_node_eligible}</b></div>
-            <div><span>能力达门槛</span><b>{preview.counts.ability_node_eligible}</b></div>
           </div>
           {preview.blocker && <div className="profile-blocker">{preview.blocker}</div>}
           <div className="profile-preview-notes">
             <span>{preview.scope_note}</span>
             <span>{preview.evidence_note}</span>
             {(preview.counts.machine_only_excluded
-              + preview.counts.teacher_overall_excluded
-              + preview.counts.unmapped_formal_excluded) > 0 && (
+              + preview.counts.unmapped_formal_excluded
+              + preview.counts.unsupported_contract_excluded) > 0 && (
               <span>
                 未纳入：纯机器 {preview.counts.machine_only_excluded}、
-                仅总体确认 {preview.counts.teacher_overall_excluded}、
-                未映射逐点 {preview.counts.unmapped_formal_excluded}。
+                未映射逐点 {preview.counts.unmapped_formal_excluded}、
+                不支持的来源契约 {preview.counts.unsupported_contract_excluded}。
+              </span>
+            )}
+            {preview.counts.teacher_overall_excluded > 0 && (
+              <span>
+                另有 {preview.counts.teacher_overall_excluded} 条仅总体确认记录只进入背诵内容历史，
+                不参与知识点或能力计算。
               </span>
             )}
           </div>
+          <RecitationHistory summary={preview.recitation_summary} frozen={false} />
         </section>
       )}
 
@@ -615,6 +680,7 @@ function StudentProfilePanel({
               <b>{snapshot.evidence_count}</b>
             </div>
           </div>
+          <RecitationHistory summary={snapshot.recitation_summary} frozen />
           <ProfileMetricList title="知识掌握" metrics={snapshot.knowledge_metrics}
             onOpenExam={onOpenExam} />
           <ProfileMetricList title="学科能力" metrics={snapshot.ability_metrics}

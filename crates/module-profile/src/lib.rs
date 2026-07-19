@@ -34,6 +34,10 @@ static MIGRATIONS: &[Migration] = &[
         id: "profile_0005",
         sql: include_str!("../migrations/0005_class_profile_exports.sql"),
     },
+    Migration {
+        id: "profile_0006",
+        sql: include_str!("../migrations/0006_recitation_evidence_links.sql"),
+    },
 ];
 
 pub fn profile_migrations() -> &'static [Migration] {
