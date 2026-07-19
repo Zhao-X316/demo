@@ -491,6 +491,21 @@ export interface OrdinaryPaperRunResult {
       mapping_confidence: number;
       mark_cells: Array<{ label: string }>;
     }>;
+    printed_questions: Array<{
+      assessment_item_id: number;
+      stem: string;
+      material_text: string | null;
+      options: Array<{ label: string; content: string; order_index: number }>;
+      extraction_confidence: number;
+      privacy: {
+        schema_version: number;
+        sanitized: boolean;
+        student_identity_detected: boolean;
+        student_answer_detected: boolean;
+        teacher_mark_detected: boolean;
+        score_detected: boolean;
+      };
+    }>;
     confidence: number;
     issue_codes: string[];
   } | null;
@@ -521,6 +536,31 @@ export interface OrdinaryStructureConfirmationResult {
     region_index: number;
     decision: "teacher_confirmed";
   }>;
+}
+
+export interface OrdinaryQuestionSyncSummary {
+  schema_version: number;
+  state:
+    | "completed"
+    | "completed_with_failures"
+    | "no_printed_questions"
+    | "no_safe_print_layer"
+    | "source_processing"
+    | "source_failed";
+  assessment_version_id: number;
+  page_no: number;
+  source_page_id: number;
+  source_ai_run_id: number;
+  printed_question_count: number;
+  eligible_count: number;
+  enqueued_count: number;
+  matched_count: number;
+  candidate_created_count: number;
+  needs_review_count: number;
+  privacy_rejected_count: number;
+  low_confidence_skipped_count: number;
+  failed_count: number;
+  reused_existing_source: boolean;
 }
 
 export interface AnswerSheetPageProcessingResult {
@@ -1027,6 +1067,14 @@ export const examOrdinaryPaperConfirmPageStructure = (
   ai_run_id: number,
 ) => call<OrdinaryStructureConfirmationResult>(
   "exam_ordinary_paper_confirm_page_structure",
+  { pageId: page_id, aiRunId: ai_run_id },
+);
+
+export const examOrdinaryPaperSyncQuestions = (
+  page_id: number,
+  ai_run_id: number,
+) => call<OrdinaryQuestionSyncSummary>(
+  "exam_ordinary_paper_sync_questions",
   { pageId: page_id, aiRunId: ai_run_id },
 );
 

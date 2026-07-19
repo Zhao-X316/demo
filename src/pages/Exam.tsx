@@ -72,6 +72,7 @@ import {
   examFixedIntakeReplaceRejectedPage,
   examOrdinaryPaperAnalyzePage,
   examOrdinaryPaperConfirmPageStructure,
+  examOrdinaryPaperSyncQuestions,
   examObjectiveAccept,
   examObjectiveCorrect,
   examObjectivePublishAttempt,
@@ -436,6 +437,7 @@ export default function Exam() {
                 void load();
                 setTab(reviewTab);
               }}
+              onDone={done}
               onError={(message) => setError(message)}
             />
           )}
@@ -493,10 +495,12 @@ export default function Exam() {
 function FixedIntakeTab({
   options,
   onOpenReview,
+  onDone,
   onError,
 }: {
   options: FixedIntakeOption[];
   onOpenReview: (tab: "objective" | "subjective" | "dictation") => void;
+  onDone: (message: string) => void;
   onError: (message: string) => void;
 }) {
   const classOptions = useMemo(() => {
@@ -1058,11 +1062,26 @@ function FixedIntakeTab({
     setConfirmingOrdinaryPageIds(ready.map((run) => run.output!.page_id));
     const failures: string[] = [];
     let recognizedRegions = 0;
+    let libraryMatched = 0;
+    let libraryCandidates = 0;
+    let libraryNeedsReview = 0;
     for (const run of ready) {
       const pageId = run.output!.page_id;
       try {
         const confirmed = await examOrdinaryPaperConfirmPageStructure(pageId, run.ai_run_id);
         setOrdinaryConfirmations((current) => ({ ...current, [pageId]: confirmed }));
+        try {
+          const synced = await examOrdinaryPaperSyncQuestions(pageId, run.ai_run_id);
+          libraryMatched += synced.matched_count;
+          libraryCandidates += synced.candidate_created_count;
+          libraryNeedsReview += synced.needs_review_count
+            + synced.privacy_rejected_count
+            + synced.low_confidence_skipped_count
+            + synced.failed_count;
+        } catch (err) {
+          // 题库沉淀是可恢复旁路，绝不能阻断当前学生作业继续识别和批改。
+          failures.push(`第${run.output!.expected_page_no}页题库沉淀：${String(err)}`);
+        }
         for (const region of confirmed.regions) {
           try {
             await examObjectiveRecognizeRegion(
@@ -1082,6 +1101,10 @@ function FixedIntakeTab({
     }
     if (failures.length) {
       onError(`已完成 ${recognizedRegions} 个题区识别，另有 ${failures.length} 项需重试。${failures[0]}`);
+    } else if (libraryMatched + libraryCandidates + libraryNeedsReview > 0) {
+      onDone(
+        `普通卷已进入批改：识别 ${recognizedRegions} 个题区；题库复用 ${libraryMatched} 题，新增私有候选 ${libraryCandidates} 题，待整理 ${libraryNeedsReview} 题。`,
+      );
     }
   }
 

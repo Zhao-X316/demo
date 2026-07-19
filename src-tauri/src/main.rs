@@ -175,6 +175,7 @@ fn main() {
             exam_commands::exam_objective_recognize_region,
             exam_commands::exam_ordinary_paper_analyze_page,
             exam_commands::exam_ordinary_paper_confirm_page_structure,
+            exam_commands::exam_ordinary_paper_sync_questions,
             exam_commands::exam_answer_sheet_process_page,
             exam_commands::exam_answer_sheet_recognize_subjective_region,
             exam_commands::exam_answer_sheet_correct_subjective_transcription,

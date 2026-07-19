@@ -6,6 +6,7 @@ use suite_core::db::{open_in_memory, run_migrations, CORE_MIGRATIONS};
 use suite_core::domain::hashing;
 use suite_core::models::{ArchiveStatus, ArtifactKind, PrivacyClass};
 
+use super::ordinary_question_sync::sync_confirmed_printed_questions;
 use super::ordinary_structure::{
     confirm_in_transaction, crop_normalized_jpeg, ConfirmOrdinaryStructureInput,
     OrdinaryRegionArtifact,
@@ -14,7 +15,8 @@ use super::papers::{
     self, NewIngestBatch, NewIngestPage, NewPageMatchRevision, NewPageQualityRevision,
 };
 use crate::ordinary_paper_recognition::{
-    NormalizedRect, OrdinaryPaperAlignment, OrdinaryPaperMarkCell, OrdinaryPaperQuality,
+    NormalizedRect, OrdinaryPaperAlignment, OrdinaryPaperMarkCell, OrdinaryPaperPrintedOption,
+    OrdinaryPaperPrintedPrivacy, OrdinaryPaperPrintedQuestion, OrdinaryPaperQuality,
     OrdinaryPaperQualityResult, OrdinaryPaperRecognitionOutput, OrdinaryPaperRecognitionState,
     OrdinaryPaperRecognizerDescriptor, OrdinaryPaperRegionProposal, ORDINARY_PAPER_SCHEMA_VERSION,
 };
@@ -253,6 +255,32 @@ fn create_run(fixture: &Fixture) -> i64 {
             confidence: 0.99,
         }),
         regions: vec![candidate_region()],
+        printed_questions: vec![OrdinaryPaperPrintedQuestion {
+            assessment_item_id: 1,
+            stem: "洋务运动后期提出的口号是？".into(),
+            material_text: None,
+            options: vec![
+                OrdinaryPaperPrintedOption {
+                    label: "A".into(),
+                    content: "自强".into(),
+                    order_index: 0,
+                },
+                OrdinaryPaperPrintedOption {
+                    label: "B".into(),
+                    content: "求富".into(),
+                    order_index: 1,
+                },
+            ],
+            extraction_confidence: 0.99,
+            privacy: OrdinaryPaperPrintedPrivacy {
+                schema_version: 1,
+                sanitized: true,
+                student_identity_detected: false,
+                student_answer_detected: false,
+                teacher_mark_detected: false,
+                score_detected: false,
+            },
+        }],
         confidence: 0.99,
         issue_codes: vec![],
     };
@@ -391,6 +419,84 @@ fn teacher_confirmation_materializes_once_without_creating_scores() {
             )
             .unwrap(),
         1
+    );
+}
+
+#[test]
+fn confirmed_printed_question_enters_private_candidate_once_for_the_whole_assessment_page() {
+    let fixture = setup();
+    let run_id = create_run(&fixture);
+    let aligned_id = derivative(
+        &fixture,
+        ArtifactKind::Page,
+        '6',
+        fixture.source_artifact_id,
+        "ordinary_aligned_input",
+    );
+    let crop_id = derivative(
+        &fixture,
+        ArtifactKind::Crop,
+        '7',
+        aligned_id,
+        "ordinary_answer_region",
+    );
+    let tx = fixture.conn.unchecked_transaction().unwrap();
+    confirm_in_transaction(
+        &tx,
+        &ConfirmOrdinaryStructureInput {
+            page_id: fixture.page_id,
+            ai_run_id: run_id,
+            aligned_artifact_id: aligned_id,
+            region_artifacts: &[OrdinaryRegionArtifact {
+                assessment_item_id: 1,
+                region_index: 0,
+                crop_artifact_id: crop_id,
+            }],
+            confirmed_by: "teacher",
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    let first = sync_confirmed_printed_questions(&fixture.conn, fixture.page_id, run_id, "teacher")
+        .unwrap();
+    assert_eq!(first.state, "completed");
+    assert_eq!(first.eligible_count, 1);
+    assert_eq!(first.candidate_created_count, 1);
+    assert_eq!(first.matched_count, 0);
+    assert_eq!(first.failed_count, 0);
+    assert!(!first.reused_existing_source);
+
+    let repeated =
+        sync_confirmed_printed_questions(&fixture.conn, fixture.page_id, run_id, "teacher")
+            .unwrap();
+    assert!(repeated.reused_existing_source);
+    assert_eq!(repeated.candidate_created_count, 1);
+    let counts: (i64, i64, i64, i64) = fixture
+        .conn
+        .query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM exam_ordinary_question_source_syncs_v2),
+               (SELECT COUNT(*) FROM exam_question_ingest_jobs_v2),
+               (SELECT COUNT(*) FROM exam_question_candidates_v2),
+               (SELECT COUNT(*) FROM k1_question_versions WHERE quality_level='C0')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(counts, (1, 1, 1, 1));
+    let candidate: (String, Option<i64>, String) = fixture
+        .conn
+        .query_row(
+            "SELECT privacy_status,reusable_artifact_id,status
+             FROM exam_question_candidates_v2",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        candidate,
+        ("text_only".into(), None, "candidate_created".into())
     );
 }
 

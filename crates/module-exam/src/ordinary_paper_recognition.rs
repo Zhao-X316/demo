@@ -290,6 +290,112 @@ pub struct OrdinaryPaperRegionProposal {
     pub mark_cells: Vec<OrdinaryPaperMarkCell>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrdinaryPaperPrintedOption {
+    pub label: String,
+    pub content: String,
+    pub order_index: i64,
+}
+
+impl OrdinaryPaperPrintedOption {
+    fn validate(&self) -> CoreResult<()> {
+        required(&self.label, "印刷选项标签")?;
+        required(&self.content, "印刷选项内容")?;
+        if self.order_index < 0 {
+            return Err(CoreError::Invalid("普通试卷印刷选项顺序不能为负数".into()));
+        }
+        Ok(())
+    }
+}
+
+/// 视觉模型对“印刷题面已与学生书写层分离”的保守声明。
+///
+/// 该声明只用于决定是否允许把结构化文本送入老师私有候选区；学生卷裁图始终不得
+/// 作为可复用题目资产。任一敏感内容被检测到时，M2.5 只能保留脱敏失败事实。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrdinaryPaperPrintedPrivacy {
+    pub schema_version: i64,
+    pub sanitized: bool,
+    pub student_identity_detected: bool,
+    pub student_answer_detected: bool,
+    pub teacher_mark_detected: bool,
+    pub score_detected: bool,
+}
+
+impl OrdinaryPaperPrintedPrivacy {
+    fn validate(&self) -> CoreResult<()> {
+        if self.schema_version != 1 {
+            return Err(CoreError::Invalid(
+                "普通试卷印刷层隐私声明版本不受支持".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn passed(&self) -> bool {
+        self.schema_version == 1
+            && self.sanitized
+            && !self.student_identity_detected
+            && !self.student_answer_detected
+            && !self.teacher_mark_detected
+            && !self.score_detected
+    }
+}
+
+/// 与题区并列的印刷题面提取草稿。
+///
+/// 它不参与页面 ready 判定，也不驱动评分。缺失或低置信只影响题库沉淀，不能阻断
+/// 当前学生作业继续批改。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrdinaryPaperPrintedQuestion {
+    pub assessment_item_id: i64,
+    pub stem: String,
+    pub material_text: Option<String>,
+    pub options: Vec<OrdinaryPaperPrintedOption>,
+    pub extraction_confidence: f64,
+    pub privacy: OrdinaryPaperPrintedPrivacy,
+}
+
+impl OrdinaryPaperPrintedQuestion {
+    fn validate(&self, question_type: OrdinaryPaperQuestionType) -> CoreResult<()> {
+        if self.assessment_item_id <= 0 {
+            return Err(CoreError::Invalid(
+                "普通试卷印刷题面 assessment item id 必须为正数".into(),
+            ));
+        }
+        required(&self.stem, "印刷题干")?;
+        unit(self.extraction_confidence, "印刷题面提取置信度")?;
+        self.privacy.validate()?;
+        let mut labels = BTreeSet::new();
+        let mut orders = BTreeSet::new();
+        for option in &self.options {
+            option.validate()?;
+            if !labels.insert(option.label.trim().to_ascii_uppercase())
+                || !orders.insert(option.order_index)
+            {
+                return Err(CoreError::Invalid(
+                    "普通试卷印刷题面选项标签和顺序不能重复".into(),
+                ));
+            }
+        }
+        if matches!(
+            question_type,
+            OrdinaryPaperQuestionType::Single | OrdinaryPaperQuestionType::Multiple
+        ) && self.options.len() < 2
+        {
+            return Err(CoreError::Invalid(
+                "普通试卷选择题印刷题面至少需要两个选项".into(),
+            ));
+        }
+        if question_type == OrdinaryPaperQuestionType::TrueFalse && !self.options.is_empty() {
+            return Err(CoreError::Invalid(
+                "普通试卷判断题印刷题面不应伪造选择题选项".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl OrdinaryPaperRegionProposal {
     fn validate(&self, question_type: OrdinaryPaperQuestionType) -> CoreResult<()> {
         if self.assessment_item_id <= 0 || self.region_index < 0 {
@@ -345,6 +451,8 @@ pub struct OrdinaryPaperRecognitionOutput {
     pub quality: OrdinaryPaperQuality,
     pub alignment: Option<OrdinaryPaperAlignment>,
     pub regions: Vec<OrdinaryPaperRegionProposal>,
+    #[serde(default)]
+    pub printed_questions: Vec<OrdinaryPaperPrintedQuestion>,
     pub confidence: f64,
     pub issue_codes: Vec<String>,
 }
@@ -399,6 +507,20 @@ impl OrdinaryPaperRecognitionOutput {
             }
             covered_items.insert(region.assessment_item_id);
             region.validate(*question_type)?;
+        }
+        let mut printed_items = BTreeSet::new();
+        for question in &self.printed_questions {
+            let question_type = item_types
+                .get(&question.assessment_item_id)
+                .ok_or_else(|| {
+                    CoreError::Invalid("普通试卷印刷题面包含当前作业页之外的题目".into())
+                })?;
+            if !printed_items.insert(question.assessment_item_id) {
+                return Err(CoreError::Invalid(
+                    "普通试卷同一 assessment item 只能有一份印刷题面草稿".into(),
+                ));
+            }
+            question.validate(*question_type)?;
         }
 
         match self.state {
@@ -632,6 +754,7 @@ mod tests {
                     ],
                 },
             ],
+            printed_questions: vec![],
             confidence: 0.98,
             issue_codes: vec![],
         }
@@ -697,6 +820,45 @@ mod tests {
         let request = build_request(&items);
         let mut output = ready_output(&request);
         output.regions[0].mark_cells.clear();
+        assert!(output.validate_against(&request).is_err());
+    }
+
+    #[test]
+    fn printed_question_is_optional_but_cannot_escape_current_page_or_smuggle_privacy() {
+        let items = items();
+        let request = build_request(&items);
+        let mut output = ready_output(&request);
+        output.printed_questions.push(OrdinaryPaperPrintedQuestion {
+            assessment_item_id: 11,
+            stem: "洋务运动后期提出的口号是？".into(),
+            material_text: None,
+            options: vec![
+                OrdinaryPaperPrintedOption {
+                    label: "A".into(),
+                    content: "自强".into(),
+                    order_index: 0,
+                },
+                OrdinaryPaperPrintedOption {
+                    label: "B".into(),
+                    content: "求富".into(),
+                    order_index: 1,
+                },
+            ],
+            extraction_confidence: 0.99,
+            privacy: OrdinaryPaperPrintedPrivacy {
+                schema_version: 1,
+                sanitized: false,
+                student_identity_detected: false,
+                student_answer_detected: true,
+                teacher_mark_detected: false,
+                score_detected: false,
+            },
+        });
+        // 隐私未通过不应伪装成结构错误；后续 M2.5 只允许记录拒绝事实。
+        output.validate_against(&request).unwrap();
+        assert!(!output.printed_questions[0].privacy.passed());
+
+        output.printed_questions[0].assessment_item_id = 999;
         assert!(output.validate_against(&request).is_err());
     }
 

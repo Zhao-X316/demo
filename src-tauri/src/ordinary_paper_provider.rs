@@ -7,10 +7,11 @@ use std::time::Duration;
 
 use base64::Engine;
 use module_exam::ordinary_paper_recognition::{
-    OrdinaryPaperAlignment, OrdinaryPaperQuality, OrdinaryPaperRecognitionErrorCode,
-    OrdinaryPaperRecognitionFailure, OrdinaryPaperRecognitionOutput,
-    OrdinaryPaperRecognitionRequest, OrdinaryPaperRecognitionState, OrdinaryPaperRecognizer,
-    OrdinaryPaperRecognizerDescriptor, OrdinaryPaperRegionProposal, ORDINARY_PAPER_SCHEMA_VERSION,
+    OrdinaryPaperAlignment, OrdinaryPaperPrintedQuestion, OrdinaryPaperQuality,
+    OrdinaryPaperRecognitionErrorCode, OrdinaryPaperRecognitionFailure,
+    OrdinaryPaperRecognitionOutput, OrdinaryPaperRecognitionRequest, OrdinaryPaperRecognitionState,
+    OrdinaryPaperRecognizer, OrdinaryPaperRecognizerDescriptor, OrdinaryPaperRegionProposal,
+    ORDINARY_PAPER_SCHEMA_VERSION,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -19,8 +20,8 @@ use crate::secrets::VolcanoCreds;
 use crate::vlm::{ARK_URL, DEFAULT_MODEL};
 
 const MODEL_VERSION: &str = "ark-chat-completions-v3";
-const CONFIG_VERSION: &str = "ordinary-paper-page-v2";
-const RULE_VERSION: &str = "ordinary-paper-vision-json-v2";
+const CONFIG_VERSION: &str = "ordinary-paper-page-v3";
+const RULE_VERSION: &str = "ordinary-paper-vision-json-v3";
 
 pub struct ArkOrdinaryPaperRecognizer {
     api_key: String,
@@ -192,6 +193,7 @@ impl OrdinaryPaperRecognizer for ArkOrdinaryPaperRecognizer {
             quality: parsed.quality,
             alignment: parsed.alignment,
             regions: parsed.regions,
+            printed_questions: parsed.printed_questions,
             confidence: parsed.confidence,
             issue_codes: parsed.issue_codes,
         };
@@ -212,6 +214,8 @@ struct ArkOrdinaryPaperPayload {
     quality: OrdinaryPaperQuality,
     alignment: Option<OrdinaryPaperAlignment>,
     regions: Vec<OrdinaryPaperRegionProposal>,
+    #[serde(default)]
+    printed_questions: Vec<OrdinaryPaperPrintedQuestion>,
     confidence: f64,
     #[serde(default)]
     issue_codes: Vec<String>,
@@ -227,9 +231,11 @@ fn build_prompt(request: &OrdinaryPaperRecognitionRequest<'_>) -> String {
          quality: {{blur_score,glare_score,brightness_score,perspective_score,rotation_degrees,crop_complete,result,issue_codes}}，result 为 pass|needs_review|reject；\n\
          alignment: null 或 {{template_version,matrix:[9个数],confidence}}；\n\
          regions: [{{assessment_item_id,region_index,bbox:{{x,y,width,height}},mapping_confidence,mark_cells:[{{label,rect:{{x,y,width,height}}}}]}}]；\n\
+         printed_questions: [{{assessment_item_id,stem,material_text,options:[{{label,content,order_index}}],extraction_confidence,privacy:{{schema_version:1,sanitized,student_identity_detected,student_answer_detected,teacher_mark_detected,score_detected}}}}]；\n\
          confidence: 0到1；issue_codes: 字符串数组。bbox 按整页 0~1 归一化，mark_cells.rect 按各自 bbox 裁图 0~1 归一化；\n\
          不得新增清单外题目；无法可靠定位时必须 needs_review/blocked 并给问题码；\n\
          每个客观题必须给出至少两个答题格，判断题必须且只能给 TRUE/FALSE；\n\
+         printed_questions 只抄录印刷题干、材料和印刷选项，禁止混入姓名、学号、学生手写答案、老师批注或得分；无法可靠分离时保留检测标记且 sanitized=false，题面提取失败可返回空数组，不得因此伪造题目；\n\
          只有质量通过、配准、全部题区和答题格齐全且各置信度不低于 0.95 时才能 ready。",
         request.expected_page_no,
         request.template_version.trim(),
@@ -341,6 +347,24 @@ mod tests {
                     {"label":"B","rect":{"x":0.35,"y":0.1,"width":0.2,"height":0.3}}
                 ]
             }],
+            "printed_questions": [{
+                "assessment_item_id": 11,
+                "stem": "洋务运动后期提出的口号是？",
+                "material_text": null,
+                "options": [
+                    {"label":"A","content":"自强","order_index":0},
+                    {"label":"B","content":"求富","order_index":1}
+                ],
+                "extraction_confidence": 0.99,
+                "privacy": {
+                    "schema_version": 1,
+                    "sanitized": true,
+                    "student_identity_detected": false,
+                    "student_answer_detected": false,
+                    "teacher_mark_detected": false,
+                    "score_detected": false
+                }
+            }],
             "confidence": 0.99,
             "issue_codes": []
         });
@@ -351,6 +375,8 @@ mod tests {
         assert_eq!(output.page_id, 7);
         assert_eq!(output.input_artifact_id, 9);
         assert_eq!(output.regions.len(), 1);
+        assert_eq!(output.printed_questions.len(), 1);
+        assert!(output.printed_questions[0].privacy.passed());
         assert_eq!(output.descriptor.provider, "volcengine_ark");
     }
 

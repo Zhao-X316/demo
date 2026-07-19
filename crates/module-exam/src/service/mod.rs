@@ -12,6 +12,7 @@ pub mod objective;
 pub mod ordered_activation;
 pub mod ordered_intake;
 pub mod ordered_retake;
+pub mod ordinary_question_sync;
 pub mod ordinary_structure;
 pub mod page_cycle;
 pub mod papers;

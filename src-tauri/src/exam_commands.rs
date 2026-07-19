@@ -38,6 +38,7 @@ use module_exam::service::grading::{self, AnswerDetail};
 use module_exam::service::objective::{
     self, ObjectiveObservationResult, ObjectiveReviewBatch, ObjectiveWorkbench, StrictBatchReview,
 };
+use module_exam::service::ordinary_question_sync::{self, OrdinaryQuestionSyncSummary};
 use module_exam::service::ordinary_structure::OrdinaryStructureConfirmationResult;
 use module_exam::service::subjective::{
     AcceptedAnswerPromotionResult, ShortAnswerGradeAnalysis, SubjectiveComponentGradeInput,
@@ -688,6 +689,26 @@ pub fn exam_ordinary_paper_confirm_page_structure(
     ordinary_paper_materialization::confirm_page_structure(
         &conn,
         &state.data_dir,
+        page_id,
+        ai_run_id,
+        LOCAL_TEACHER_ACTOR,
+    )
+    .map_err(e)
+}
+
+/// 页面结构确认后自动把安全的印刷题面文本送入 M2.5 私有候选管线。
+///
+/// 该命令与批改识别分开：题库同步失败只返回错误，不撤销已经确认的页面结构，
+/// 也不阻断后续客观题识别和老师终审。
+#[tauri::command]
+pub fn exam_ordinary_paper_sync_questions(
+    state: State<'_, AppState>,
+    page_id: i64,
+    ai_run_id: i64,
+) -> R<OrdinaryQuestionSyncSummary> {
+    let conn = lock(&state)?;
+    ordinary_question_sync::sync_confirmed_printed_questions(
+        &conn,
         page_id,
         ai_run_id,
         LOCAL_TEACHER_ACTOR,

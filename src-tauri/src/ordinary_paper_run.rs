@@ -432,6 +432,7 @@ mod tests {
                     },
                 ],
             }],
+            printed_questions: vec![],
             confidence: 0.99,
             issue_codes: vec![],
         }
