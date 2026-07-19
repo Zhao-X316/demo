@@ -14,6 +14,9 @@ use module_exam::service::question_candidate_review::{
 use module_knowledge::db::answer_sources::{
     self, AnswerMatchReview, AnswerSourceInboxItem, AnswerTargetSet, ConfirmAnswerMatchRequest,
 };
+use module_knowledge::db::link_reviews::{
+    self, ConfirmLinkReviewRequest, LinkReviewCatalog, LinkReviewInboxItem, LinkReviewResult,
+};
 use module_knowledge::db::search::{
     self, DuplicateReviewDecision, QuestionSearchRequest, QuestionSearchResponse,
     ReviewDuplicateRequest,
@@ -22,6 +25,7 @@ use module_knowledge::db::source_documents::{
     self, CorrectedSourceQuestion, DiscardSourceDraftRequest, ReviewSourceDraftRequest,
     SourceDraftReview, SourceInboxItem,
 };
+use module_knowledge::link_suggestion::{LinkSuggester, LinkSuggestionInput};
 use module_knowledge::source_import::{SourceOptionDraft, SourceQuestionRecognizer};
 use serde::Deserialize;
 use serde_json::Value;
@@ -31,6 +35,8 @@ use crate::answer_source_provider::ArkAnswerSourceRecognizer;
 use crate::knowledge_answer_run::{
     self, BeginKnowledgeAnswerRun, ImportKnowledgeAnswerRequest, KnowledgeAnswerAnalysisResult,
 };
+use crate::knowledge_link_provider::ArkKnowledgeLinkSuggester;
+use crate::knowledge_link_run::{self, BeginLinkRun, LinkSuggestionAnalysisResult};
 use crate::knowledge_source_provider::ArkSourceQuestionRecognizer;
 use crate::knowledge_source_run::{
     self, BeginSourceRun, ImportSourceRequest, SourceImportAnalysisResult,
@@ -123,6 +129,14 @@ pub struct ConfirmKnowledgeAnswerInput {
     expected_content_hash: String,
     corrected_answer_json: Value,
     note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestKnowledgeLinksInput {
+    question_version_public_id: String,
+    knowledge_map_public_id: String,
+    request_key: String,
 }
 
 impl From<BlueprintPreviewInput> for BlueprintPreviewRequest {
@@ -497,4 +511,105 @@ pub fn k1_answer_confirm(
         },
     )
     .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn k1_link_review_catalog(state: State<'_, AppState>) -> Result<LinkReviewCatalog, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    link_reviews::list_catalog(&connection).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn k1_link_review_inbox(
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+) -> Result<Vec<LinkReviewInboxItem>, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    link_reviews::list_review_inbox(&connection, LOCAL_TEACHER_ACTOR_ID, limit.unwrap_or(100))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn k1_link_review_editor(
+    state: State<'_, AppState>,
+    question_version_public_id: String,
+    knowledge_map_public_id: String,
+) -> Result<LinkSuggestionInput, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    link_reviews::build_suggestion_input(
+        &connection,
+        LOCAL_TEACHER_ACTOR_ID,
+        &question_version_public_id,
+        &knowledge_map_public_id,
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// 为当前 L2 题目生成知识/能力链接草稿。
+///
+/// 输入只包含题目、已确认答案槽位/评分点和已确认知识目录；模型调用不持 SQLite 锁，
+/// 成功后也只创建草稿，老师确认前不晋级、不进入图谱。
+#[tauri::command]
+pub async fn k1_link_suggest(
+    state: State<'_, AppState>,
+    input: SuggestKnowledgeLinksInput,
+) -> Result<LinkSuggestionAnalysisResult, String> {
+    let suggestion_input = {
+        let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+        link_reviews::build_suggestion_input(
+            &connection,
+            LOCAL_TEACHER_ACTOR_ID,
+            &input.question_version_public_id,
+            &input.knowledge_map_public_id,
+        )
+        .map_err(|error| error.to_string())?
+    };
+    let creds = secrets::load(&state.data_dir).map_err(|error| error.to_string())?;
+    let suggester = ArkKnowledgeLinkSuggester::from_creds(&creds);
+    let begin = {
+        let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+        knowledge_link_run::begin(
+            &connection,
+            &suggestion_input,
+            &suggester,
+            &input.request_key,
+        )
+        .map_err(|error| error.to_string())?
+    };
+    let result = match begin {
+        BeginLinkRun::Completed(result) => *result,
+        BeginLinkRun::Execute { ai_run_id } => {
+            let worker_input = std::sync::Arc::new(suggestion_input.clone());
+            let thread_input = std::sync::Arc::clone(&worker_input);
+            let result =
+                tauri::async_runtime::spawn_blocking(move || suggester.suggest(&thread_input))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(suite_core::error::CoreError::Invalid(
+                            "知识链接建议任务意外中断，可稍后重试或手工关联".into(),
+                        ))
+                    });
+            let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+            knowledge_link_run::finish(&connection, &worker_input, ai_run_id, result)
+                .map_err(|error| error.to_string())?
+        }
+    };
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    knowledge_link_run::materialize(
+        &mut connection,
+        LOCAL_TEACHER_ACTOR_ID,
+        &suggestion_input,
+        result,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn k1_link_confirm(
+    state: State<'_, AppState>,
+    input: ConfirmLinkReviewRequest,
+) -> Result<LinkReviewResult, String> {
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    link_reviews::confirm_links(&mut connection, LOCAL_TEACHER_ACTOR_ID, &input)
+        .map_err(|error| error.to_string())
 }

@@ -19,6 +19,8 @@ mod exam_commands;
 mod exam_intake;
 mod knowledge_answer_run;
 mod knowledge_commands;
+mod knowledge_link_provider;
+mod knowledge_link_run;
 mod knowledge_source_provider;
 mod knowledge_source_run;
 mod learning_commands;
@@ -153,6 +155,11 @@ fn main() {
             knowledge_commands::k1_answer_import_analyze,
             knowledge_commands::k1_answer_inbox,
             knowledge_commands::k1_answer_confirm,
+            knowledge_commands::k1_link_review_catalog,
+            knowledge_commands::k1_link_review_inbox,
+            knowledge_commands::k1_link_review_editor,
+            knowledge_commands::k1_link_suggest,
+            knowledge_commands::k1_link_confirm,
             exam_commands::kp_list,
             exam_commands::kp_create,
             exam_commands::kp_rename,

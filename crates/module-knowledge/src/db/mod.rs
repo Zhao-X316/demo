@@ -2,6 +2,7 @@
 
 pub mod answer_sources;
 pub mod content;
+pub mod link_reviews;
 pub mod mappings;
 pub mod search;
 pub mod source_documents;

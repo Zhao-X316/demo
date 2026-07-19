@@ -5,6 +5,7 @@
 //! 显式映射兼容，不能直接改名或猜测迁移。
 
 pub mod db;
+pub mod link_suggestion;
 pub mod source_import;
 
 use suite_core::models::ModuleKey;
@@ -30,6 +31,10 @@ static MIGRATIONS: &[Migration] = &[
     Migration {
         id: "k1_0005",
         sql: include_str!("../migrations/0005_answer_sources.sql"),
+    },
+    Migration {
+        id: "k1_0006",
+        sql: include_str!("../migrations/0006_link_reviews.sql"),
     },
 ];
 
