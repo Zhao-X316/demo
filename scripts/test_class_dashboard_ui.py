@@ -1,8 +1,8 @@
-"""M6.1 班级运行仪表盘、掌握快照、脱敏导出、课堂事件与教学行动浏览器冒烟测试。
+"""M6.1/M6-4 班级仪表盘、掌握快照、共性教学输入与教学行动浏览器冒烟测试。
 
 通过浏览器端 Tauri invoke mock 验证运行事实、掌握预览/确认、热力图、
-临时学习状态、同口径趋势、脱敏班级摘要、课堂事件 revision、老师确认的定向练习、
-背诵映射阻断、班级切换和跨模块跳转；
+临时学习状态、同口径趋势、脱敏班级摘要、老师确认的共性课堂输入、课堂事件 revision、
+老师确认的定向练习、背诵映射阻断、班级切换和跨模块跳转；
 后端 SQL 口径由 Rust 单元测试覆盖。
 """
 
@@ -19,6 +19,19 @@ window.__makeClassProfile = (revision = 1) => ({
     textbook: "中国历史八上", enabled_student_count: 4
   },
   range_start: "2026-06-18", range_end: "2026-07-17",
+  scope_selection: {
+    selector_kind: "knowledge_map",
+    selector_public_id: "knowledge-map-1",
+    selector_key: "knowledge_map:knowledge-map-1",
+    title: "中国历史八上",
+    path: "中国历史八上 · 全册",
+    node_type: "knowledge_map",
+    knowledge_map_public_id: "knowledge-map-1",
+    knowledge_map_version: "knowledge-map-1:r1",
+    textbook_edition_public_id: "edition-1",
+    textbook_title: "中国历史八上",
+    knowledge_node_count: 1
+  },
   scope_kind: "latest_exact_range_student_snapshots",
   evidence_cutoff_at: "2026-07-16T11:50:00Z",
   policy: {
@@ -189,6 +202,42 @@ window.__teachingEvents = [{
   state: "active", supersedes_public_id: null,
   created_by: "local_teacher", created_at: "2026-07-15T10:00:00Z"
 }];
+window.__classTeachingInputs = [];
+window.__makeClassTeachingInputPreview = () => ({
+  schema_version: 1,
+  rule_version: "m6-class-common-teaching-input-teacher-confirmed-v1",
+  calculated_at: "2026-07-17T12:35:00Z",
+  class_id: 1,
+  class_name: "八年级一班",
+  snapshot_public_id: "class-profile-1",
+  snapshot_revision: 1,
+  snapshot_payload_sha256: "b".repeat(64),
+  range_start: "2026-06-18",
+  range_end: "2026-07-17",
+  suggested_title: "八年级一班阶段复习重点",
+  suggested_teaching_note:
+    "本次优先处理：\n1. 知识点：洋务运动失败原因（需要支持 2/3 人；合格样本 3/4 人）",
+  suggested_estimated_minutes: 15,
+  items: [{
+    node_metric_public_id: "class-node-1",
+    target_type: "knowledge_node",
+    target_public_id: "knowledge-1",
+    target_title: "洋务运动失败原因",
+    confidence_level: "medium",
+    total_student_count: 4,
+    eligible_student_count: 3,
+    needs_support_count: 2,
+    needs_support_ratio: 2 / 3,
+    explanation: "合格样本 3/4；其中需要支持 2/3。"
+  }],
+  can_confirm: !window.__STALE_PROFILE__,
+  blockers: window.__STALE_PROFILE__ ? ["来源班级快照已有新输入，请先重新生成。"] : [],
+  warnings: ["本次仍有 1 名学生因个人快照缺失未进入有效样本。"],
+  denominator_note:
+    "未评估、证据不足、个人快照缺失、范围不符或已过期都保留在分母说明中，不算作薄弱。",
+  boundary_note:
+    "确认后只保存老师本次课堂输入，不会自动建立作业、修改成绩、学习证据、学生标签或背诵排程。"
+});
 window.__classActionDrafts = [];
 window.__makeClassActionPreview = (actionKind) => ({
   schema_version: 1,
@@ -401,6 +450,19 @@ window.__TAURI_INTERNALS__ = {
           textbook: "中国历史八上", enabled_student_count: 4
         },
         range_start: args.input.rangeStart, range_end: args.input.rangeEnd,
+        scope_selection: {
+          selector_kind: "knowledge_map",
+          selector_public_id: "knowledge-map-1",
+          selector_key: "knowledge_map:knowledge-map-1",
+          title: "中国历史八上",
+          path: "中国历史八上 · 全册",
+          node_type: "knowledge_map",
+          knowledge_map_public_id: "knowledge-map-1",
+          knowledge_map_version: "knowledge-map-1:r1",
+          textbook_edition_public_id: "edition-1",
+          textbook_title: "中国历史八上",
+          knowledge_node_count: 1
+        },
         policy: {
           public_id: "class-policy-1", revision: 1,
           min_eligible_students: 3, min_eligible_ratio: 0.5,
@@ -419,6 +481,38 @@ window.__TAURI_INTERNALS__ = {
     }
     if (cmd === "generate_class_profile") {
       return window.__makeClassProfile(2);
+    }
+    if (cmd === "preview_class_teaching_input") {
+      return window.__makeClassTeachingInputPreview();
+    }
+    if (cmd === "list_class_teaching_inputs") {
+      return Number(args.classId) === 1 ? window.__classTeachingInputs : [];
+    }
+    if (cmd === "confirm_class_teaching_input") {
+      const input = args.input;
+      const preview = window.__makeClassTeachingInputPreview();
+      const draft = {
+        public_id: "class-teaching-input-1",
+        class_id: 1,
+        class_name: "八年级一班",
+        snapshot_public_id: preview.snapshot_public_id,
+        snapshot_revision: preview.snapshot_revision,
+        title: input.title,
+        teaching_note: input.teachingNote,
+        estimated_minutes: input.estimatedMinutes,
+        source_snapshot_payload_sha256: preview.snapshot_payload_sha256,
+        schema_version: 1,
+        rule_version: preview.rule_version,
+        payload_sha256: "9".repeat(64),
+        state: "teacher_confirmed",
+        confirmed_by: "local_teacher",
+        confirmed_at: "2026-07-17T12:36:00Z",
+        items: preview.items.filter(
+          (item) => input.selectedNodeMetricPublicIds.includes(item.node_metric_public_id)
+        )
+      };
+      window.__classTeachingInputs = [draft];
+      return draft;
     }
     if (cmd === "list_class_teaching_events") {
       return Number(args.input.classId) === 1 ? window.__teachingEvents : [];
@@ -594,12 +688,36 @@ def test_dashboard(base_url: str) -> None:
         assert export_calls[1]["args"]["exportPublicId"] == "class-profile-export-1"
         assert export_calls[1]["args"]["outputPath"].endswith(".csv")
 
+        page.get_by_role("button", name="生成本次教学重点").click()
+        expect(page.get_by_text("本次教学重点", exact=True)).to_be_visible()
+        expect(page.get_by_text("未评估、证据不足", exact=False)).to_be_visible()
+        expect(page.locator(".class-teaching-input-items input:checked")).to_have_count(1)
+        page.get_by_role("button", name="确认保存教学重点").click()
+        expect(page.locator(".class-action-success")).to_contain_text(
+            "仅作为老师教学输入，未布置任务"
+        )
+        teaching_input_calls = page.evaluate(
+            """window.__dashboardCalls
+              .filter((item) => item.cmd === "confirm_class_teaching_input")"""
+        )
+        assert len(teaching_input_calls) == 1
+        teaching_input = teaching_input_calls[0]["args"]["input"]
+        assert teaching_input["snapshotPublicId"] == "class-profile-1"
+        assert teaching_input["expectedSnapshotPayloadSha256"] == "b" * 64
+        assert teaching_input["selectedNodeMetricPublicIds"] == ["class-node-1"]
+        assert not any(
+            item["cmd"] == "materialize_class_action"
+            for item in page.evaluate("window.__dashboardCalls")
+        )
+
         page.locator(".class-profile-heatmap thead button").click()
         expect(page.locator(".class-profile-detail")).to_contain_text("合格样本")
         expect(page.get_by_text("下一步教学行动", exact=True)).to_be_visible()
         expect(page.locator(".class-action-check-list input:checked")).to_have_count(3)
         page.get_by_role("button", name="确认并建立练习").click()
-        expect(page.locator(".class-action-success")).to_contain_text("已冻结 2 名学生、1 道题")
+        expect(
+            page.locator(".class-action-success").filter(has_text="已冻结 2 名学生")
+        ).to_contain_text("已冻结 2 名学生、1 道题")
         expect(page.get_by_role("button", name="去作业台")).to_be_visible()
         action_calls = page.evaluate(
             """window.__dashboardCalls

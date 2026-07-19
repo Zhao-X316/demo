@@ -176,6 +176,25 @@ button.dashboard-action { display: grid; grid-template-columns: 34px minmax(0, 1
 .class-profile-common, .class-profile-inputs { padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg-sub); }
 .class-profile-common-item { display: grid; grid-template-columns: minmax(160px, 1fr) auto auto; gap: 12px; align-items: center; width: 100%; margin-top: 7px; padding: 10px; text-align: left; }
 .class-profile-common-item span { color: var(--muted); font-size: 11px; }
+.class-teaching-input-builder { margin: 12px 0; padding: 14px; border: 1px solid var(--brand-line); border-radius: 10px; background: linear-gradient(145deg, var(--brand-weak), var(--panel)); }
+.class-teaching-input-fields { display: grid; grid-template-columns: minmax(260px, 1.5fr) minmax(130px, .5fr); gap: 8px; margin: 10px 0; }
+.class-teaching-input-fields label { display: flex; flex-direction: column; gap: 4px; }
+.class-teaching-input-fields label.wide { grid-column: 1 / -1; }
+.class-teaching-input-fields label > span { color: var(--muted); font-size: 10.5px; }
+.class-teaching-input-fields input, .class-teaching-input-fields textarea { width: 100%; }
+.class-teaching-input-fields textarea { min-height: 112px; resize: vertical; line-height: 1.55; }
+.class-teaching-input-items { margin: 10px 0; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.class-teaching-input-items > label { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: center; margin-top: 6px; padding: 8px; border-radius: 7px; background: var(--bg-sub); cursor: pointer; }
+.class-teaching-input-items > label input { margin: 0; }
+.class-teaching-input-items b, .class-teaching-input-items small { display: block; }
+.class-teaching-input-items b { font-size: 11.5px; }
+.class-teaching-input-items small { margin-top: 3px; color: var(--muted); font-size: 10px; }
+.class-teaching-input-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+.class-teaching-input-history { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.class-teaching-input-history > div:not(.dashboard-panel-head) { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; margin-top: 6px; padding: 8px; border-radius: 7px; background: var(--panel); }
+.class-teaching-input-history b, .class-teaching-input-history small { display: block; }
+.class-teaching-input-history b { font-size: 11px; }
+.class-teaching-input-history small { margin-top: 3px; color: var(--muted); font-size: 9.5px; }
 .class-profile-input-list { display: flex; flex-direction: column; gap: 6px; max-height: 240px; overflow: auto; }
 .class-profile-input-list > div { display: grid; grid-template-columns: minmax(110px, auto) auto minmax(0, 1fr); gap: 8px; align-items: center; padding: 7px 8px; border-radius: 7px; background: var(--panel); }
 .class-profile-input-list b { font-size: 11.5px; }
@@ -853,6 +872,7 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
   .class-profile-preview-counts, .class-profile-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .class-profile-detail-students { grid-template-columns: 1fr; }
   .class-teaching-event-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .class-teaching-input-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .class-action-kind-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .class-action-selection { grid-template-columns: 1fr; }
   .exam-grid, .exam-grid.wide-left, .intake-layout { grid-template-columns: 1fr; }
@@ -901,6 +921,11 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
   .class-profile-status-list small { grid-column: 1 / -1; }
   .class-profile-toolbar { align-items: flex-start; flex-direction: column; }
   .class-teaching-event-fields { grid-template-columns: 1fr; }
+  .class-teaching-input-fields { grid-template-columns: 1fr; }
+  .class-teaching-input-fields label.wide { grid-column: auto; }
+  .class-teaching-input-items > label { grid-template-columns: auto minmax(0, 1fr); }
+  .class-teaching-input-items > label > .tag { grid-column: 2; justify-self: start; }
+  .class-teaching-input-actions { align-items: stretch; flex-direction: column; }
   .class-teaching-event-fields label.wide { grid-column: auto; }
   .class-teaching-event-list > div { grid-template-columns: auto minmax(0, 1fr); }
   .class-teaching-event-row-actions { grid-column: 1 / -1; justify-content: flex-end; }

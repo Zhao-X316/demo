@@ -15,6 +15,10 @@ use module_profile::class_profile::{
     self as class_profile_service, ClassProfilePreview, ClassProfileScope, ClassProfileSnapshot,
     GenerateScopedClassProfileInput,
 };
+use module_profile::class_teaching_inputs::{
+    self, ClassTeachingInputDraft, ClassTeachingInputPreview, ConfirmClassTeachingInput,
+    PreviewClassTeachingInput,
+};
 use module_profile::profile::{
     self, GenerateScopedStudentProfileInput, ProfileScopeOption, ProfileScopeSelectionInput,
     StudentProfilePreview, StudentProfileScope, StudentProfileSnapshot,
@@ -178,6 +182,24 @@ pub struct CreateClassProfileExportRequest {
     request_key: String,
     snapshot_public_id: String,
     expected_snapshot_payload_sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewClassTeachingInputRequest {
+    snapshot_public_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmClassTeachingInputRequest {
+    request_key: String,
+    snapshot_public_id: String,
+    expected_snapshot_payload_sha256: String,
+    title: String,
+    teaching_note: String,
+    estimated_minutes: i64,
+    selected_node_metric_public_ids: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -634,6 +656,58 @@ pub fn write_class_profile_export_snapshot(
     let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     class_exports::write_export_snapshot_csv(&connection, &export_public_id, &output_path)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn preview_class_teaching_input(
+    state: State<'_, AppState>,
+    input: PreviewClassTeachingInputRequest,
+) -> Result<ClassTeachingInputPreview, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    class_teaching_inputs::preview_class_teaching_input(
+        &connection,
+        &PreviewClassTeachingInput {
+            snapshot_public_id: &input.snapshot_public_id,
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn confirm_class_teaching_input(
+    state: State<'_, AppState>,
+    input: ConfirmClassTeachingInputRequest,
+) -> Result<ClassTeachingInputDraft, String> {
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    class_teaching_inputs::confirm_class_teaching_input(
+        &mut connection,
+        &ConfirmClassTeachingInput {
+            request_key: &input.request_key,
+            snapshot_public_id: &input.snapshot_public_id,
+            expected_snapshot_payload_sha256: &input.expected_snapshot_payload_sha256,
+            title: &input.title,
+            teaching_note: &input.teaching_note,
+            estimated_minutes: input.estimated_minutes,
+            selected_node_metric_public_ids: &input.selected_node_metric_public_ids,
+            confirmed_by: LOCAL_TEACHER_ACTOR_ID,
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn list_class_teaching_inputs(
+    state: State<'_, AppState>,
+    class_id: i64,
+    limit: Option<i64>,
+) -> Result<Vec<ClassTeachingInputDraft>, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    class_teaching_inputs::list_class_teaching_inputs(
+        &connection,
+        class_id,
+        limit.unwrap_or(20),
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

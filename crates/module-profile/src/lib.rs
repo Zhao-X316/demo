@@ -7,6 +7,7 @@
 pub mod action_drafts;
 pub mod class_exports;
 pub mod class_profile;
+pub mod class_teaching_inputs;
 pub mod profile;
 pub mod student_reports;
 pub mod teacher_assessments;
@@ -47,6 +48,10 @@ static MIGRATIONS: &[Migration] = &[
     Migration {
         id: "profile_0008",
         sql: include_str!("../migrations/0008_student_profile_reports.sql"),
+    },
+    Migration {
+        id: "profile_0009",
+        sql: include_str!("../migrations/0009_class_teaching_inputs.sql"),
     },
 ];
 
