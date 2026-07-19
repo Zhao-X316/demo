@@ -445,6 +445,31 @@ button.dashboard-action { display: grid; grid-template-columns: 34px minmax(0, 1
 .profile-recitation-history > details { margin-top: 8px; }
 .profile-recitation-history > details > summary { color: var(--text-2); cursor: pointer; font-size: 10.5px; }
 .profile-recitation-history > details[open] > summary { margin-bottom: 7px; }
+.profile-wrongbook-history, .profile-trend-panel { padding: 14px; border: 1px solid #E8D7B7; border-radius: 10px; background: #FFFCF6; }
+.profile-wrongbook-stats, .profile-trend-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.profile-wrongbook-stats > div, .profile-trend-grid > div { display: flex; flex-direction: column; gap: 3px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); }
+.profile-wrongbook-stats span, .profile-trend-grid span { color: var(--muted); font-size: 10px; }
+.profile-wrongbook-stats b, .profile-trend-grid b { font-size: 15px; }
+.profile-wrongbook-history > details, .profile-trend-panel > details { margin-top: 9px; }
+.profile-wrongbook-history > details > summary, .profile-trend-panel > details > summary { color: var(--text-2); cursor: pointer; font-size: 10.5px; }
+.profile-wrongbook-list, .profile-trend-changes { display: flex; flex-direction: column; gap: 6px; margin-top: 7px; }
+.profile-wrongbook-list > div { display: grid; grid-template-columns: minmax(180px, 1fr) repeat(3, auto); gap: 8px; align-items: center; padding: 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--text-2); font-size: 9.5px; }
+.profile-wrongbook-list > div > div { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.profile-wrongbook-list > div > div b { overflow: hidden; font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+.profile-wrongbook-list > div > div span { color: var(--muted); }
+.profile-inline-note { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 9px; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.profile-inline-note button { flex: none; min-height: 27px; padding: 4px 8px; font-size: 10px; }
+.profile-trend-panel { border-color: #D7E3EC; background: #F8FBFD; }
+.profile-trend-panel p { margin-top: 8px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.profile-trend-changes > div { display: grid; grid-template-columns: minmax(140px, 1fr) auto auto; gap: 8px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text-2); font-size: 9.5px; }
+.profile-trend-changes b { font-size: 10.5px; }
+.profile-teacher-assessment { display: flex; flex-direction: column; gap: 7px; padding: 10px; border: 1px dashed #B9A5CF; border-radius: 7px; background: #FCFAFF; }
+.profile-teacher-assessment > div:first-child { display: flex; align-items: baseline; justify-content: space-between; gap: 9px; }
+.profile-teacher-assessment > div:first-child b { font-size: 10.5px; }
+.profile-teacher-assessment > div:first-child span, .profile-teacher-assessment-current { color: var(--muted); font-size: 9.5px; line-height: 1.45; }
+.profile-teacher-assessment-fields { display: grid; grid-template-columns: minmax(125px, .55fr) minmax(180px, 1.4fr) auto auto; gap: 6px; }
+.profile-teacher-assessment-fields select, .profile-teacher-assessment-fields input { min-width: 0; padding: 6px 8px; font-size: 10px; }
+.profile-teacher-assessment-fields button { min-height: 29px; padding: 4px 8px; font-size: 10px; }
 .profile-footnote { padding: 9px 10px; border-radius: 7px; background: var(--bg-sub); color: var(--muted); font-size: 10.5px; }
 .schedule-policy-panel { margin: 12px 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
 .schedule-policy-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
@@ -846,9 +871,13 @@ button.intake-page-thumb.rejected { border-color: #E8A4A4; background: #FFF1F1; 
   .wrongbook-student-facts-list > div span:nth-of-type(n+3) { display: none; }
   .profile-toolbar { align-items: stretch; flex-direction: column; }
   .profile-toolbar > div:last-child { flex-wrap: wrap; }
-  .profile-preview-stats, .profile-snapshot-summary, .profile-recitation-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .profile-preview-stats, .profile-snapshot-summary, .profile-recitation-stats, .profile-wrongbook-stats, .profile-trend-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .profile-metric summary { grid-template-columns: minmax(0, 1fr) auto; }
   .profile-metric-numbers { grid-column: 1 / -1; justify-content: flex-start; }
+  .profile-wrongbook-list > div, .profile-trend-changes > div { grid-template-columns: minmax(0, 1fr) auto; }
+  .profile-wrongbook-list > div > span:last-child, .profile-trend-changes > div > span:last-child { grid-column: 1 / -1; }
+  .profile-inline-note, .profile-teacher-assessment > div:first-child { align-items: stretch; flex-direction: column; }
+  .profile-teacher-assessment-fields { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 620px) {

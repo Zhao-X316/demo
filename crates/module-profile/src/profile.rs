@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use chrono::{DateTime, NaiveDate, Utc};
+use module_wrongbook::read_model::student_wrongbook_items;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use suite_core::db::repo::audit::{self, NewAuditEvent};
@@ -19,8 +20,8 @@ use suite_core::domain::{hashing, ids, time};
 use suite_core::error::{CoreError, CoreResult};
 use suite_core::models::AuditActorType;
 
-pub const PROFILE_SCHEMA_VERSION: i64 = 2;
-pub const PROFILE_RULE_VERSION: &str = "m6-confirmed-evidence-profile-v2";
+pub const PROFILE_SCHEMA_VERSION: i64 = 3;
+pub const PROFILE_RULE_VERSION: &str = "m6-confirmed-evidence-profile-v3";
 const MAX_RANGE_DAYS: i64 = 366;
 
 #[derive(Debug, Clone)]
@@ -84,6 +85,7 @@ pub struct StudentProfilePreview {
     pub policy: ProfilePolicy,
     pub counts: ProfilePreviewCounts,
     pub recitation_summary: ProfileRecitationSummary,
+    pub wrongbook_summary: ProfileWrongbookSummary,
     pub source_watermark: String,
     pub can_generate: bool,
     pub blocker: Option<String>,
@@ -138,6 +140,42 @@ pub struct ProfileRecitationSummary {
     pub evidence: Vec<ProfileRecitationEvidenceView>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileNamedReference {
+    pub public_id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileWrongbookFactView {
+    pub question_version_public_id: String,
+    pub question_type: String,
+    pub stem: String,
+    pub status: String,
+    pub first_error_at: String,
+    pub last_error_at: String,
+    pub latest_response_at: String,
+    pub published_response_count: i64,
+    pub error_response_count: i64,
+    pub repeated_error: bool,
+    pub correction_status: Option<String>,
+    pub reinforcement_status: Option<String>,
+    pub knowledge_nodes: Vec<ProfileNamedReference>,
+    pub ability_dimensions: Vec<ProfileNamedReference>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileWrongbookSummary {
+    pub fact_count: i64,
+    pub needs_correction_count: i64,
+    pub corrected_once_count: i64,
+    pub rechecked_correct_count: i64,
+    pub repeated_error_count: i64,
+    pub latest_response_at: Option<String>,
+    pub note: String,
+    pub facts: Vec<ProfileWrongbookFactView>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProfileNodeMetric {
     pub public_id: String,
@@ -156,6 +194,41 @@ pub struct ProfileNodeMetric {
     pub source_breakdown: BTreeMap<String, i64>,
     pub explanation: String,
     pub evidence: Vec<ProfileEvidenceView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProfileNodeTrendChange {
+    pub target_type: String,
+    pub target_public_id: String,
+    pub target_title: String,
+    pub previous_status: String,
+    pub current_status: String,
+    pub previous_mastery_score: Option<f64>,
+    pub current_mastery_score: Option<f64>,
+    pub mastery_score_delta: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudentProfileTrend {
+    pub comparison_status: String,
+    pub comparison_kind: Option<String>,
+    pub previous_snapshot_public_id: Option<String>,
+    pub previous_revision: Option<i64>,
+    pub previous_generated_at: Option<String>,
+    pub knowledge_assessed_before: Option<i64>,
+    pub knowledge_assessed_current: i64,
+    pub knowledge_assessed_delta: Option<i64>,
+    pub ability_assessed_before: Option<i64>,
+    pub ability_assessed_current: i64,
+    pub ability_assessed_delta: Option<i64>,
+    pub needs_support_before: Option<i64>,
+    pub needs_support_current: i64,
+    pub needs_support_delta: Option<i64>,
+    pub stable_before: Option<i64>,
+    pub stable_current: i64,
+    pub stable_delta: Option<i64>,
+    pub changed_nodes: Vec<ProfileNodeTrendChange>,
+    pub note: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -185,6 +258,9 @@ pub struct StudentProfileSnapshot {
     pub is_stale: bool,
     pub stale_reason: Option<String>,
     pub recitation_summary: ProfileRecitationSummary,
+    pub wrongbook_summary: ProfileWrongbookSummary,
+    pub trend: StudentProfileTrend,
+    pub teacher_assessments: Vec<crate::teacher_assessments::ProfileTeacherAssessment>,
     pub knowledge_metrics: Vec<ProfileNodeMetric>,
     pub ability_metrics: Vec<ProfileNodeMetric>,
 }
@@ -301,6 +377,7 @@ struct Computation {
     source_watermark: String,
     evidence_ids: HashSet<i64>,
     recitation_evidence: Vec<RecitationEvidence>,
+    wrongbook_facts: Vec<ProfileWrongbookFactView>,
     knowledge_map_versions: BTreeSet<String>,
     calculated_at: String,
 }
@@ -455,7 +532,7 @@ fn supports_formal_target(
     target_type: &str,
 ) -> bool {
     match source_module {
-        "grading" => {
+        "grading" | "correction" => {
             evidence_kind == "accuracy"
                 && matches!(
                     (source_type, source_ref_type),
@@ -773,6 +850,89 @@ fn recitation_summary(evidence: &[RecitationEvidence]) -> ProfileRecitationSumma
     }
 }
 
+fn load_wrongbook_facts(
+    conn: &Connection,
+    validated: &ValidatedScope,
+) -> CoreResult<Vec<ProfileWrongbookFactView>> {
+    let mut facts =
+        student_wrongbook_items(conn, validated.student.class_id, validated.student.id)?
+            .into_iter()
+            .filter_map(|item| match shanghai_date(&item.latest_response_at) {
+                Ok(date) if date >= validated.range_start && date <= validated.range_end => {
+                    Some(Ok(ProfileWrongbookFactView {
+                        question_version_public_id: item.question_version_id,
+                        question_type: item.question_type,
+                        stem: item.stem,
+                        status: item.status,
+                        first_error_at: item.first_error_at,
+                        last_error_at: item.last_error_at,
+                        latest_response_at: item.latest_response_at,
+                        published_response_count: item.published_response_count,
+                        error_response_count: item.error_response_count,
+                        repeated_error: item.repeated_error,
+                        correction_status: item
+                            .correction_assignment
+                            .map(|assignment| assignment.status),
+                        reinforcement_status: item
+                            .reinforcement_assignment
+                            .map(|assignment| assignment.status),
+                        knowledge_nodes: item
+                            .knowledge_nodes
+                            .into_iter()
+                            .map(|node| ProfileNamedReference {
+                                public_id: node.public_id,
+                                title: node.title,
+                            })
+                            .collect(),
+                        ability_dimensions: item
+                            .ability_dimensions
+                            .into_iter()
+                            .map(|node| ProfileNamedReference {
+                                public_id: node.public_id,
+                                title: node.title,
+                            })
+                            .collect(),
+                    }))
+                }
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect::<CoreResult<Vec<_>>>()?;
+    facts.sort_by(|left, right| {
+        right.latest_response_at.cmp(&left.latest_response_at).then(
+            left.question_version_public_id
+                .cmp(&right.question_version_public_id),
+        )
+    });
+    Ok(facts)
+}
+
+fn wrongbook_summary(facts: &[ProfileWrongbookFactView]) -> ProfileWrongbookSummary {
+    ProfileWrongbookSummary {
+        fact_count: facts.len() as i64,
+        needs_correction_count: facts
+            .iter()
+            .filter(|item| item.status == "needs_correction")
+            .count() as i64,
+        corrected_once_count: facts
+            .iter()
+            .filter(|item| item.status == "corrected_once")
+            .count() as i64,
+        rechecked_correct_count: facts
+            .iter()
+            .filter(|item| item.status == "rechecked_correct")
+            .count() as i64,
+        repeated_error_count: facts.iter().filter(|item| item.repeated_error).count() as i64,
+        latest_response_at: facts
+            .iter()
+            .map(|item| item.latest_response_at.as_str())
+            .max()
+            .map(str::to_owned),
+        note: "仅展示所选范围内仍属于 M3 当前事实的错题恢复状态；订正一次和再次答对不会直接替代节点掌握结论。".into(),
+        facts: facts.to_vec(),
+    }
+}
+
 fn load_scope_nodes(
     conn: &Connection,
     map_ids: &BTreeMap<i64, String>,
@@ -1008,6 +1168,7 @@ fn compute(conn: &Connection, scope: &StudentProfileScope<'_>) -> CoreResult<Com
         load_evidence_targets(conn, &validated)?;
     let (recitation_evidence, unsupported_history_excluded) =
         load_recitation_history(conn, &validated)?;
+    let wrongbook_facts = load_wrongbook_facts(conn, &validated)?;
     let scope_nodes = load_scope_nodes(conn, &map_ids)?;
     let mut by_target: HashMap<(String, String), Vec<EvidenceTarget>> = HashMap::new();
     for target in targets {
@@ -1142,6 +1303,7 @@ fn compute(conn: &Connection, scope: &StudentProfileScope<'_>) -> CoreResult<Com
         "rule_version": PROFILE_RULE_VERSION,
         "evidence": watermark_rows,
         "recitation_history": recitation_watermark_rows,
+        "wrongbook_current_facts": &wrongbook_facts,
         "scope_nodes": scope_identity,
         "knowledge_map_versions": map_versions,
         "policy_public_id": policy.public_id,
@@ -1161,6 +1323,7 @@ fn compute(conn: &Connection, scope: &StudentProfileScope<'_>) -> CoreResult<Com
         source_watermark,
         evidence_ids,
         recitation_evidence,
+        wrongbook_facts,
         knowledge_map_versions: map_versions,
         calculated_at: time::utc_now_rfc3339(),
     })
@@ -1182,13 +1345,14 @@ pub fn preview_student_profile(
         policy: computation.policy,
         counts: computation.counts,
         recitation_summary: recitation_summary(&computation.recitation_evidence),
+        wrongbook_summary: wrongbook_summary(&computation.wrongbook_facts),
         source_watermark: computation.source_watermark,
         can_generate,
         blocker: (!can_generate)
             .then(|| "所选范围还没有老师确认、已发布且知识/能力链接明确的逐点证据。".into()),
         scope_note: "范围为当前正式证据引用的已确认 K1 知识图谱版本；未覆盖节点保留为“未评估”。"
             .into(),
-        evidence_note: "M1 总体、流畅度和保持度只显示为背诵内容历史；只有老师接受或修正且链接明确的评分点进入知识掌握，背诵不推导高阶能力。".into(),
+        evidence_note: "M1 总体、流畅度和保持度只显示为背诵内容历史；M3 订正按低权重正式证据进入原知识/能力节点，当前错题恢复状态另行展示，不直接等同掌握。".into(),
     })
 }
 
@@ -1256,12 +1420,15 @@ fn insert_snapshot(
     .to_string();
     let source_config_json = serde_json::json!({
         "schema_version": PROFILE_SCHEMA_VERSION,
+        "rule_version": PROFILE_RULE_VERSION,
         "formal_confirmation_levels": ["teacher_accepted","teacher_corrected"],
         "formal_adapters": {
             "grading": ["objective_question","fill_blank_slot","question_rubric_point","dictation_rubric_point"],
+            "correction": ["objective_question","fill_blank_slot","question_rubric_point","dictation_rubric_point"],
             "recitation": ["recitation_rubric_point:knowledge_only"]
         },
         "recitation_history": ["recitation_overall","recitation_fluency","recitation_retention"],
+        "wrongbook_history": "m3_current_facts_latest_response_in_scope",
         "active_only": true,
         "same_source_same_day": "collapse_minimum",
         "context_weights": {
@@ -1356,6 +1523,35 @@ fn insert_snapshot(
               (snapshot_id,learning_evidence_id)
              VALUES (?1,?2)",
             params![snapshot_id, item.id],
+        )?;
+    }
+    for fact in &computation.wrongbook_facts {
+        tx.execute(
+            "INSERT INTO profile_wrongbook_fact_links
+              (snapshot_id,question_version_public_id,question_type,stem,status,
+               first_error_at,last_error_at,latest_response_at,published_response_count,
+               error_response_count,repeated_error,correction_status,reinforcement_status,
+               knowledge_nodes_json,ability_dimensions_json)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+            params![
+                snapshot_id,
+                fact.question_version_public_id,
+                fact.question_type,
+                fact.stem,
+                fact.status,
+                fact.first_error_at,
+                fact.last_error_at,
+                fact.latest_response_at,
+                fact.published_response_count,
+                fact.error_response_count,
+                i64::from(fact.repeated_error),
+                fact.correction_status,
+                fact.reinforcement_status,
+                serde_json::to_string(&fact.knowledge_nodes)
+                    .map_err(|error| CoreError::Invalid(error.to_string()))?,
+                serde_json::to_string(&fact.ability_dimensions)
+                    .map_err(|error| CoreError::Invalid(error.to_string()))?
+            ],
         )?;
     }
     Ok((public_id, revision, now))
@@ -1490,6 +1686,55 @@ fn load_recitation_summary(
     Ok(recitation_summary(&evidence))
 }
 
+fn load_wrongbook_summary(
+    conn: &Connection,
+    snapshot_id: i64,
+) -> CoreResult<ProfileWrongbookSummary> {
+    let mut statement = conn.prepare(
+        "SELECT question_version_public_id,question_type,stem,status,first_error_at,
+                last_error_at,latest_response_at,published_response_count,
+                error_response_count,repeated_error,correction_status,reinforcement_status,
+                knowledge_nodes_json,ability_dimensions_json
+         FROM profile_wrongbook_fact_links
+         WHERE snapshot_id=?1
+         ORDER BY latest_response_at DESC,question_version_public_id",
+    )?;
+    let rows = statement.query_map([snapshot_id], |row| {
+        let knowledge_json = row.get::<_, String>(12)?;
+        let ability_json = row.get::<_, String>(13)?;
+        Ok(ProfileWrongbookFactView {
+            question_version_public_id: row.get(0)?,
+            question_type: row.get(1)?,
+            stem: row.get(2)?,
+            status: row.get(3)?,
+            first_error_at: row.get(4)?,
+            last_error_at: row.get(5)?,
+            latest_response_at: row.get(6)?,
+            published_response_count: row.get(7)?,
+            error_response_count: row.get(8)?,
+            repeated_error: row.get::<_, i64>(9)? == 1,
+            correction_status: row.get(10)?,
+            reinforcement_status: row.get(11)?,
+            knowledge_nodes: serde_json::from_str(&knowledge_json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    12,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+            ability_dimensions: serde_json::from_str(&ability_json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    13,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        })
+    })?;
+    let facts = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(wrongbook_summary(&facts))
+}
+
 fn load_metrics(
     conn: &Connection,
     snapshot_id: i64,
@@ -1548,6 +1793,176 @@ fn load_metrics(
     Ok((knowledge, ability))
 }
 
+fn assessed_count(metrics: &[ProfileNodeMetric]) -> i64 {
+    metrics
+        .iter()
+        .filter(|metric| metric.evidence_count > 0)
+        .count() as i64
+}
+
+fn node_status_count(
+    knowledge: &[ProfileNodeMetric],
+    ability: &[ProfileNodeMetric],
+    status: &str,
+) -> i64 {
+    knowledge
+        .iter()
+        .chain(ability)
+        .filter(|metric| metric.status == status)
+        .count() as i64
+}
+
+struct StudentTrendInput<'a> {
+    snapshot_id: i64,
+    student_id: i64,
+    revision: i64,
+    range_start: &'a str,
+    range_end: &'a str,
+    policy_public_id: &'a str,
+    source_config_json: &'a str,
+    knowledge_metrics: &'a [ProfileNodeMetric],
+    ability_metrics: &'a [ProfileNodeMetric],
+}
+
+fn load_student_trend(
+    conn: &Connection,
+    input: &StudentTrendInput<'_>,
+) -> CoreResult<StudentProfileTrend> {
+    let knowledge_current = assessed_count(input.knowledge_metrics);
+    let ability_current = assessed_count(input.ability_metrics);
+    let needs_support_current = node_status_count(
+        input.knowledge_metrics,
+        input.ability_metrics,
+        "needs_support",
+    );
+    let stable_current =
+        node_status_count(input.knowledge_metrics, input.ability_metrics, "stable");
+    let previous = conn
+        .query_row(
+            "SELECT snapshot.id,snapshot.public_id,snapshot.revision,snapshot.generated_at
+             FROM profile_snapshots snapshot
+             JOIN profile_policy_versions policy ON policy.id=snapshot.policy_id
+             WHERE snapshot.student_id=?1 AND snapshot.revision<?2
+               AND snapshot.range_start=?3 AND snapshot.range_end=?4
+               AND policy.public_id=?5 AND snapshot.source_config_json=?6
+             ORDER BY snapshot.revision DESC LIMIT 1",
+            params![
+                input.student_id,
+                input.revision,
+                input.range_start,
+                input.range_end,
+                input.policy_public_id,
+                input.source_config_json
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((previous_id, previous_public_id, previous_revision, previous_generated_at)) =
+        previous
+    else {
+        return Ok(StudentProfileTrend {
+            comparison_status: "no_comparable_baseline".into(),
+            comparison_kind: None,
+            previous_snapshot_public_id: None,
+            previous_revision: None,
+            previous_generated_at: None,
+            knowledge_assessed_before: None,
+            knowledge_assessed_current: knowledge_current,
+            knowledge_assessed_delta: None,
+            ability_assessed_before: None,
+            ability_assessed_current: ability_current,
+            ability_assessed_delta: None,
+            needs_support_before: None,
+            needs_support_current,
+            needs_support_delta: None,
+            stable_before: None,
+            stable_current,
+            stable_delta: None,
+            changed_nodes: Vec::new(),
+            note: "暂无同学生、同日期范围、同策略且同证据适配契约的上一版快照；不跨口径拼接趋势。"
+                .into(),
+        });
+    };
+    if previous_id == input.snapshot_id {
+        return Err(CoreError::Db("个人趋势基线不能指向当前快照".into()));
+    }
+    let (previous_knowledge, previous_ability) = load_metrics(conn, previous_id)?;
+    let previous_knowledge_assessed = assessed_count(&previous_knowledge);
+    let previous_ability_assessed = assessed_count(&previous_ability);
+    let previous_needs_support =
+        node_status_count(&previous_knowledge, &previous_ability, "needs_support");
+    let previous_stable = node_status_count(&previous_knowledge, &previous_ability, "stable");
+    let mut previous_by_target = previous_knowledge
+        .iter()
+        .chain(&previous_ability)
+        .map(|metric| {
+            (
+                (metric.target_type.clone(), metric.target_public_id.clone()),
+                metric,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut changed_nodes = Vec::new();
+    for current in input.knowledge_metrics.iter().chain(input.ability_metrics) {
+        let Some(previous) = previous_by_target.remove(&(
+            current.target_type.clone(),
+            current.target_public_id.clone(),
+        )) else {
+            continue;
+        };
+        let delta = previous
+            .mastery_score
+            .zip(current.mastery_score)
+            .map(|(before, now)| now - before);
+        if previous.status != current.status || delta.is_some_and(|value| value.abs() > 0.000_001) {
+            changed_nodes.push(ProfileNodeTrendChange {
+                target_type: current.target_type.clone(),
+                target_public_id: current.target_public_id.clone(),
+                target_title: current.target_title.clone(),
+                previous_status: previous.status.clone(),
+                current_status: current.status.clone(),
+                previous_mastery_score: previous.mastery_score,
+                current_mastery_score: current.mastery_score,
+                mastery_score_delta: delta,
+            });
+        }
+    }
+    changed_nodes.sort_by(|left, right| {
+        left.target_type
+            .cmp(&right.target_type)
+            .then(left.target_title.cmp(&right.target_title))
+            .then(left.target_public_id.cmp(&right.target_public_id))
+    });
+    Ok(StudentProfileTrend {
+        comparison_status: "comparable".into(),
+        comparison_kind: Some("same_scope_refresh".into()),
+        previous_snapshot_public_id: Some(previous_public_id),
+        previous_revision: Some(previous_revision),
+        previous_generated_at: Some(previous_generated_at),
+        knowledge_assessed_before: Some(previous_knowledge_assessed),
+        knowledge_assessed_current: knowledge_current,
+        knowledge_assessed_delta: Some(knowledge_current - previous_knowledge_assessed),
+        ability_assessed_before: Some(previous_ability_assessed),
+        ability_assessed_current: ability_current,
+        ability_assessed_delta: Some(ability_current - previous_ability_assessed),
+        needs_support_before: Some(previous_needs_support),
+        needs_support_current,
+        needs_support_delta: Some(needs_support_current - previous_needs_support),
+        stable_before: Some(previous_stable),
+        stable_current,
+        stable_delta: Some(stable_current - previous_stable),
+        changed_nodes,
+        note: "只比较同一日期范围、同一策略和同一证据适配契约的两次快照刷新；这是观察性变化，不自动宣称教学导致进步或退步。".into(),
+    })
+}
+
 pub fn get_student_profile(
     conn: &Connection,
     public_id: &str,
@@ -1562,7 +1977,8 @@ pub fn get_student_profile(
                     p.source_watermark,p.evidence_count,p.knowledge_node_total,
                     p.knowledge_node_assessed,p.knowledge_node_eligible,p.ability_node_total,
                     p.ability_node_assessed,p.ability_node_eligible,p.state,p.payload_sha256,
-                    p.generated_by,p.generated_at,p.confirmed_by,p.confirmed_at
+                    p.generated_by,p.generated_at,p.confirmed_by,p.confirmed_at,
+                    p.source_config_json
              FROM profile_snapshots p
              JOIN students s ON s.id=p.student_id
              JOIN profile_policy_versions policy ON policy.id=p.policy_id
@@ -1607,6 +2023,7 @@ pub fn get_student_profile(
                     row.get::<_, String>(31)?,
                     row.get::<_, String>(32)?,
                     row.get::<_, String>(33)?,
+                    row.get::<_, String>(34)?,
                 ))
             },
         )
@@ -1635,6 +2052,7 @@ pub fn get_student_profile(
         generated_at,
         confirmed_by,
         confirmed_at,
+        source_config_json,
     )) = row
     else {
         return Ok(None);
@@ -1657,7 +2075,24 @@ pub fn get_student_profile(
         None
     };
     let recitation_summary = load_recitation_summary(conn, snapshot_id)?;
+    let wrongbook_summary = load_wrongbook_summary(conn, snapshot_id)?;
     let (knowledge_metrics, ability_metrics) = load_metrics(conn, snapshot_id)?;
+    let trend = load_student_trend(
+        conn,
+        &StudentTrendInput {
+            snapshot_id,
+            student_id: student.id,
+            revision,
+            range_start: &range_start,
+            range_end: &range_end,
+            policy_public_id: &policy.public_id,
+            source_config_json: &source_config_json,
+            knowledge_metrics: &knowledge_metrics,
+            ability_metrics: &ability_metrics,
+        },
+    )?;
+    let teacher_assessments =
+        crate::teacher_assessments::list_profile_teacher_assessments(conn, &public_id)?;
     Ok(Some(StudentProfileSnapshot {
         public_id,
         revision,
@@ -1684,6 +2119,9 @@ pub fn get_student_profile(
         is_stale,
         stale_reason,
         recitation_summary,
+        wrongbook_summary,
+        trend,
+        teacher_assessments,
         knowledge_metrics,
         ability_metrics,
     }))
@@ -1732,6 +2170,8 @@ mod tests {
         let conn = open_in_memory().unwrap();
         run_migrations(&conn, CORE_MIGRATIONS).unwrap();
         run_migrations(&conn, module_knowledge::knowledge_migrations()).unwrap();
+        run_migrations(&conn, module_exam::exam_migrations()).unwrap();
+        run_migrations(&conn, module_wrongbook::wrongbook_migrations()).unwrap();
         run_migrations(&conn, crate::profile_migrations()).unwrap();
         conn.execute("INSERT INTO subjects(name) VALUES ('历史')", [])
             .unwrap();
@@ -1838,6 +2278,42 @@ mod tests {
                 assessment_context: context,
                 occurred_at,
                 rule_version: "exam-v1",
+                knowledge_map_version: &format!("{}:r1", fixture.map_public_id),
+            },
+        )
+        .unwrap();
+    }
+
+    fn add_correction_evidence(
+        fixture: &Fixture,
+        key: &str,
+        target: &str,
+        source: &str,
+        occurred_at: &str,
+        value: f64,
+    ) {
+        create_or_get(
+            &fixture.conn,
+            &NewLearningEvidence {
+                idempotency_key: key,
+                student_id: fixture.student_id,
+                source_module: EvidenceSourceModule::Correction,
+                source_type: "objective_question",
+                source_ref_type: "assessment_item",
+                source_ref_id: source,
+                source_revision: 1,
+                decision_ref_type: Some("grade_decision"),
+                decision_ref_id: Some(key),
+                decision_revision: Some(1),
+                knowledge_node_id: Some(target),
+                ability_dimension_id: None,
+                evidence_kind: EvidenceKind::Accuracy,
+                value,
+                confirmation_level: ConfirmationLevel::TeacherCorrected,
+                evidence_quality: 0.6,
+                assessment_context: AssessmentContext::Correction,
+                occurred_at,
+                rule_version: "correction-v1",
                 knowledge_map_version: &format!("{}:r1", fixture.map_public_id),
             },
         )
@@ -2021,6 +2497,30 @@ mod tests {
     }
 
     #[test]
+    fn m3_correction_evidence_uses_explicit_adapter_and_keeps_low_weight() {
+        let fixture = setup();
+        add_correction_evidence(
+            &fixture,
+            "correction-1",
+            &fixture.knowledge[0],
+            "item-1",
+            "2026-07-12T00:00:00.000Z",
+            1.0,
+        );
+        let preview = preview_student_profile(&fixture.conn, &scope(&fixture)).unwrap();
+        assert_eq!(preview.counts.mapped_formal_evidence, 1);
+        assert_eq!(preview.counts.unsupported_contract_excluded, 0);
+        let computation = compute(&fixture.conn, &scope(&fixture)).unwrap();
+        let metric = computation
+            .metrics
+            .iter()
+            .find(|metric| metric.target_public_id == fixture.knowledge[0])
+            .unwrap();
+        assert_eq!(metric.source_breakdown.get("correction"), Some(&1));
+        assert!((metric.evidence[0].2 - 0.36).abs() < 0.000_001);
+    }
+
+    #[test]
     fn sufficient_cross_date_sources_form_explainable_status() {
         let fixture = setup();
         for (index, date) in [
@@ -2124,6 +2624,133 @@ mod tests {
             .unwrap();
         assert!(loaded.is_stale);
         assert_eq!(loaded.revision, 1);
+    }
+
+    #[test]
+    fn same_scope_same_contract_refresh_has_personal_trend() {
+        let mut fixture = setup();
+        add_evidence(
+            &fixture,
+            "trend-first",
+            &fixture.knowledge[0],
+            "q1",
+            "2026-07-05T00:00:00.000Z",
+            0.0,
+            AssessmentContext::ClosedBook,
+            ConfirmationLevel::TeacherCorrected,
+        );
+        let class_id = fixture.class_id;
+        let student_id = fixture.student_id;
+        let first = generate_student_profile(
+            &mut fixture.conn,
+            &GenerateStudentProfileInput {
+                scope: StudentProfileScope {
+                    class_id,
+                    student_id,
+                    range_start: "2026-07-01",
+                    range_end: "2026-07-31",
+                },
+                confirmed_by: "teacher-1",
+            },
+        )
+        .unwrap();
+        assert_eq!(first.trend.comparison_status, "no_comparable_baseline");
+        add_evidence(
+            &fixture,
+            "trend-pass-2",
+            &fixture.knowledge[0],
+            "q2",
+            "2026-07-12T00:00:00.000Z",
+            1.0,
+            AssessmentContext::ClosedBook,
+            ConfirmationLevel::TeacherAccepted,
+        );
+        add_evidence(
+            &fixture,
+            "trend-pass-3",
+            &fixture.knowledge[0],
+            "q3",
+            "2026-07-20T00:00:00.000Z",
+            1.0,
+            AssessmentContext::ClosedBook,
+            ConfirmationLevel::TeacherAccepted,
+        );
+        let second = generate_student_profile(
+            &mut fixture.conn,
+            &GenerateStudentProfileInput {
+                scope: StudentProfileScope {
+                    class_id,
+                    student_id,
+                    range_start: "2026-07-01",
+                    range_end: "2026-07-31",
+                },
+                confirmed_by: "teacher-1",
+            },
+        )
+        .unwrap();
+        assert_eq!(second.trend.comparison_status, "comparable");
+        assert_eq!(
+            second.trend.previous_snapshot_public_id.as_deref(),
+            Some(first.public_id.as_str())
+        );
+        assert_eq!(second.trend.previous_revision, Some(1));
+        assert!(second
+            .trend
+            .changed_nodes
+            .iter()
+            .any(|node| node.target_public_id == fixture.knowledge[0]));
+    }
+
+    #[test]
+    fn snapshot_wrongbook_facts_are_frozen_and_do_not_change_metrics() {
+        let mut fixture = setup();
+        add_evidence(
+            &fixture,
+            "wrongbook-base",
+            &fixture.knowledge[0],
+            "q1",
+            "2026-07-10T00:00:00.000Z",
+            0.0,
+            AssessmentContext::ClosedBook,
+            ConfirmationLevel::TeacherCorrected,
+        );
+        let mut computation = compute(&fixture.conn, &scope(&fixture)).unwrap();
+        computation.wrongbook_facts.push(ProfileWrongbookFactView {
+            question_version_public_id: "question-version-1".into(),
+            question_type: "single".into(),
+            stem: "洋务运动失败的根本原因是？".into(),
+            status: "corrected_once".into(),
+            first_error_at: "2026-07-10T00:00:00.000Z".into(),
+            last_error_at: "2026-07-10T00:00:00.000Z".into(),
+            latest_response_at: "2026-07-12T00:00:00.000Z".into(),
+            published_response_count: 2,
+            error_response_count: 1,
+            repeated_error: false,
+            correction_status: Some("published".into()),
+            reinforcement_status: None,
+            knowledge_nodes: vec![ProfileNamedReference {
+                public_id: fixture.knowledge[0].clone(),
+                title: "知识点1".into(),
+            }],
+            ability_dimensions: Vec::new(),
+        });
+        let tx = fixture.conn.transaction().unwrap();
+        let (public_id, _, _) = insert_snapshot(&tx, &computation, "teacher-1").unwrap();
+        tx.commit().unwrap();
+        let loaded = get_student_profile(&fixture.conn, &public_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.wrongbook_summary.fact_count, 1);
+        assert_eq!(loaded.wrongbook_summary.corrected_once_count, 1);
+        assert_eq!(loaded.knowledge_metrics[0].evidence_count, 1);
+        assert!(fixture
+            .conn
+            .execute(
+                "UPDATE profile_wrongbook_fact_links SET status='rechecked_correct'
+                 WHERE snapshot_id=(SELECT id FROM profile_snapshots WHERE public_id=?1)",
+                [&public_id],
+            )
+            .is_err());
     }
 
     #[test]

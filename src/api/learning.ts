@@ -427,6 +427,34 @@ export interface ProfileRecitationSummary {
   evidence: ProfileRecitationEvidenceView[];
 }
 
+export interface ProfileWrongbookFactView {
+  question_version_public_id: string;
+  question_type: string;
+  stem: string;
+  status: WrongbookStatus;
+  first_error_at: string;
+  last_error_at: string;
+  latest_response_at: string;
+  published_response_count: number;
+  error_response_count: number;
+  repeated_error: boolean;
+  correction_status: CorrectionAssignmentStatus | null;
+  reinforcement_status: ReinforcementAssignmentStatus | null;
+  knowledge_nodes: NamedReference[];
+  ability_dimensions: NamedReference[];
+}
+
+export interface ProfileWrongbookSummary {
+  fact_count: number;
+  needs_correction_count: number;
+  corrected_once_count: number;
+  rechecked_correct_count: number;
+  repeated_error_count: number;
+  latest_response_at: string | null;
+  note: string;
+  facts: ProfileWrongbookFactView[];
+}
+
 export interface StudentProfilePreview {
   schema_version: number;
   rule_version: string;
@@ -437,6 +465,7 @@ export interface StudentProfilePreview {
   policy: ProfilePolicy;
   counts: ProfilePreviewCounts;
   recitation_summary: ProfileRecitationSummary;
+  wrongbook_summary: ProfileWrongbookSummary;
   source_watermark: string;
   can_generate: boolean;
   blocker: string | null;
@@ -489,6 +518,62 @@ export interface ProfileNodeMetric {
   evidence: ProfileEvidenceView[];
 }
 
+export interface ProfileNodeTrendChange {
+  target_type: "knowledge_node" | "ability_dimension";
+  target_public_id: string;
+  target_title: string;
+  previous_status: ProfileNodeStatus;
+  current_status: ProfileNodeStatus;
+  previous_mastery_score: number | null;
+  current_mastery_score: number | null;
+  mastery_score_delta: number | null;
+}
+
+export interface StudentProfileTrend {
+  comparison_status: "no_comparable_baseline" | "comparable";
+  comparison_kind: "same_scope_refresh" | null;
+  previous_snapshot_public_id: string | null;
+  previous_revision: number | null;
+  previous_generated_at: string | null;
+  knowledge_assessed_before: number | null;
+  knowledge_assessed_current: number;
+  knowledge_assessed_delta: number | null;
+  ability_assessed_before: number | null;
+  ability_assessed_current: number;
+  ability_assessed_delta: number | null;
+  needs_support_before: number | null;
+  needs_support_current: number;
+  needs_support_delta: number | null;
+  stable_before: number | null;
+  stable_current: number;
+  stable_delta: number | null;
+  changed_nodes: ProfileNodeTrendChange[];
+  note: string;
+}
+
+export type ProfileTeacherAssessmentValue =
+  | "not_taught"
+  | "needs_support"
+  | "developing"
+  | "stable"
+  | "observe";
+
+export interface ProfileTeacherAssessment {
+  public_id: string;
+  snapshot_public_id: string;
+  node_metric_public_id: string;
+  target_type: "knowledge_node" | "ability_dimension";
+  target_public_id: string;
+  target_title: string;
+  revision: number;
+  assessment: ProfileTeacherAssessmentValue | null;
+  note: string | null;
+  state: "active" | "voided";
+  supersedes_public_id: string | null;
+  created_by: string;
+  created_at: string;
+}
+
 export interface StudentProfileSnapshot {
   public_id: string;
   revision: number;
@@ -515,6 +600,9 @@ export interface StudentProfileSnapshot {
   is_stale: boolean;
   stale_reason: string | null;
   recitation_summary: ProfileRecitationSummary;
+  wrongbook_summary: ProfileWrongbookSummary;
+  trend: StudentProfileTrend;
+  teacher_assessments: ProfileTeacherAssessment[];
   knowledge_metrics: ProfileNodeMetric[];
   ability_metrics: ProfileNodeMetric[];
 }
@@ -534,3 +622,15 @@ export const generateStudentProfile = (input: StudentProfileScopeInput) =>
 
 export const loadLatestStudentProfile = (classId: number, studentId: number) =>
   call<StudentProfileSnapshot | null>("latest_student_profile", { classId, studentId });
+
+export interface SaveProfileTeacherAssessmentInput {
+  snapshotPublicId: string;
+  nodeMetricPublicId: string;
+  expectedRevision: number;
+  assessment: ProfileTeacherAssessmentValue | null;
+  note?: string | null;
+}
+
+export const saveProfileTeacherAssessment = (
+  input: SaveProfileTeacherAssessmentInput,
+) => call<ProfileTeacherAssessment>("save_profile_teacher_assessment", { input });

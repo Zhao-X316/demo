@@ -19,6 +19,9 @@ import {
   ProfileNodeMetric,
   ProfileNodeStatus,
   ProfileRecitationSummary,
+  ProfileTeacherAssessment,
+  ProfileTeacherAssessmentValue,
+  ProfileWrongbookSummary,
   previewWrongbookReinforcement,
   ReinforcementAssignment,
   ReinforcementAssignmentStatus,
@@ -30,6 +33,7 @@ import {
   WrongbookStatus,
   StudentProfilePreview,
   StudentProfileSnapshot,
+  saveProfileTeacherAssessment,
   writeWrongbookReportSnapshot,
 } from "../api/learning";
 import { Class, Student, classesList, studentsList } from "../api/manage";
@@ -99,6 +103,14 @@ const PROFILE_FRESHNESS_LABELS: Record<string, string> = {
   fresh: "近期",
   aging: "较早",
   stale: "久未更新",
+};
+
+const PROFILE_TEACHER_ASSESSMENT_LABELS: Record<ProfileTeacherAssessmentValue, string> = {
+  not_taught: "尚未教学",
+  needs_support: "需要重点支持",
+  developing: "发展中",
+  stable: "相对稳定",
+  observe: "继续观察",
 };
 
 function statusClass(status: WrongbookStatus) {
@@ -349,14 +361,211 @@ function WrongbookReportPanel({
   );
 }
 
+function ProfileWrongbookHistory({
+  summary,
+  frozen,
+  onOpenExam,
+}: {
+  summary: ProfileWrongbookSummary;
+  frozen: boolean;
+  onOpenExam: () => void;
+}) {
+  if (summary.fact_count === 0) return null;
+  return (
+    <section className="profile-wrongbook-history">
+      <div className="profile-metric-title">
+        <b>错题恢复过程</b>
+        <span>{frozen ? "随本版快照冻结" : "生成前只读预览"} · 不用一次订正替代掌握结论</span>
+      </div>
+      <div className="profile-wrongbook-stats">
+        <div><span>当前错题事实</span><b>{summary.fact_count}</b></div>
+        <div><span>待订正</span><b>{summary.needs_correction_count}</b></div>
+        <div><span>订正 / 复测正确</span>
+          <b>{summary.corrected_once_count + summary.rechecked_correct_count}</b></div>
+        <div><span>重复出错</span><b>{summary.repeated_error_count}</b></div>
+      </div>
+      <details>
+        <summary>查看恢复事实</summary>
+        <div className="profile-wrongbook-list">
+          {summary.facts.map((fact) => (
+            <div key={fact.question_version_public_id}>
+              <div>
+                <b>{fact.stem}</b>
+                <span>{formatTime(fact.latest_response_at)} · 已发布 {fact.published_response_count} 次</span>
+              </div>
+              <span className={statusClass(fact.status)}>{STATUS_LABELS[fact.status]}</span>
+              {fact.repeated_error && <span className="tag fail">重复出错</span>}
+              {fact.knowledge_nodes.length > 0 && (
+                <span>{fact.knowledge_nodes.map((node) => node.title).join("、")}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      </details>
+      <div className="profile-inline-note">
+        <span>{summary.note}</span>
+        <button onClick={onOpenExam}>回到错题与批改查看原始事实</button>
+      </div>
+    </section>
+  );
+}
+
+function StudentTrendPanel({ snapshot }: { snapshot: StudentProfileSnapshot }) {
+  const trend = snapshot.trend;
+  if (trend.comparison_status !== "comparable") {
+    return (
+      <section className="profile-trend-panel">
+        <div className="profile-metric-title">
+          <b>个人同口径趋势</b>
+          <span>尚无可比较基线</span>
+        </div>
+        <p>{trend.note}</p>
+      </section>
+    );
+  }
+  const deltaLabel = (value: number | null) => {
+    if (value == null) return "—";
+    if (value > 0) return `+${value}`;
+    return String(value);
+  };
+  return (
+    <section className="profile-trend-panel">
+      <div className="profile-metric-title">
+        <b>个人同口径趋势</b>
+        <span>对比第 {trend.previous_revision} 版 · {trend.previous_generated_at
+          ? formatTime(trend.previous_generated_at)
+          : "时间未知"}</span>
+      </div>
+      <div className="profile-trend-grid">
+        <div><span>知识已评估变化</span><b>{deltaLabel(trend.knowledge_assessed_delta)}</b></div>
+        <div><span>能力已评估变化</span><b>{deltaLabel(trend.ability_assessed_delta)}</b></div>
+        <div><span>需支持节点变化</span><b>{deltaLabel(trend.needs_support_delta)}</b></div>
+        <div><span>相对稳定节点变化</span><b>{deltaLabel(trend.stable_delta)}</b></div>
+      </div>
+      {trend.changed_nodes.length > 0 && (
+        <details>
+          <summary>查看 {trend.changed_nodes.length} 个发生变化的节点</summary>
+          <div className="profile-trend-changes">
+            {trend.changed_nodes.map((change) => (
+              <div key={`${change.target_type}:${change.target_public_id}`}>
+                <b>{change.target_title}</b>
+                <span>
+                  {PROFILE_STATUS_LABELS[change.previous_status]} →{" "}
+                  {PROFILE_STATUS_LABELS[change.current_status]}
+                </span>
+                <span>{change.mastery_score_delta == null
+                  ? "表现分不可比"
+                  : `已测表现变化 ${Math.round(change.mastery_score_delta * 100)} 个百分点`}
+                </span>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+      <p>{trend.note}</p>
+    </section>
+  );
+}
+
+function TeacherAssessmentEditor({
+  snapshotPublicId,
+  metric,
+  current,
+  onSaved,
+}: {
+  snapshotPublicId: string;
+  metric: ProfileNodeMetric;
+  current: ProfileTeacherAssessment | null;
+  onSaved: (value: ProfileTeacherAssessment) => void;
+}) {
+  const active = current?.state === "active" ? current : null;
+  const [assessment, setAssessment] = useState<ProfileTeacherAssessmentValue | "">(
+    active?.assessment ?? "",
+  );
+  const [note, setNote] = useState(active?.note ?? "");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+
+  useEffect(() => {
+    const next = current?.state === "active" ? current : null;
+    setAssessment(next?.assessment ?? "");
+    setNote(next?.note ?? "");
+    setSaveError("");
+  }, [current]);
+
+  const saveAssessment = async (clear: boolean) => {
+    if (!clear && !assessment) return;
+    setSaving(true);
+    setSaveError("");
+    try {
+      const saved = await saveProfileTeacherAssessment({
+        snapshotPublicId,
+        nodeMetricPublicId: metric.public_id,
+        expectedRevision: current?.revision ?? 0,
+        assessment: clear ? null : assessment || null,
+        note: clear ? null : note.trim() || null,
+      });
+      onSaved(saved);
+    } catch (reason) {
+      setSaveError(String(reason));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="profile-teacher-assessment">
+      <div>
+        <b>老师补充判断</b>
+        <span>与系统结论并列保存，不改写掌握分或原始证据。</span>
+      </div>
+      <div className="profile-teacher-assessment-fields">
+        <select aria-label={`${metric.target_title}老师补充判断`}
+          value={assessment}
+          onChange={(event) =>
+            setAssessment(event.target.value as ProfileTeacherAssessmentValue | "")}>
+          <option value="">请选择</option>
+          {Object.entries(PROFILE_TEACHER_ASSESSMENT_LABELS).map(([value, label]) => (
+            <option value={value} key={value}>{label}</option>
+          ))}
+        </select>
+        <input aria-label={`${metric.target_title}老师补充说明`}
+          value={note} maxLength={500} placeholder="可选：课堂观察或教学背景"
+          onChange={(event) => setNote(event.target.value)} />
+        <button className="primary" disabled={saving || !assessment}
+          onClick={() => saveAssessment(false)}>
+          {saving ? "保存中…" : "保存判断"}
+        </button>
+        {current?.state === "active" && (
+          <button disabled={saving} onClick={() => saveAssessment(true)}>清除</button>
+        )}
+      </div>
+      {active?.assessment && (
+        <span className="profile-teacher-assessment-current">
+          当前：{PROFILE_TEACHER_ASSESSMENT_LABELS[active.assessment]}
+          {active.note ? ` · ${active.note}` : ""}
+          {" "}· 第 {active.revision} 版
+        </span>
+      )}
+      {saveError && <span className="error">{saveError}</span>}
+    </div>
+  );
+}
+
 function ProfileMetricList({
   title,
   metrics,
   onOpenExam,
+  snapshotPublicId,
+  teacherAssessments,
+  onAssessmentSaved,
 }: {
   title: string;
   metrics: ProfileNodeMetric[];
   onOpenExam: () => void;
+  snapshotPublicId: string;
+  teacherAssessments: ProfileTeacherAssessment[];
+  onAssessmentSaved: (value: ProfileTeacherAssessment) => void;
 }) {
   return (
     <section className="profile-metric-section">
@@ -410,9 +619,18 @@ function ProfileMetricList({
                     ))}
                   </div>
                 )}
-                {metric.evidence.some((evidence) => evidence.source_module === "grading") && (
+                {metric.evidence.some((evidence) =>
+                  ["grading", "correction"].includes(evidence.source_module)) && (
                   <button onClick={onOpenExam}>回到题目批改查看原始证据</button>
                 )}
+                <TeacherAssessmentEditor
+                  snapshotPublicId={snapshotPublicId}
+                  metric={metric}
+                  current={teacherAssessments.find(
+                    (item) => item.node_metric_public_id === metric.public_id,
+                  ) ?? null}
+                  onSaved={onAssessmentSaved}
+                />
               </div>
             </details>
           );
@@ -558,6 +776,17 @@ function StudentProfilePanel({
     }
   };
 
+  const updateTeacherAssessment = (saved: ProfileTeacherAssessment) => {
+    setSnapshot((current) => {
+      if (!current || current.public_id !== saved.snapshot_public_id) return current;
+      const next = current.teacher_assessments.filter(
+        (item) => item.node_metric_public_id !== saved.node_metric_public_id,
+      );
+      next.push(saved);
+      return { ...current, teacher_assessments: next };
+    });
+  };
+
   if (students.length === 0) {
     return <div className="empty-state">当前班级没有启用学生，无法生成个人掌握快照。</div>;
   }
@@ -596,7 +825,7 @@ function StudentProfilePanel({
 
       <div className="learning-safety">
         <b>计算边界</b>
-        同一道题同一天只算一个独立组；订正和开卷已降权。M1 只确认总体时不会扩散为逐知识点结论。
+        同一道题同一天只算一个独立组；订正、巩固复测和开卷已降权。错题恢复事实与老师补充判断不会覆盖系统证据结论。
       </div>
       {profileError && <div className="error">{profileError}</div>}
       {loading && !preview && <div className="loading">正在核对可用学习证据…</div>}
@@ -644,6 +873,8 @@ function StudentProfilePanel({
             )}
           </div>
           <RecitationHistory summary={preview.recitation_summary} frozen={false} />
+          <ProfileWrongbookHistory summary={preview.wrongbook_summary} frozen={false}
+            onOpenExam={onOpenExam} />
         </section>
       )}
 
@@ -680,11 +911,18 @@ function StudentProfilePanel({
               <b>{snapshot.evidence_count}</b>
             </div>
           </div>
+          <StudentTrendPanel snapshot={snapshot} />
           <RecitationHistory summary={snapshot.recitation_summary} frozen />
+          <ProfileWrongbookHistory summary={snapshot.wrongbook_summary} frozen
+            onOpenExam={onOpenExam} />
           <ProfileMetricList title="知识掌握" metrics={snapshot.knowledge_metrics}
-            onOpenExam={onOpenExam} />
+            onOpenExam={onOpenExam} snapshotPublicId={snapshot.public_id}
+            teacherAssessments={snapshot.teacher_assessments}
+            onAssessmentSaved={updateTeacherAssessment} />
           <ProfileMetricList title="学科能力" metrics={snapshot.ability_metrics}
-            onOpenExam={onOpenExam} />
+            onOpenExam={onOpenExam} snapshotPublicId={snapshot.public_id}
+            teacherAssessments={snapshot.teacher_assessments}
+            onAssessmentSaved={updateTeacherAssessment} />
           <div className="profile-footnote">
             本快照不修改成绩、任务、错题或上游证据；历史版本保留，不生成学生排名。
           </div>

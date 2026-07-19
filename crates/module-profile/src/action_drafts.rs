@@ -1209,6 +1209,7 @@ mod tests {
         run_migrations(&conn, CORE_MIGRATIONS).unwrap();
         run_migrations(&conn, module_knowledge::knowledge_migrations()).unwrap();
         run_migrations(&conn, module_exam::exam_migrations()).unwrap();
+        run_migrations(&conn, module_wrongbook::wrongbook_migrations()).unwrap();
         run_migrations(&conn, crate::profile_migrations()).unwrap();
         conn.execute("INSERT INTO subjects(name) VALUES ('历史')", [])
             .unwrap();

@@ -112,6 +112,7 @@ fn main() {
             learning_commands::preview_student_profile,
             learning_commands::generate_student_profile,
             learning_commands::latest_student_profile,
+            learning_commands::save_profile_teacher_assessment,
             learning_commands::preview_class_profile,
             learning_commands::generate_class_profile,
             learning_commands::latest_class_profile,

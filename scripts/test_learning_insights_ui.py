@@ -5,6 +5,7 @@ from playwright.sync_api import expect, sync_playwright
 
 MOCK_SCRIPT = r"""
 window.__learningCalls = [];
+window.__teacherAssessmentRevision = 0;
 window.__TAURI_INTERNALS__ = {
   transformCallback: () => 1,
   unregisterCallback: () => undefined,
@@ -30,7 +31,7 @@ window.__TAURI_INTERNALS__ = {
     if (cmd === "preview_student_profile") {
       const input = args.input;
       return {
-        schema_version: 1, rule_version: "m6-confirmed-evidence-profile-v1",
+        schema_version: 3, rule_version: "m6-confirmed-evidence-profile-v3",
         calculated_at: "2026-07-17T03:00:00Z",
         student: input.studentId === 2
           ? { id: 2, class_id: 1, student_no: "02", name: "小周" }
@@ -48,7 +49,31 @@ window.__TAURI_INTERNALS__ = {
           ability_node_total: 2, ability_node_assessed: 1,
           ability_node_eligible: 0, machine_only_excluded: 2,
           teacher_overall_excluded: 1, unmapped_formal_excluded: 1,
+          unsupported_contract_excluded: 1,
           referenced_knowledge_map_count: 1
+        },
+        recitation_summary: {
+          overall_count: 1, fluency_count: 1, retention_count: 1,
+          latest_overall_value: 1, latest_fluency_value: 0.82,
+          latest_retention_value: 0.76, latest_at: "2026-07-16T07:30:00Z",
+          evidence: []
+        },
+        wrongbook_summary: {
+          fact_count: 1, needs_correction_count: 1, corrected_once_count: 0,
+          rechecked_correct_count: 0, repeated_error_count: 1,
+          latest_response_at: "2026-07-16T08:00:00Z",
+          note: "错题恢复事实不直接等同掌握。",
+          facts: [{
+            question_version_public_id: "qv-1", question_type: "single",
+            stem: "洋务运动失败的根本原因是？", status: "needs_correction",
+            first_error_at: "2026-07-14T08:00:00Z",
+            last_error_at: "2026-07-16T08:00:00Z",
+            latest_response_at: "2026-07-16T08:00:00Z",
+            published_response_count: 2, error_response_count: 2,
+            repeated_error: true, correction_status: null, reinforcement_status: null,
+            knowledge_nodes: [{ public_id: "k-1", title: "洋务运动失败原因" }],
+            ability_dimensions: [{ public_id: "a-1", title: "因果分析" }]
+          }]
         },
         source_watermark: "profile-watermark-1", can_generate: true, blocker: null,
         scope_note: "范围来自当前正式证据引用的已确认知识地图。",
@@ -79,6 +104,48 @@ window.__TAURI_INTERNALS__ = {
         generated_by: "local_teacher", generated_at: "2026-07-17T03:01:00Z",
         confirmed_by: "local_teacher", confirmed_at: "2026-07-17T03:01:00Z",
         is_stale: false, stale_reason: null,
+        recitation_summary: {
+          overall_count: 1, fluency_count: 1, retention_count: 1,
+          latest_overall_value: 1, latest_fluency_value: 0.82,
+          latest_retention_value: 0.76, latest_at: "2026-07-16T07:30:00Z",
+          evidence: []
+        },
+        wrongbook_summary: {
+          fact_count: 1, needs_correction_count: 1, corrected_once_count: 0,
+          rechecked_correct_count: 0, repeated_error_count: 1,
+          latest_response_at: "2026-07-16T08:00:00Z",
+          note: "错题恢复事实不直接等同掌握。",
+          facts: [{
+            question_version_public_id: "qv-1", question_type: "single",
+            stem: "洋务运动失败的根本原因是？", status: "needs_correction",
+            first_error_at: "2026-07-14T08:00:00Z",
+            last_error_at: "2026-07-16T08:00:00Z",
+            latest_response_at: "2026-07-16T08:00:00Z",
+            published_response_count: 2, error_response_count: 2,
+            repeated_error: true, correction_status: null, reinforcement_status: null,
+            knowledge_nodes: [{ public_id: "k-1", title: "洋务运动失败原因" }],
+            ability_dimensions: [{ public_id: "a-1", title: "因果分析" }]
+          }]
+        },
+        trend: {
+          comparison_status: "comparable", comparison_kind: "same_scope_refresh",
+          previous_snapshot_public_id: "profile-snapshot-0", previous_revision: 0,
+          previous_generated_at: "2026-07-16T03:01:00Z",
+          knowledge_assessed_before: 1, knowledge_assessed_current: 2,
+          knowledge_assessed_delta: 1, ability_assessed_before: 0,
+          ability_assessed_current: 1, ability_assessed_delta: 1,
+          needs_support_before: 1, needs_support_current: 0,
+          needs_support_delta: -1, stable_before: 0, stable_current: 1,
+          stable_delta: 1,
+          changed_nodes: [{
+            target_type: "knowledge_node", target_public_id: "k-1",
+            target_title: "洋务运动失败原因", previous_status: "developing",
+            current_status: "stable", previous_mastery_score: 0.72,
+            current_mastery_score: 0.88, mastery_score_delta: 0.16
+          }],
+          note: "只比较同范围、同策略和同证据契约的快照刷新。"
+        },
+        teacher_assessments: [],
         knowledge_metrics: [
           {
             public_id: "profile-metric-1", target_type: "knowledge_node",
@@ -139,6 +206,25 @@ window.__TAURI_INTERNALS__ = {
     }
     if (cmd === "latest_student_profile") {
       return window.__generatedProfile ?? null;
+    }
+    if (cmd === "save_profile_teacher_assessment") {
+      const input = args.input;
+      window.__teacherAssessmentRevision += 1;
+      return {
+        public_id: `teacher-assessment-${window.__teacherAssessmentRevision}`,
+        snapshot_public_id: input.snapshotPublicId,
+        node_metric_public_id: input.nodeMetricPublicId,
+        target_type: "knowledge_node", target_public_id: "k-1",
+        target_title: "洋务运动失败原因",
+        revision: window.__teacherAssessmentRevision,
+        assessment: input.assessment,
+        note: input.note ?? null,
+        state: input.assessment ? "active" : "voided",
+        supersedes_public_id: window.__teacherAssessmentRevision > 1
+          ? `teacher-assessment-${window.__teacherAssessmentRevision - 1}`
+          : null,
+        created_by: "local_teacher", created_at: "2026-07-17T03:02:00Z"
+      };
     }
     if (cmd === "wrongbook_schedule_policy") {
       return {
@@ -494,17 +580,42 @@ def test_learning_insights(base_url: str) -> None:
         expect(page.get_by_text("正式逐点证据", exact=True)).to_be_visible()
         preview_notes = page.locator(".profile-preview-notes")
         expect(preview_notes).to_contain_text("纯机器 2")
-        expect(preview_notes).to_contain_text("仅总体确认 1")
+        expect(preview_notes).to_contain_text("另有 1 条仅总体确认")
         expect(preview_notes).to_contain_text("未映射逐点 1")
         page.get_by_role("button", name="确认生成快照").click()
         expect(page.get_by_text("第 1 版掌握快照", exact=True)).to_be_visible()
-        expect(page.locator(".profile-metric-title").first).to_contain_text("未评估不等于薄弱")
+        expect(page.locator(".profile-metric-section").first
+               .locator(".profile-metric-title")).to_contain_text("未评估不等于薄弱")
+        snapshot_panel = page.locator(".profile-snapshot")
+        expect(snapshot_panel.get_by_text("错题恢复过程", exact=True)).to_be_visible()
+        expect(snapshot_panel.get_by_text("个人同口径趋势", exact=True)).to_be_visible()
+        expect(snapshot_panel.get_by_text("知识已评估变化", exact=True)).to_be_visible()
         unassessed_metric = page.locator(".profile-metric", has_text="戊戌变法过程")
         expect(unassessed_metric.get_by_text("戊戌变法过程", exact=True)).to_be_visible()
         expect(unassessed_metric).to_contain_text("未评估")
         stable_metric = page.locator(".profile-metric", has_text="洋务运动失败原因")
         stable_metric.locator("summary").click()
         expect(stable_metric.get_by_text("闭卷", exact=True)).to_be_visible()
+        stable_metric.get_by_label("洋务运动失败原因老师补充判断").select_option("observe")
+        stable_metric.get_by_label("洋务运动失败原因老师补充说明").fill("课堂回答较好，继续观察")
+        stable_metric.get_by_role("button", name="保存判断").click()
+        expect(stable_metric.get_by_text("当前：继续观察", exact=False)).to_be_visible()
+        assessment_calls = page.evaluate(
+            "() => window.__learningCalls.filter((item) => "
+            "item.cmd === 'save_profile_teacher_assessment')"
+        )
+        assert len(assessment_calls) == 1
+        assert assessment_calls[0]["args"]["input"]["expectedRevision"] == 0
+        assert assessment_calls[0]["args"]["input"]["assessment"] == "observe"
+        stable_metric.get_by_role("button", name="清除").click()
+        expect(stable_metric.get_by_text("当前：继续观察", exact=False)).not_to_be_visible()
+        assessment_calls = page.evaluate(
+            "() => window.__learningCalls.filter((item) => "
+            "item.cmd === 'save_profile_teacher_assessment')"
+        )
+        assert len(assessment_calls) == 2
+        assert assessment_calls[1]["args"]["input"]["expectedRevision"] == 1
+        assert assessment_calls[1]["args"]["input"]["assessment"] is None
         profile_calls = page.evaluate(
             "() => window.__learningCalls.filter((item) => "
             "item.cmd === 'generate_student_profile')"

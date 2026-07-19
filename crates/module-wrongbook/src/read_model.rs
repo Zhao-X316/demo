@@ -155,6 +155,7 @@ fn load_class(conn: &Connection, class_id: i64) -> CoreResult<WrongbookClass> {
 fn load_published_responses(
     conn: &Connection,
     class_id: i64,
+    student_id: Option<i64>,
 ) -> CoreResult<Vec<PublishedResponse>> {
     let mut statement = conn.prepare(
         "SELECT s.id,s.student_no,s.name,
@@ -166,6 +167,7 @@ fn load_published_responses(
          FROM exam_attempts_v2 attempt
          JOIN students s
            ON s.id=attempt.student_id AND s.class_id=?1 AND s.enabled=1
+          AND (?2 IS NULL OR s.id=?2)
          JOIN exam_grade_publications_v2 publication
            ON publication.id=attempt.active_publication_id
           AND publication.state='published'
@@ -190,7 +192,7 @@ fn load_published_responses(
           AND assessment.class_id=?1
          ORDER BY s.id,question.public_id,publication.published_at,decision.id",
     )?;
-    let rows = statement.query_map([class_id], |row| {
+    let rows = statement.query_map((class_id, student_id), |row| {
         Ok(PublishedResponse {
             student_id: row.get(0)?,
             student_no: row.get(1)?,
@@ -277,12 +279,13 @@ fn map_labels(labels: BTreeMap<String, String>) -> Vec<NamedReference> {
         .collect()
 }
 
-pub fn class_wrongbook_dashboard(
+fn wrongbook_dashboard(
     conn: &Connection,
     class_id: i64,
+    student_id: Option<i64>,
 ) -> CoreResult<ClassWrongbookDashboard> {
     let class = load_class(conn, class_id)?;
-    let responses = load_published_responses(conn, class_id)?;
+    let responses = load_published_responses(conn, class_id, student_id)?;
     let exam_watermark = responses
         .iter()
         .map(|response| response.published_at.as_str())
@@ -434,6 +437,33 @@ pub fn class_wrongbook_dashboard(
         summary,
         items,
     })
+}
+
+pub fn class_wrongbook_dashboard(
+    conn: &Connection,
+    class_id: i64,
+) -> CoreResult<ClassWrongbookDashboard> {
+    wrongbook_dashboard(conn, class_id, None)
+}
+
+pub fn student_wrongbook_items(
+    conn: &Connection,
+    class_id: i64,
+    student_id: i64,
+) -> CoreResult<Vec<WrongbookQuestion>> {
+    let belongs = conn
+        .query_row(
+            "SELECT 1 FROM students
+             WHERE id=?1 AND class_id=?2 AND enabled=1",
+            (student_id, class_id),
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .is_some();
+    if !belongs {
+        return Err(CoreError::Invalid("学生不属于当前班级或已停用".into()));
+    }
+    Ok(wrongbook_dashboard(conn, class_id, Some(student_id))?.items)
 }
 
 #[cfg(test)]
@@ -820,6 +850,21 @@ mod tests {
                 .summary
                 .wrong_question_count,
             0
+        );
+    }
+
+    #[test]
+    fn student_wrongbook_items_filter_before_building_facts() {
+        let mut fixture = Fixture::new();
+        fixture.publish_response(fixture.students[0], 1, "first", 0.0, "2026-07-01T08:00:00Z");
+        fixture.publish_response(fixture.students[1], 1, "first", 0.0, "2026-07-02T08:00:00Z");
+        let items =
+            student_wrongbook_items(&fixture.conn, fixture.class_one, fixture.students[1]).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].student_id, fixture.students[1]);
+        assert_eq!(items[0].student_no, "02");
+        assert!(
+            student_wrongbook_items(&fixture.conn, fixture.class_one, fixture.students[4]).is_err()
         );
     }
 

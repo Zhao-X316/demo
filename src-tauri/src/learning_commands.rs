@@ -19,6 +19,9 @@ use module_profile::profile::{
     self, GenerateStudentProfileInput, StudentProfilePreview, StudentProfileScope,
     StudentProfileSnapshot,
 };
+use module_profile::teacher_assessments::{
+    self, ProfileTeacherAssessment, SaveProfileTeacherAssessmentInput,
+};
 use module_profile::teaching_events::{
     self, ClassTeachingEvent, CreateTeachingEventInput, ReviseTeachingEventInput,
     VoidTeachingEventInput,
@@ -122,6 +125,16 @@ pub struct StudentProfileScopeRequest {
     student_id: i64,
     range_start: String,
     range_end: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveProfileTeacherAssessmentRequest {
+    snapshot_public_id: String,
+    node_metric_public_id: String,
+    expected_revision: i64,
+    assessment: Option<String>,
+    note: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -431,6 +444,26 @@ pub fn latest_student_profile(
     let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     profile::latest_student_profile(&connection, class_id, student_id)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn save_profile_teacher_assessment(
+    state: State<'_, AppState>,
+    input: SaveProfileTeacherAssessmentRequest,
+) -> Result<ProfileTeacherAssessment, String> {
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    teacher_assessments::save_profile_teacher_assessment(
+        &mut connection,
+        &SaveProfileTeacherAssessmentInput {
+            snapshot_public_id: &input.snapshot_public_id,
+            node_metric_public_id: &input.node_metric_public_id,
+            expected_revision: input.expected_revision,
+            assessment: input.assessment.as_deref(),
+            note: input.note.as_deref(),
+            actor_id: "local_teacher",
+        },
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

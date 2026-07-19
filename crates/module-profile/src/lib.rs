@@ -8,6 +8,7 @@ pub mod action_drafts;
 pub mod class_exports;
 pub mod class_profile;
 pub mod profile;
+pub mod teacher_assessments;
 pub mod teaching_events;
 
 use suite_core::models::ModuleKey;
@@ -37,6 +38,10 @@ static MIGRATIONS: &[Migration] = &[
     Migration {
         id: "profile_0006",
         sql: include_str!("../migrations/0006_recitation_evidence_links.sql"),
+    },
+    Migration {
+        id: "profile_0007",
+        sql: include_str!("../migrations/0007_wrongbook_and_teacher_assessments.sql"),
     },
 ];
 
