@@ -10,6 +10,7 @@ pub mod db;
 pub mod domain;
 pub mod golden;
 pub mod grader;
+pub mod pilot_metrics;
 pub mod service;
 
 use suite_core::models::ModuleKey;
