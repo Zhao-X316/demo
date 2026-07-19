@@ -8,6 +8,7 @@ pub mod asr_volcano;
 pub mod config;
 pub mod db;
 pub mod domain;
+pub mod golden;
 pub mod grader;
 pub mod service;
 
