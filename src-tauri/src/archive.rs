@@ -44,19 +44,27 @@ pub fn archive_audio(source: &Path, expected_hash: &str, dir: &Path) -> CoreResu
     }
     let actual_hash = suite_core::domain::hashing::sha256_file(source)?;
     if actual_hash != expected_hash {
-        return Err(CoreError::Invalid("归档前录音 hash 已变化，请重新导入".into()));
+        return Err(CoreError::Invalid(
+            "归档前录音 hash 已变化，请重新导入".into(),
+        ));
     }
     std::fs::create_dir_all(dir).map_err(|err| io_error("创建录音归档目录失败", err))?;
     let existing_prefix = format!("{expected_hash}.");
-    for entry in std::fs::read_dir(dir).map_err(|err| io_error("读取录音归档目录失败", err))? {
+    for entry in std::fs::read_dir(dir).map_err(|err| io_error("读取录音归档目录失败", err))?
+    {
         let entry = entry.map_err(|err| io_error("读取录音归档条目失败", err))?;
         let name = entry.file_name();
         if name.to_string_lossy().starts_with(&existing_prefix) && entry.path().is_file() {
             let archived_hash = suite_core::domain::hashing::sha256_file(&entry.path())?;
             if archived_hash != expected_hash {
-                return Err(CoreError::Invalid("同 hash 归档文件内容不一致，拒绝覆盖".into()));
+                return Err(CoreError::Invalid(
+                    "同 hash 归档文件内容不一致，拒绝覆盖".into(),
+                ));
             }
-            return Ok(ArchivedFile { path: entry.path(), created: false });
+            return Ok(ArchivedFile {
+                path: entry.path(),
+                created: false,
+            });
         }
     }
     let destination = dir.join(format!("{expected_hash}.{}", safe_extension(source)));
@@ -75,7 +83,10 @@ pub fn archive_audio(source: &Path, expected_hash: &str, dir: &Path) -> CoreResu
         let _ = std::fs::remove_file(&temp);
         return Err(err);
     }
-    Ok(ArchivedFile { path: destination, created: true })
+    Ok(ArchivedFile {
+        path: destination,
+        created: true,
+    })
 }
 
 #[cfg(test)]
@@ -113,7 +124,8 @@ mod tests {
 
     #[test]
     fn new_archive_can_be_compensated_but_reused_archive_is_preserved() {
-        let root = std::env::temp_dir().join(format!("jiaofu-archive-rollback-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("jiaofu-archive-rollback-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let source = root.join("original.m4a");

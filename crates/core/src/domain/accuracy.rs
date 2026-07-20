@@ -19,7 +19,11 @@ pub struct AccuracyCfg {
 
 impl Default for AccuracyCfg {
     fn default() -> Self {
-        Self { threshold: 95.0, use_pinyin: true, ignore_tone: true }
+        Self {
+            threshold: 95.0,
+            use_pinyin: true,
+            ignore_tone: true,
+        }
     }
 }
 
@@ -91,7 +95,11 @@ mod tests {
     #[test]
     fn missing_line_fails_threshold() {
         // 答案两句，只背一句 → 50%，低于 95 门槛
-        let r = evaluate("床前明月光疑是地上霜", "床前明月光", &AccuracyCfg::default());
+        let r = evaluate(
+            "床前明月光疑是地上霜",
+            "床前明月光",
+            &AccuracyCfg::default(),
+        );
         assert!(!r.pass);
         assert!(r.accuracy < 95.0);
     }
@@ -104,7 +112,10 @@ mod tests {
         let no_pinyin = evaluate(
             "疑是地上霜",
             "疑是地上双",
-            &AccuracyCfg { use_pinyin: false, ..cfg },
+            &AccuracyCfg {
+                use_pinyin: false,
+                ..cfg
+            },
         );
         assert!(with_pinyin.accuracy > no_pinyin.accuracy);
         assert!(with_pinyin.used_pinyin);

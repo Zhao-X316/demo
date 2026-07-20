@@ -20,11 +20,14 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// 对文件流式求 SHA-256（大文件不全量载入内存）。
 pub fn sha256_file(path: &std::path::Path) -> CoreResult<String> {
     use std::io::Read;
-    let mut f = std::fs::File::open(path).map_err(|e| crate::error::CoreError::Io(e.to_string()))?;
+    let mut f =
+        std::fs::File::open(path).map_err(|e| crate::error::CoreError::Io(e.to_string()))?;
     let mut h = Sha256::new();
     let mut buf = [0u8; 8192];
     loop {
-        let n = f.read(&mut buf).map_err(|e| crate::error::CoreError::Io(e.to_string()))?;
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| crate::error::CoreError::Io(e.to_string()))?;
         if n == 0 {
             break;
         }

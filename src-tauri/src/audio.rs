@@ -8,9 +8,12 @@ use std::process::Command;
 pub fn ffprobe_duration_ms(path: &str) -> Option<u64> {
     let out = Command::new("ffprobe")
         .args([
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
             path,
         ])
         .output()
@@ -25,7 +28,10 @@ pub fn ffprobe_duration_ms(path: &str) -> Option<u64> {
 
 /// 转 16k 单声道 wav 到 out_dir 临时文件。ffmpeg 不可用/失败则返回 None（调用方退回原文件）。
 pub fn transcode_to_wav16k(path: &str, out_dir: &Path) -> Option<PathBuf> {
-    let stem = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
+    let stem = Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("audio");
     let out = out_dir.join(format!("{stem}.asr16k.wav"));
     let status = Command::new("ffmpeg")
         .args(["-y", "-i", path, "-ar", "16000", "-ac", "1", "-f", "wav"])

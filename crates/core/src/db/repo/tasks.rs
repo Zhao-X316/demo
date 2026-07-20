@@ -246,10 +246,7 @@ pub fn list_for_scope(
          WHERE module=?1 AND student_id=?2 AND ref_type=?3 AND ref_id=?4 ORDER BY id"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(
-        (module.as_str(), student_id, ref_type, ref_id),
-        row_to_task,
-    )?;
+    let rows = stmt.query_map((module.as_str(), student_id, ref_type, ref_id), row_to_task)?;
     let mut out = Vec::new();
     for row in rows {
         out.push(row?);

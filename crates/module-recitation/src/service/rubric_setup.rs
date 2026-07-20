@@ -292,11 +292,7 @@ mod tests {
                 .iter()
                 .map(|value| value.canonical_text.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                "1840年鸦片战争爆发",
-                "清政府战败",
-                "1842年签订《南京条约》"
-            ]
+            vec!["1840年鸦片战争爆发", "清政府战败", "1842年签订《南京条约》"]
         );
         assert_eq!(count(&conn, "rec_rubric_versions"), before_rubrics);
         assert_eq!(count(&conn, "rec_rubric_points"), before_points);

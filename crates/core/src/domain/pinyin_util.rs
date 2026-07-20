@@ -11,7 +11,11 @@ pub fn to_pinyin(input: &str, ignore_tone: bool) -> String {
     let mut out = String::with_capacity(input.len() * 3);
     for (c, p) in input.chars().zip(input.to_pinyin()) {
         match p {
-            Some(py) => out.push_str(if ignore_tone { py.plain() } else { py.with_tone() }),
+            Some(py) => out.push_str(if ignore_tone {
+                py.plain()
+            } else {
+                py.with_tone()
+            }),
             None => out.push(c),
         }
     }

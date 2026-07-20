@@ -16,7 +16,9 @@ pub struct ParsedName {
 pub fn parse(file_stem: &str) -> CoreResult<ParsedName> {
     let parts: Vec<&str> = file_stem.split('_').collect();
     if parts.len() < 4 {
-        return Err(CoreError::Parse(format!("字段不足（需至少4段）: {file_stem}")));
+        return Err(CoreError::Parse(format!(
+            "字段不足（需至少4段）: {file_stem}"
+        )));
     }
     let raw = parts[0];
     if raw.len() != 8 || !raw.chars().all(|c| c.is_ascii_digit()) {
@@ -87,7 +89,11 @@ mod tests {
 
     #[test]
     fn parser_port_fills_meta() {
-        let f = IngestFile { path: std::path::Path::new("x"), file_stem: "20260625_2023001_张三_C012_2", ext: "m4a" };
+        let f = IngestFile {
+            path: std::path::Path::new("x"),
+            file_stem: "20260625_2023001_张三_C012_2",
+            ext: "m4a",
+        };
         let meta = FilenameParser.parse(&f).unwrap();
         assert_eq!(meta.get("student_no"), Some("2023001"));
         assert_eq!(meta.get("content_no"), Some("C012"));

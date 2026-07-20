@@ -78,10 +78,48 @@ mod tests {
         let conn = open_in_memory().unwrap();
         run_migrations(&conn, CORE_MIGRATIONS).unwrap();
         run_migrations(&conn, crate::recitation_migrations()).unwrap();
-        upsert_student(&conn, &StudentInput { student_no: "2023001", name: "张三", class_id: None, enabled: true }).unwrap();
-        upsert_student(&conn, &StudentInput { student_no: "2023002", name: "李四", class_id: None, enabled: true }).unwrap();
-        contents::upsert(&conn, &contents::ContentInput { content_no: "C012", title: "静夜思", answer_text: "床前明月光，疑是地上霜。举头望明月，低头思故乡。", subject_id: None, enabled: true }).unwrap();
-        contents::upsert(&conn, &contents::ContentInput { content_no: "C002", title: "春晓", answer_text: "春眠不觉晓，处处闻啼鸟。", subject_id: None, enabled: true }).unwrap();
+        upsert_student(
+            &conn,
+            &StudentInput {
+                student_no: "2023001",
+                name: "张三",
+                class_id: None,
+                enabled: true,
+            },
+        )
+        .unwrap();
+        upsert_student(
+            &conn,
+            &StudentInput {
+                student_no: "2023002",
+                name: "李四",
+                class_id: None,
+                enabled: true,
+            },
+        )
+        .unwrap();
+        contents::upsert(
+            &conn,
+            &contents::ContentInput {
+                content_no: "C012",
+                title: "静夜思",
+                answer_text: "床前明月光，疑是地上霜。举头望明月，低头思故乡。",
+                subject_id: None,
+                enabled: true,
+            },
+        )
+        .unwrap();
+        contents::upsert(
+            &conn,
+            &contents::ContentInput {
+                content_no: "C002",
+                title: "春晓",
+                answer_text: "春眠不觉晓，处处闻啼鸟。",
+                subject_id: None,
+                enabled: true,
+            },
+        )
+        .unwrap();
         conn
     }
 
@@ -105,8 +143,18 @@ mod tests {
     fn picks_correct_poem_among_many() {
         let conn = setup();
         let text = "李四 春眠不觉晓处处闻啼鸟";
-        let (content, _) = best_content(&conn, text, &NormalizeCfg::default(), &AccuracyCfg::default()).unwrap().unwrap();
+        let (content, _) = best_content(
+            &conn,
+            text,
+            &NormalizeCfg::default(),
+            &AccuracyCfg::default(),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(content.content_no, "C002");
-        assert_eq!(find_student(&conn, text).unwrap().unwrap().student_no, "2023002");
+        assert_eq!(
+            find_student(&conn, text).unwrap().unwrap().student_no,
+            "2023002"
+        );
     }
 }

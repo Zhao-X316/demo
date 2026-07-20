@@ -51,7 +51,10 @@ pub fn rename(conn: &Connection, id: i64, name: &str) -> CoreResult<()> {
 
 pub fn delete(conn: &Connection, id: i64) -> CoreResult<()> {
     // 子节点上提为根（parent_id=NULL），再删除本节点
-    conn.execute("UPDATE exam_knowledge_points SET parent_id=NULL WHERE parent_id=?1", [id])?;
+    conn.execute(
+        "UPDATE exam_knowledge_points SET parent_id=NULL WHERE parent_id=?1",
+        [id],
+    )?;
     conn.execute("DELETE FROM exam_knowledge_points WHERE id=?1", [id])?;
     Ok(())
 }
@@ -95,8 +98,26 @@ mod tests {
     #[test]
     fn tree_create_list_delete() {
         let conn = setup();
-        let board = create(&conn, &KpInput { subject_id: None, parent_id: None, code: Some("LX"), name: "力学" }).unwrap();
-        let child = create(&conn, &KpInput { subject_id: None, parent_id: Some(board.id), code: None, name: "动量守恒" }).unwrap();
+        let board = create(
+            &conn,
+            &KpInput {
+                subject_id: None,
+                parent_id: None,
+                code: Some("LX"),
+                name: "力学",
+            },
+        )
+        .unwrap();
+        let child = create(
+            &conn,
+            &KpInput {
+                subject_id: None,
+                parent_id: Some(board.id),
+                code: None,
+                name: "动量守恒",
+            },
+        )
+        .unwrap();
         assert_eq!(list(&conn).unwrap().len(), 2);
         assert_eq!(child.parent_id, Some(board.id));
 

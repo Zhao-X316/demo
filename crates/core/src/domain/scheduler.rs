@@ -47,12 +47,18 @@ pub fn next_with_ladder(
     };
     let stage = stage.clamp(0, last);
     let interval = ladder.get(stage as usize).copied().unwrap_or(1);
-    ScheduleOutcome { stage, interval_days: interval }
+    ScheduleOutcome {
+        stage,
+        interval_days: interval,
+    }
 }
 
 /// 正确率未达标（脱档/遗忘）：回到起点，next 走补背流程。
 pub fn lapse() -> ScheduleOutcome {
-    ScheduleOutcome { stage: 0, interval_days: DEFAULT_LADDER[0] }
+    ScheduleOutcome {
+        stage: 0,
+        interval_days: DEFAULT_LADDER[0],
+    }
 }
 
 /// 默认调度器（阶梯模式），实现 `ports::Scheduler`。
@@ -62,7 +68,9 @@ pub struct LadderScheduler {
 
 impl Default for LadderScheduler {
     fn default() -> Self {
-        Self { ladder: DEFAULT_LADDER.to_vec() }
+        Self {
+            ladder: DEFAULT_LADDER.to_vec(),
+        }
     }
 }
 

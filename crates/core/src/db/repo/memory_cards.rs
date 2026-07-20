@@ -56,7 +56,11 @@ pub fn get(
          WHERE module=?1 AND student_id=?2 AND ref_type=?3 AND ref_id=?4"
     );
     let c = conn
-        .query_row(&sql, (module.as_str(), student_id, ref_type, ref_id), row_to_card)
+        .query_row(
+            &sql,
+            (module.as_str(), student_id, ref_type, ref_id),
+            row_to_card,
+        )
         .optional()?;
     Ok(c)
 }
@@ -217,7 +221,12 @@ mod tests {
         run_migrations(&conn, CORE_MIGRATIONS).unwrap();
         let stu = upsert_student(
             &conn,
-            &StudentInput { student_no: "2023001", name: "张三", class_id: None, enabled: true },
+            &StudentInput {
+                student_no: "2023001",
+                name: "张三",
+                class_id: None,
+                enabled: true,
+            },
         )
         .unwrap();
 

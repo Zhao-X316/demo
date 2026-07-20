@@ -2,9 +2,7 @@
 //!
 //! 输入在短数据库锁内冻结，provider 调用在锁外执行，最终输出再以短事务写回。
 
-use module_exam::service::subjective::{
-    self, ShortAnswerGradeAnalysis,
-};
+use module_exam::service::subjective::{self, ShortAnswerGradeAnalysis};
 use module_exam::short_answer_grading::{
     ShortAnswerGradeErrorCode, ShortAnswerGradeFailure, ShortAnswerGradeOutput,
     ShortAnswerGradeRequest, ShortAnswerGraderDescriptor, SHORT_ANSWER_GRADE_SCHEMA_VERSION,

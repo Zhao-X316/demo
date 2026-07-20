@@ -20,11 +20,18 @@ const MODULE: ModuleKey = ModuleKey::Recitation;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImportOutcome {
     /// 成功导入。`warning` 用于姓名不一致等非阻塞提示。
-    Imported { submission_id: i64, task_id: i64, warning: Option<String> },
+    Imported {
+        submission_id: i64,
+        task_id: i64,
+        warning: Option<String>,
+    },
     /// 同 hash 已导入过。
     Duplicate { existing_submission_id: Option<i64> },
     /// 进入异常池。
-    Anomaly { submission_id: i64, anomaly_type: String },
+    Anomaly {
+        submission_id: i64,
+        anomaly_type: String,
+    },
 }
 
 pub struct ImportItem<'a> {
@@ -59,7 +66,10 @@ fn insert_anomaly(
         },
     )?;
     file_ledger::record(conn, item.file_hash, item.file_path, sub_id)?;
-    Ok(ImportOutcome::Anomaly { submission_id: sub_id, anomaly_type: anomaly_type.to_string() })
+    Ok(ImportOutcome::Anomaly {
+        submission_id: sub_id,
+        anomaly_type: anomaly_type.to_string(),
+    })
 }
 
 pub fn import_one(conn: &Connection, item: &ImportItem<'_>) -> CoreResult<ImportOutcome> {
@@ -73,7 +83,9 @@ fn import_one_inner(conn: &Connection, item: &ImportItem<'_>) -> CoreResult<Impo
     // 1. 去重
     if let Some(hit) = file_ledger::get(conn, item.file_hash)? {
         file_ledger::bump(conn, item.file_hash)?;
-        return Ok(ImportOutcome::Duplicate { existing_submission_id: hit.submission_id });
+        return Ok(ImportOutcome::Duplicate {
+            existing_submission_id: hit.submission_id,
+        });
     }
 
     // 2. 解析文件名
@@ -97,7 +109,14 @@ fn import_one_inner(conn: &Connection, item: &ImportItem<'_>) -> CoreResult<Impo
     let content = match contents::get_by_no(conn, &parsed.content_no)? {
         Some(c) if c.enabled => c,
         _ => {
-            return insert_anomaly(conn, item, Some(student.id), None, Some(&meta), "content_not_found")
+            return insert_anomaly(
+                conn,
+                item,
+                Some(student.id),
+                None,
+                Some(&meta),
+                "content_not_found",
+            )
         }
     };
 
@@ -106,14 +125,22 @@ fn import_one_inner(conn: &Connection, item: &ImportItem<'_>) -> CoreResult<Impo
         Some(t) => t,
         None => {
             return insert_anomaly(
-                conn, item, Some(student.id), Some(content.id), Some(&meta), "task_not_found",
+                conn,
+                item,
+                Some(student.id),
+                Some(content.id),
+                Some(&meta),
+                "task_not_found",
             )
         }
     };
 
     // 6. 姓名校验（非阻塞）
     let warning = if student.name != parsed.name {
-        Some(format!("姓名不一致：文件 {} / 档案 {}", parsed.name, student.name))
+        Some(format!(
+            "姓名不一致：文件 {} / 档案 {}",
+            parsed.name, student.name
+        ))
     } else {
         None
     };
@@ -138,7 +165,11 @@ fn import_one_inner(conn: &Connection, item: &ImportItem<'_>) -> CoreResult<Impo
     file_ledger::record(conn, item.file_hash, item.file_path, sub_id)?;
     tasks::set_status(conn, task.id, TaskStatus::Submitted)?;
 
-    Ok(ImportOutcome::Imported { submission_id: sub_id, task_id: task.id, warning })
+    Ok(ImportOutcome::Imported {
+        submission_id: sub_id,
+        task_id: task.id,
+        warning,
+    })
 }
 
 /// 已解析身份的导入（用于"内容识别→自动命名"）：直接按 学生/内容 建提交、挂开放任务、记账本。
@@ -315,12 +346,8 @@ pub fn finish_resolved_recognition(
             input.content_id,
         )?;
     }
-    let outcome = scoring::score_submission_inner(
-        &tx,
-        input.submission_id,
-        input.words,
-        input.cfg,
-    )?;
+    let outcome =
+        scoring::score_submission_inner(&tx, input.submission_id, input.words, input.cfg)?;
     submissions::clear_anomaly(&tx, input.submission_id)?;
     tx.commit()?;
     Ok(outcome)
@@ -345,12 +372,7 @@ pub fn finish_unmatched_recognition(
     )?;
     if mark_anomaly {
         let meta = serde_json::json!({ "asr": recognized_text }).to_string();
-        submissions::mark_anomaly(
-            &tx,
-            submission_id,
-            "autoname_unmatched",
-            Some(&meta),
-        )?;
+        submissions::mark_anomaly(&tx, submission_id, "autoname_unmatched", Some(&meta))?;
     }
     tx.commit()?;
     Ok(())
@@ -374,20 +396,37 @@ mod tests {
     fn seed_full(conn: &Connection) -> (i64, i64) {
         let s = upsert_student(
             conn,
-            &StudentInput { student_no: "2023001", name: "张三", class_id: None, enabled: true },
+            &StudentInput {
+                student_no: "2023001",
+                name: "张三",
+                class_id: None,
+                enabled: true,
+            },
         )
         .unwrap();
         let c = contents::upsert(
             conn,
-            &contents::ContentInput { content_no: "C012", title: "静夜思", answer_text: "床前明月光", subject_id: None, enabled: true },
+            &contents::ContentInput {
+                content_no: "C012",
+                title: "静夜思",
+                answer_text: "床前明月光",
+                subject_id: None,
+                enabled: true,
+            },
         )
         .unwrap();
         let tid = tasks::insert(
             conn,
             &NewTask {
-                module: MODULE, student_id: s.id, subject_id: None, ref_type: "content",
-                ref_id: c.id, kind: TaskKind::Normal, due_date: "2026-06-25",
-                source_task_id: None, card_id: None,
+                module: MODULE,
+                student_id: s.id,
+                subject_id: None,
+                ref_type: "content",
+                ref_id: c.id,
+                kind: TaskKind::Normal,
+                due_date: "2026-06-25",
+                source_task_id: None,
+                card_id: None,
             },
         )
         .unwrap();
@@ -426,11 +465,18 @@ mod tests {
         let (_sid, tid) = seed_full(&conn);
         let out = import_one(
             &conn,
-            &ImportItem { file_path: "/x/20260625_2023001_张三_C012_1.m4a", file_stem: "20260625_2023001_张三_C012_1", file_hash: "h1", duration_ms: Some(3000) },
+            &ImportItem {
+                file_path: "/x/20260625_2023001_张三_C012_1.m4a",
+                file_stem: "20260625_2023001_张三_C012_1",
+                file_hash: "h1",
+                duration_ms: Some(3000),
+            },
         )
         .unwrap();
         match out {
-            ImportOutcome::Imported { task_id, warning, .. } => {
+            ImportOutcome::Imported {
+                task_id, warning, ..
+            } => {
                 assert_eq!(task_id, tid);
                 assert!(warning.is_none());
             }
@@ -444,7 +490,12 @@ mod tests {
     fn duplicate_hash_is_idempotent() {
         let conn = setup();
         seed_full(&conn);
-        let item = ImportItem { file_path: "/x/a.m4a", file_stem: "20260625_2023001_张三_C012_1", file_hash: "h1", duration_ms: None };
+        let item = ImportItem {
+            file_path: "/x/a.m4a",
+            file_stem: "20260625_2023001_张三_C012_1",
+            file_hash: "h1",
+            duration_ms: None,
+        };
         import_one(&conn, &item).unwrap();
         let out = import_one(&conn, &item).unwrap();
         assert!(matches!(out, ImportOutcome::Duplicate { .. }));
@@ -455,10 +506,17 @@ mod tests {
         let conn = setup();
         let out = import_one(
             &conn,
-            &ImportItem { file_path: "/x/bad.m4a", file_stem: "bad-name", file_hash: "h2", duration_ms: None },
+            &ImportItem {
+                file_path: "/x/bad.m4a",
+                file_stem: "bad-name",
+                file_hash: "h2",
+                duration_ms: None,
+            },
         )
         .unwrap();
-        assert!(matches!(out, ImportOutcome::Anomaly { ref anomaly_type, .. } if anomaly_type == "parse_error"));
+        assert!(
+            matches!(out, ImportOutcome::Anomaly { ref anomaly_type, .. } if anomaly_type == "parse_error")
+        );
     }
 
     #[test]
@@ -467,20 +525,53 @@ mod tests {
         // 没有任何 seed → 学生不存在
         let out = import_one(
             &conn,
-            &ImportItem { file_path: "/x/a.m4a", file_stem: "20260625_2023001_张三_C012", file_hash: "h3", duration_ms: None },
+            &ImportItem {
+                file_path: "/x/a.m4a",
+                file_stem: "20260625_2023001_张三_C012",
+                file_hash: "h3",
+                duration_ms: None,
+            },
         )
         .unwrap();
-        assert!(matches!(out, ImportOutcome::Anomaly { ref anomaly_type, .. } if anomaly_type == "student_not_found"));
+        assert!(
+            matches!(out, ImportOutcome::Anomaly { ref anomaly_type, .. } if anomaly_type == "student_not_found")
+        );
 
         // 有学生有内容但无任务 → task_not_found
-        upsert_student(&conn, &StudentInput { student_no: "2023002", name: "李四", class_id: None, enabled: true }).unwrap();
-        contents::upsert(&conn, &contents::ContentInput { content_no: "C099", title: "x", answer_text: "y", subject_id: None, enabled: true }).unwrap();
-        let out = import_one(
+        upsert_student(
             &conn,
-            &ImportItem { file_path: "/x/b.m4a", file_stem: "20260625_2023002_李四_C099", file_hash: "h4", duration_ms: None },
+            &StudentInput {
+                student_no: "2023002",
+                name: "李四",
+                class_id: None,
+                enabled: true,
+            },
         )
         .unwrap();
-        assert!(matches!(out, ImportOutcome::Anomaly { ref anomaly_type, .. } if anomaly_type == "task_not_found"));
+        contents::upsert(
+            &conn,
+            &contents::ContentInput {
+                content_no: "C099",
+                title: "x",
+                answer_text: "y",
+                subject_id: None,
+                enabled: true,
+            },
+        )
+        .unwrap();
+        let out = import_one(
+            &conn,
+            &ImportItem {
+                file_path: "/x/b.m4a",
+                file_stem: "20260625_2023002_李四_C099",
+                file_hash: "h4",
+                duration_ms: None,
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(out, ImportOutcome::Anomaly { ref anomaly_type, .. } if anomaly_type == "task_not_found")
+        );
     }
 
     #[test]
@@ -489,7 +580,12 @@ mod tests {
         seed_full(&conn); // 学号2023001 档案姓名"张三"
         let out = import_one(
             &conn,
-            &ImportItem { file_path: "/x/a.m4a", file_stem: "20260625_2023001_张三丰_C012", file_hash: "h5", duration_ms: None },
+            &ImportItem {
+                file_path: "/x/a.m4a",
+                file_stem: "20260625_2023001_张三丰_C012",
+                file_hash: "h5",
+                duration_ms: None,
+            },
         )
         .unwrap();
         match out {
@@ -587,13 +683,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(reassign(
-            &conn,
-            anomaly_id,
-            Some(student_id),
-            Some(content_id)
-        )
-        .is_err());
+        assert!(reassign(&conn, anomaly_id, Some(student_id), Some(content_id)).is_err());
         let submission = submissions::get(&conn, anomaly_id).unwrap().unwrap();
         assert_eq!(submission.student_id, None);
         assert_eq!(submission.ref_id, None);

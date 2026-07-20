@@ -124,9 +124,15 @@ async fn recognize_flash(
 
     let http = resp.status();
     let api_code = status_code(&resp);
-    let raw = resp.text().await.map_err(|err| format!("读取响应失败: {err}"))?;
+    let raw = resp
+        .text()
+        .await
+        .map_err(|err| format!("读取响应失败: {err}"))?;
     if !http.is_success() {
-        return Err(format!("火山 HTTP {http} (status_code={api_code}): {}", truncate(&raw, 500)));
+        return Err(format!(
+            "火山 HTTP {http} (status_code={api_code}): {}",
+            truncate(&raw, 500)
+        ));
     }
     let v: Value = serde_json::from_str(&raw)
         .map_err(|err| format!("解析响应失败: {err}; 原文: {}", truncate(&raw, 500)))?;
@@ -151,9 +157,15 @@ async fn recognize_standard(
         .map_err(|err| format!("火山 submit 请求失败: {err}"))?;
     let http = resp.status();
     let code = status_code(&resp);
-    let raw = resp.text().await.map_err(|err| format!("读取 submit 响应失败: {err}"))?;
+    let raw = resp
+        .text()
+        .await
+        .map_err(|err| format!("读取 submit 响应失败: {err}"))?;
     if !http.is_success() || (!code.is_empty() && code != "20000000") {
-        return Err(format!("火山 submit 失败 HTTP {http} (status_code={code}): {}", truncate(&raw, 500)));
+        return Err(format!(
+            "火山 submit 失败 HTTP {http} (status_code={code}): {}",
+            truncate(&raw, 500)
+        ));
     }
 
     // —— 2. 轮询查询（同一 request_id 作为任务号）——
@@ -165,28 +177,41 @@ async fn recognize_standard(
             .await
             .map_err(|err| format!("火山 query 请求失败: {err}"))?;
         let code = status_code(&resp);
-        let raw = resp.text().await.map_err(|err| format!("读取 query 响应失败: {err}"))?;
+        let raw = resp
+            .text()
+            .await
+            .map_err(|err| format!("读取 query 响应失败: {err}"))?;
 
         if code == "20000000" {
             // 完成
-            let v: Value = serde_json::from_str(&raw)
-                .map_err(|err| format!("解析 query 响应失败: {err}; 原文: {}", truncate(&raw, 500)))?;
+            let v: Value = serde_json::from_str(&raw).map_err(|err| {
+                format!("解析 query 响应失败: {err}; 原文: {}", truncate(&raw, 500))
+            })?;
             return parse_result(&v, &code, &raw);
         } else if code == "20000001" || code == "20000002" || code.is_empty() {
             // 处理中 / 排队中 / 头暂缺 → 继续轮询
             continue;
         } else {
-            return Err(format!("火山 query 失败 (status_code={code}): {}", truncate(&raw, 500)));
+            return Err(format!(
+                "火山 query 失败 (status_code={code}): {}",
+                truncate(&raw, 500)
+            ));
         }
     }
-    Err(format!("火山识别超时：轮询 {POLL_MAX} 次仍未返回结果（标准版任务可能较慢，可重试）"))
+    Err(format!(
+        "火山识别超时：轮询 {POLL_MAX} 次仍未返回结果（标准版任务可能较慢，可重试）"
+    ))
 }
 
 /// 解析识别结果（标准版/极速版结构一致：result.text + result.utterances；
 /// 时长可能在顶层 audio_info 或 result.audio_info）。
 fn parse_result(v: &Value, api_code: &str, raw: &str) -> Result<AsrOutput, String> {
     let result = v.get("result").cloned().unwrap_or(Value::Null);
-    let text = result.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string();
+    let text = result
+        .get("text")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
 
     let mut words = Vec::new();
     let mut max_end = 0u64;
@@ -194,12 +219,20 @@ fn parse_result(v: &Value, api_code: &str, raw: &str) -> Result<AsrOutput, Strin
         for utt in utts {
             if let Some(ws) = utt.get("words").and_then(|w| w.as_array()) {
                 for w in ws {
-                    let t = w.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    let t = w
+                        .get("text")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let s = w.get("start_time").and_then(|x| x.as_u64()).unwrap_or(0);
                     let e = w.get("end_time").and_then(|x| x.as_u64()).unwrap_or(s);
                     max_end = max_end.max(e);
                     if !t.is_empty() {
-                        words.push(RecognizedWord { text: t, start_ms: s, end_ms: e });
+                        words.push(RecognizedWord {
+                            text: t,
+                            start_ms: s,
+                            end_ms: e,
+                        });
                     }
                 }
             }
@@ -219,9 +252,16 @@ fn parse_result(v: &Value, api_code: &str, raw: &str) -> Result<AsrOutput, Strin
         .unwrap_or(max_end);
 
     if text.is_empty() && words.is_empty() {
-        return Err(format!("火山返回为空 (status_code={api_code}): {}", truncate(raw, 500)));
+        return Err(format!(
+            "火山返回为空 (status_code={api_code}): {}",
+            truncate(raw, 500)
+        ));
     }
-    Ok(AsrOutput { text, words, duration_ms })
+    Ok(AsrOutput {
+        text,
+        words,
+        duration_ms,
+    })
 }
 
 fn truncate(s: &str, n: usize) -> String {

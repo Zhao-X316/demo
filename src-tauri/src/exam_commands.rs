@@ -774,23 +774,24 @@ async fn grade_answer_sheet_short_answer(
     let input = std::sync::Arc::new(input);
     let ai_run_id = {
         let mut conn = lock(state)?;
-        match short_answer_run::begin(&mut conn, &input, &descriptor, &idempotency_key).map_err(e)? {
+        match short_answer_run::begin(&mut conn, &input, &descriptor, &idempotency_key)
+            .map_err(e)?
+        {
             BeginShortAnswerGradeRun::Execute { ai_run_id } => ai_run_id,
             BeginShortAnswerGradeRun::Completed(result) => return Ok(*result),
         }
     };
     let worker_input = std::sync::Arc::clone(&input);
-    let provider_result =
-        tauri::async_runtime::spawn_blocking(move || grader.grade(&worker_input))
-            .await
-            .unwrap_or_else(|_| {
-                Err(ShortAnswerGradeFailure {
-                    schema_version: SHORT_ANSWER_GRADE_SCHEMA_VERSION,
-                    code: ShortAnswerGradeErrorCode::Internal,
-                    safe_message: "简答题评分任务意外中断，已保留转写等待重试".into(),
-                    retryable: true,
-                })
-            });
+    let provider_result = tauri::async_runtime::spawn_blocking(move || grader.grade(&worker_input))
+        .await
+        .unwrap_or_else(|_| {
+            Err(ShortAnswerGradeFailure {
+                schema_version: SHORT_ANSWER_GRADE_SCHEMA_VERSION,
+                code: ShortAnswerGradeErrorCode::Internal,
+                safe_message: "简答题评分任务意外中断，已保留转写等待重试".into(),
+                retryable: true,
+            })
+        });
     let mut conn = lock(state)?;
     short_answer_run::finish(&mut conn, &input, ai_run_id, provider_result).map_err(e)
 }
@@ -834,12 +835,8 @@ pub async fn exam_answer_sheet_process_page(
                         "answer-sheet:transcription:{}:answer-grade-v1",
                         transcription.id
                     );
-                    if let Err(safe_message) = grade_answer_sheet_short_answer(
-                        &state,
-                        transcription.id,
-                        grade_key,
-                    )
-                    .await
+                    if let Err(safe_message) =
+                        grade_answer_sheet_short_answer(&state, transcription.id, grade_key).await
                     {
                         result.subjective_failures.push(
                             answer_sheet_materialization::AnswerSheetSubjectiveRegionFailure {

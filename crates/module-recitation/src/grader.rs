@@ -28,7 +28,12 @@ impl Grader for RecitationGrader {
         let asr = normalize::normalize(input.asr_text, input.normalize_cfg);
 
         let acc = accuracy::evaluate(&ans, &asr, input.accuracy_cfg);
-        let flu = fluency::evaluate(input.asr_text, input.words, input.duration_ms, input.fluency_cfg);
+        let flu = fluency::evaluate(
+            input.asr_text,
+            input.words,
+            input.duration_ms,
+            input.fluency_cfg,
+        );
 
         let metrics = serde_json::json!({
             "coverage": acc.coverage,
@@ -42,7 +47,11 @@ impl Grader for RecitationGrader {
         let note = format!(
             "正确率 {}%（{}），熟练度 {}={}",
             acc.accuracy as i64,
-            if acc.pass { "通过" } else { "未达标→次日补背" },
+            if acc.pass {
+                "通过"
+            } else {
+                "未达标→次日补背"
+            },
             flu.fluency as i64,
             flu.quality.as_str()
         );
@@ -66,7 +75,11 @@ mod tests {
     #[test]
     fn perfect_recite_passes_and_reports_quality() {
         let words: Vec<_> = (0..20)
-            .map(|i| RecognizedWord { text: "字".into(), start_ms: i * 250, end_ms: i * 250 + 250 })
+            .map(|i| RecognizedWord {
+                text: "字".into(),
+                start_ms: i * 250,
+                end_ms: i * 250 + 250,
+            })
             .collect();
         let answer = "字".repeat(20);
         let input = RecitationGradeInput {

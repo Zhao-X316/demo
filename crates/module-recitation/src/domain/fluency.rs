@@ -41,7 +41,10 @@ pub struct FluencyCfg {
 impl Default for FluencyCfg {
     fn default() -> Self {
         Self {
-            fillers: ["嗯", "啊", "呃", "那个", "这个"].iter().map(|s| s.to_string()).collect(),
+            fillers: ["嗯", "啊", "呃", "那个", "这个"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             ideal_cps: 4.0,
             a_min: 85.0,
             b_min: 70.0,
@@ -89,7 +92,9 @@ pub fn evaluate(
     let speed_pen = ((cfg.ideal_cps - cps).abs() / cfg.ideal_cps).min(1.0) * 30.0;
     let pause_pen = pause_ratio * 40.0;
     let filler_pen = (filler_count as f64 * 5.0).min(30.0);
-    let fluency = (100.0 - speed_pen - pause_pen - filler_pen).max(0.0).round();
+    let fluency = (100.0 - speed_pen - pause_pen - filler_pen)
+        .max(0.0)
+        .round();
 
     let quality = if fluency >= cfg.a_min {
         Quality::A
@@ -102,7 +107,14 @@ pub fn evaluate(
     // 无词级时间戳时，停顿不可信 → 降低置信度
     let confidence = if words.is_empty() { 0.4 } else { 0.9 };
 
-    FluencyResult { fluency, quality, cps, pause_ratio, filler_count, confidence }
+    FluencyResult {
+        fluency,
+        quality,
+        cps,
+        pause_ratio,
+        filler_count,
+        confidence,
+    }
 }
 
 #[cfg(test)]
@@ -110,7 +122,11 @@ mod tests {
     use super::*;
 
     fn w(text: &str, s: u64, e: u64) -> RecognizedWord {
-        RecognizedWord { text: text.into(), start_ms: s, end_ms: e }
+        RecognizedWord {
+            text: text.into(),
+            start_ms: s,
+            end_ms: e,
+        }
     }
 
     #[test]

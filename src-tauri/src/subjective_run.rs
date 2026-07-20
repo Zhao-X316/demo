@@ -119,11 +119,9 @@ pub fn begin(
             ai_runs::start(conn, run.id, &time::utc_now_rfc3339(), None)?;
             Ok(BeginSubjectiveOcrRun::Execute { ai_run_id: run.id })
         }
-        AiRunStatus::Succeeded | AiRunStatus::Failed => {
-            Ok(BeginSubjectiveOcrRun::Completed(Box::new(
-                subjective::record_ocr_ai_run_transcription(conn, run.id)?,
-            )))
-        }
+        AiRunStatus::Succeeded | AiRunStatus::Failed => Ok(BeginSubjectiveOcrRun::Completed(
+            Box::new(subjective::record_ocr_ai_run_transcription(conn, run.id)?),
+        )),
         AiRunStatus::Processing => Err(CoreError::Invalid(
             "该主观题区正在识别，请勿重复提交".into(),
         )),

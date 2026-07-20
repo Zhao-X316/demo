@@ -94,7 +94,12 @@ mod tests {
         run_migrations(&conn, CORE_MIGRATIONS).unwrap();
         let s = upsert_student(
             &conn,
-            &StudentInput { student_no: "2023001", name: "张三", class_id: None, enabled: true },
+            &StudentInput {
+                student_no: "2023001",
+                name: "张三",
+                class_id: None,
+                enabled: true,
+            },
         )
         .unwrap();
         (conn, s.id)
@@ -104,7 +109,12 @@ mod tests {
     fn first_pass_good_schedules_two_days_out() {
         let (conn, sid) = setup();
         let sched = LadderScheduler::default();
-        let r = ReviewRef { module: ModuleKey::Recitation, student_id: sid, ref_type: "content", ref_id: 7 };
+        let r = ReviewRef {
+            module: ModuleKey::Recitation,
+            student_id: sid,
+            ref_type: "content",
+            ref_id: 7,
+        };
         let today = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
 
         let out = record_pass(&conn, &r, ReviewQuality::Good, today, &sched).unwrap();
@@ -122,7 +132,12 @@ mod tests {
     fn second_pass_good_advances_two_stages() {
         let (conn, sid) = setup();
         let sched = LadderScheduler::default();
-        let r = ReviewRef { module: ModuleKey::Recitation, student_id: sid, ref_type: "content", ref_id: 7 };
+        let r = ReviewRef {
+            module: ModuleKey::Recitation,
+            student_id: sid,
+            ref_type: "content",
+            ref_id: 7,
+        };
         let day1 = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
         record_pass(&conn, &r, ReviewQuality::Good, day1, &sched).unwrap(); // stage 1
 
@@ -140,7 +155,12 @@ mod tests {
     #[test]
     fn lapse_marks_lapsed_and_resets() {
         let (conn, sid) = setup();
-        let r = ReviewRef { module: ModuleKey::Recitation, student_id: sid, ref_type: "content", ref_id: 7 };
+        let r = ReviewRef {
+            module: ModuleKey::Recitation,
+            student_id: sid,
+            ref_type: "content",
+            ref_id: 7,
+        };
         let today = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
         record_lapse(&conn, &r, today).unwrap();
         let card = memory_cards::get(&conn, ModuleKey::Recitation, sid, "content", 7)
@@ -156,7 +176,12 @@ mod tests {
     fn good_pass_after_lapse_restarts_from_first_stage_and_keeps_lapse_count() {
         let (conn, sid) = setup();
         let sched = LadderScheduler::default();
-        let r = ReviewRef { module: ModuleKey::Recitation, student_id: sid, ref_type: "content", ref_id: 7 };
+        let r = ReviewRef {
+            module: ModuleKey::Recitation,
+            student_id: sid,
+            ref_type: "content",
+            ref_id: 7,
+        };
         let failed_on = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
         record_lapse(&conn, &r, failed_on).unwrap();
 

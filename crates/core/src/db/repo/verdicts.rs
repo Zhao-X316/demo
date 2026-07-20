@@ -46,16 +46,27 @@ pub fn insert(conn: &Connection, v: &NewVerdict<'_>) -> CoreResult<i64> {
              confidence, answer_version, metrics_json, machine_note)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
         (
-            v.submission_id, v.module.as_str(), v.primary_score, v.pass.map(|b| b as i64),
-            v.secondary_score, v.quality, v.confidence, v.answer_version, v.metrics_json, v.machine_note,
+            v.submission_id,
+            v.module.as_str(),
+            v.primary_score,
+            v.pass.map(|b| b as i64),
+            v.secondary_score,
+            v.quality,
+            v.confidence,
+            v.answer_version,
+            v.metrics_json,
+            v.machine_note,
         ),
     )?;
     Ok(conn.last_insert_rowid())
 }
 
 pub fn get_by_submission(conn: &Connection, submission_id: i64) -> CoreResult<Option<Verdict>> {
-    let sql = format!("SELECT {COLS} FROM verdicts WHERE submission_id=?1 ORDER BY id DESC LIMIT 1");
-    Ok(conn.query_row(&sql, [submission_id], row_to_verdict).optional()?)
+    let sql =
+        format!("SELECT {COLS} FROM verdicts WHERE submission_id=?1 ORDER BY id DESC LIMIT 1");
+    Ok(conn
+        .query_row(&sql, [submission_id], row_to_verdict)
+        .optional()?)
 }
 
 /// 人工最终结论。

@@ -79,8 +79,16 @@ impl RecitationConfig {
             b_min: self.quality_b_min,
             ..FluencyCfg::default()
         };
-        let normalize = NormalizeCfg { remove_fillers: self.remove_fillers, ..NormalizeCfg::default() };
-        ScoreCfg { normalize, accuracy, fluency, makeup_offset_days: self.makeup_offset_days }
+        let normalize = NormalizeCfg {
+            remove_fillers: self.remove_fillers,
+            ..NormalizeCfg::default()
+        };
+        ScoreCfg {
+            normalize,
+            accuracy,
+            fluency,
+            makeup_offset_days: self.makeup_offset_days,
+        }
     }
 }
 

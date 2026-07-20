@@ -1430,8 +1430,7 @@ mod tests {
             "../tests/fixtures/pilot_metrics/synthetic_contract_observations_v1.json"
         ))
         .unwrap();
-        let report =
-            evaluate_recitation_pilot(&set, "2026-07-18T09:00:00Z", "2026-07-18").unwrap();
+        let report = evaluate_recitation_pilot(&set, "2026-07-18T09:00:00Z", "2026-07-18").unwrap();
         assert_eq!(
             report.report_sha256,
             "ce7163281aa3397678c1f277b6787d772b4b6559ea01bc63bfbd1981ac780dfb"

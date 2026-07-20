@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use module_exam::short_answer_grading::{
     ShortAnswerGradeErrorCode, ShortAnswerGradeFailure, ShortAnswerGradeOutput,
-    ShortAnswerGradeRequest, ShortAnswerGradeState, ShortAnswerGrader,
-    ShortAnswerGraderDescriptor, ShortAnswerPointResult, SHORT_ANSWER_GRADE_SCHEMA_VERSION,
+    ShortAnswerGradeRequest, ShortAnswerGradeState, ShortAnswerGrader, ShortAnswerGraderDescriptor,
+    ShortAnswerPointResult, SHORT_ANSWER_GRADE_SCHEMA_VERSION,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};

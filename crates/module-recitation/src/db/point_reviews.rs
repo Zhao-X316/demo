@@ -306,9 +306,10 @@ fn definition_hash(
     let definition_items = items
         .iter()
         .map(|item| {
-            let evidence_spans: Value = serde_json::from_str(&item.evidence_spans_json).map_err(
-                |error| CoreError::Invalid(format!("逐点评审证据时间段解析失败: {error}")),
-            )?;
+            let evidence_spans: Value =
+                serde_json::from_str(&item.evidence_spans_json).map_err(|error| {
+                    CoreError::Invalid(format!("逐点评审证据时间段解析失败: {error}"))
+                })?;
             Ok(serde_json::json!({
                 "source_point_result_id": item.source_point_result_id,
                 "rubric_point_id": item.rubric_point_id,
@@ -419,9 +420,7 @@ pub(crate) fn record_review_inner(
         [review_id],
     )?;
     if sealed != 1 {
-        return Err(CoreError::Invalid(
-            "逐点评审封存失败，请刷新后重试".into(),
-        ));
+        return Err(CoreError::Invalid("逐点评审封存失败，请刷新后重试".into()));
     }
     let accepted_count: i64 = conn.query_row(
         "SELECT count(*) FROM rec_point_review_items

@@ -173,10 +173,7 @@ fn rollover_inner(conn: &Connection, today: NaiveDate) -> CoreResult<usize> {
 }
 
 /// 一次日切同时完成逾期补背和到期复习；任一步失败则全部回滚。
-pub fn run_day_rollover(
-    conn: &Connection,
-    today: NaiveDate,
-) -> CoreResult<(usize, Vec<i64>)> {
+pub fn run_day_rollover(conn: &Connection, today: NaiveDate) -> CoreResult<(usize, Vec<i64>)> {
     let tx = conn.unchecked_transaction()?;
     let rolled = rollover_inner(&tx, today)?;
     let today_str = today.format("%Y-%m-%d").to_string();
@@ -391,19 +388,17 @@ mod tests {
         )
         .unwrap();
 
-        assert!(run_day_rollover(
-            &conn,
-            NaiveDate::from_ymd_opt(2026, 6, 25).unwrap()
-        )
-        .is_err());
+        assert!(run_day_rollover(&conn, NaiveDate::from_ymd_opt(2026, 6, 25).unwrap()).is_err());
         assert_eq!(
             tasks::get(&conn, stale_id).unwrap().unwrap().status,
             TaskStatus::Open
         );
         let created: i64 = conn
-            .query_row("SELECT count(*) FROM tasks WHERE id<>?1", [stale_id], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT count(*) FROM tasks WHERE id<>?1",
+                [stale_id],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(created, 0, "补背和复习都必须回滚");
     }

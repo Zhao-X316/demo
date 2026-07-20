@@ -702,12 +702,8 @@ pub fn list_class_teaching_inputs(
     limit: Option<i64>,
 ) -> Result<Vec<ClassTeachingInputDraft>, String> {
     let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
-    class_teaching_inputs::list_class_teaching_inputs(
-        &connection,
-        class_id,
-        limit.unwrap_or(20),
-    )
-    .map_err(|error| error.to_string())
+    class_teaching_inputs::list_class_teaching_inputs(&connection, class_id, limit.unwrap_or(20))
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

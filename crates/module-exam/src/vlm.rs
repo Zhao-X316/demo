@@ -56,7 +56,10 @@ pub struct AnalyzedQuestion {
 /// 去掉模型偶尔包裹的 ```json ... ``` 围栏，并截取首个 `{` 到末个 `}`。
 fn extract_json(s: &str) -> &str {
     let t = s.trim();
-    let t = t.strip_prefix("```json").or_else(|| t.strip_prefix("```")).unwrap_or(t);
+    let t = t
+        .strip_prefix("```json")
+        .or_else(|| t.strip_prefix("```"))
+        .unwrap_or(t);
     let t = t.strip_suffix("```").unwrap_or(t).trim();
     match (t.find('{'), t.rfind('}')) {
         (Some(a), Some(b)) if b >= a => &t[a..=b],
@@ -67,8 +70,12 @@ fn extract_json(s: &str) -> &str {
 /// 解析模型返回内容为题目结构。
 pub fn parse_question_analysis(content: &str) -> CoreResult<AnalyzedQuestion> {
     let json = extract_json(content);
-    let mut q: AnalyzedQuestion = serde_json::from_str(json)
-        .map_err(|e| CoreError::Recognize(format!("VLM 返回无法解析为题目 JSON: {e}; 原文片段: {}", truncate(json, 300))))?;
+    let mut q: AnalyzedQuestion = serde_json::from_str(json).map_err(|e| {
+        CoreError::Recognize(format!(
+            "VLM 返回无法解析为题目 JSON: {e}; 原文片段: {}",
+            truncate(json, 300)
+        ))
+    })?;
     // 规范化空字符串 → None
     q.correct_answer = q.correct_answer.filter(|s| !s.trim().is_empty());
     q.knowledge_point = q.knowledge_point.filter(|s| !s.trim().is_empty());
@@ -78,7 +85,9 @@ pub fn parse_question_analysis(content: &str) -> CoreResult<AnalyzedQuestion> {
         o.analysis = o.analysis.take().filter(|s| !s.trim().is_empty());
     }
     if q.stem.trim().is_empty() && q.options.is_empty() {
-        return Err(CoreError::Recognize("VLM 返回的题目为空（无题干无选项）".into()));
+        return Err(CoreError::Recognize(
+            "VLM 返回的题目为空（无题干无选项）".into(),
+        ));
     }
     Ok(q)
 }

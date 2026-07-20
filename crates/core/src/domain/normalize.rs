@@ -12,7 +12,10 @@ impl Default for NormalizeCfg {
     fn default() -> Self {
         Self {
             remove_fillers: true,
-            fillers: ["嗯", "啊", "呃", "唉"].iter().map(|s| s.to_string()).collect(),
+            fillers: ["嗯", "啊", "呃", "唉"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         }
     }
 }
@@ -52,14 +55,23 @@ mod tests {
 
     #[test]
     fn strips_punctuation_and_space() {
-        let cfg = NormalizeCfg { remove_fillers: false, fillers: vec![] };
-        assert_eq!(normalize("床前明月光，疑是地上霜。", &cfg), "床前明月光疑是地上霜");
+        let cfg = NormalizeCfg {
+            remove_fillers: false,
+            fillers: vec![],
+        };
+        assert_eq!(
+            normalize("床前明月光，疑是地上霜。", &cfg),
+            "床前明月光疑是地上霜"
+        );
         assert_eq!(normalize("  hello, world! ", &cfg), "helloworld");
     }
 
     #[test]
     fn fullwidth_converted() {
-        let cfg = NormalizeCfg { remove_fillers: false, fillers: vec![] };
+        let cfg = NormalizeCfg {
+            remove_fillers: false,
+            fillers: vec![],
+        };
         // 全角 ABC123 → 半角小写
         assert_eq!(normalize("ＡＢＣ１２３", &cfg), "abc123");
     }

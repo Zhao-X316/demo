@@ -39,7 +39,11 @@ pub async fn chat_vision(
     let bytes = std::fs::read(image_path).map_err(|e| format!("读取图片失败: {e}"))?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     let data_url = format!("data:{};base64,{}", mime_of(image_path), b64);
-    let model = if creds.ark_model.is_empty() { DEFAULT_MODEL } else { creds.ark_model.as_str() };
+    let model = if creds.ark_model.is_empty() {
+        DEFAULT_MODEL
+    } else {
+        creds.ark_model.as_str()
+    };
 
     let body = json!({
         "model": model,
@@ -63,7 +67,10 @@ pub async fn chat_vision(
         .map_err(|err| format!("方舟请求失败: {err}"))?;
 
     let http = resp.status();
-    let raw = resp.text().await.map_err(|err| format!("读取响应失败: {err}"))?;
+    let raw = resp
+        .text()
+        .await
+        .map_err(|err| format!("读取响应失败: {err}"))?;
     if !http.is_success() {
         return Err(format!("方舟 HTTP {http}: {}", truncate(&raw, 500)));
     }

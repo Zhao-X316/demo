@@ -105,8 +105,8 @@ pub fn claim_recognition(conn: &Connection, id: i64) -> CoreResult<()> {
     if changed == 1 {
         return Ok(());
     }
-    let submission = get(conn, id)?
-        .ok_or_else(|| CoreError::NotFound(format!("submission {id}")))?;
+    let submission =
+        get(conn, id)?.ok_or_else(|| CoreError::NotFound(format!("submission {id}")))?;
     if submission.recognize_status == "processing" {
         Err(CoreError::Invalid("该提交正在识别，请勿重复操作".into()))
     } else {

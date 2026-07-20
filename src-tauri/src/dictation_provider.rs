@@ -593,10 +593,7 @@ mod tests {
             image_bytes: bytes,
         };
         let output = recognizer.recognize(&request).unwrap();
-        assert_eq!(
-            output.raw_text.as_deref(),
-            Some("因为只学技术没改制度")
-        );
+        assert_eq!(output.raw_text.as_deref(), Some("因为只学技术没改制度"));
         let sent = received.recv().unwrap();
         assert!(sent.contains("不看也不猜标准答案"));
         assert!(sent.contains("不判分"));

@@ -48,7 +48,11 @@ pub fn allow_existing_media<R: tauri::Runtime, M: Manager<R>>(
 
     for row in rows {
         let (file_path, archived_path) = row.map_err(|err| err.to_string())?;
-        for path in archived_path.as_deref().into_iter().chain([file_path.as_str()]) {
+        for path in archived_path
+            .as_deref()
+            .into_iter()
+            .chain([file_path.as_str()])
+        {
             let path = std::path::Path::new(path);
             if path.is_file() {
                 scope.allow_file(path).map_err(|err| err.to_string())?;
@@ -93,8 +97,14 @@ fn has_pending_migrations(conn: &Connection) -> CoreResult<bool> {
         || group_has_pending(conn, module_profile::profile_migrations())?)
 }
 
-fn open_managed_database(db_path: &std::path::Path, backup_dir: &std::path::Path) -> CoreResult<Connection> {
-    let had_data = db_path.metadata().map(|meta| meta.len() > 0).unwrap_or(false);
+fn open_managed_database(
+    db_path: &std::path::Path,
+    backup_dir: &std::path::Path,
+) -> CoreResult<Connection> {
+    let had_data = db_path
+        .metadata()
+        .map(|meta| meta.len() > 0)
+        .unwrap_or(false);
     let conn = suite_core::db::open(db_path)?;
     if had_data && has_pending_migrations(&conn)? {
         backup::create_backup(&conn, backup_dir, BackupKind::PreMigration)?;
@@ -121,7 +131,10 @@ pub fn init(app: &App) -> Result<AppState, Box<dyn std::error::Error>> {
         eprintln!("[媒体白名单] 已按精确路径放行 {allowed} 个历史媒体文件");
     }
 
-    Ok(AppState { db: Mutex::new(conn), data_dir: dir })
+    Ok(AppState {
+        db: Mutex::new(conn),
+        data_dir: dir,
+    })
 }
 
 #[cfg(test)]
@@ -130,24 +143,35 @@ mod tests {
 
     #[test]
     fn startup_creates_pre_migration_then_only_one_daily_backup() {
-        let root = std::env::temp_dir().join(format!("jiaofu-startup-backup-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("jiaofu-startup-backup-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let db_path = root.join("data.db");
         let backup_dir = root.join("backups");
         {
             let conn = suite_core::db::open(&db_path).unwrap();
-            suite_core::db::run_migrations(&conn, &suite_core::db::CORE_MIGRATIONS[..3])
-                .unwrap();
+            suite_core::db::run_migrations(&conn, &suite_core::db::CORE_MIGRATIONS[..3]).unwrap();
         }
 
         drop(open_managed_database(&db_path, &backup_dir).unwrap());
         let first = backup::list_backups(&backup_dir).unwrap();
         assert_eq!(
-            first.items.iter().filter(|item| item.kind == "pre-migration").count(),
+            first
+                .items
+                .iter()
+                .filter(|item| item.kind == "pre-migration")
+                .count(),
             1
         );
-        assert_eq!(first.items.iter().filter(|item| item.kind == "daily").count(), 1);
+        assert_eq!(
+            first
+                .items
+                .iter()
+                .filter(|item| item.kind == "daily")
+                .count(),
+            1
+        );
 
         drop(open_managed_database(&db_path, &backup_dir).unwrap());
         let second = backup::list_backups(&backup_dir).unwrap();

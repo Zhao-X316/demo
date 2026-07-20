@@ -520,13 +520,7 @@ mod tests {
             [answer.id],
         )
         .unwrap();
-        let duplicate = human_decide(
-            &conn,
-            answer.id,
-            true,
-            Some("老师复核后改为正确"),
-        )
-        .unwrap();
+        let duplicate = human_decide(&conn, answer.id, true, Some("老师复核后改为正确")).unwrap();
         assert_eq!(duplicate.decided_at.as_deref(), Some("2026-07-13 01:02:03"));
         let unchanged_updated_at: String = conn
             .query_row(

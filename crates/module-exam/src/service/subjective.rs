@@ -2535,8 +2535,7 @@ pub fn promote_short_answer_rubric_evidence(
         .ok_or_else(|| {
             CoreError::Invalid("最新评分规则已不存在该评分点，请老师在题库中人工维护".into())
         })?;
-    let mut allowed =
-        json_string_array(target_point.allowed_paraphrases_json.clone(), "允许改述")?;
+    let mut allowed = json_string_array(target_point.allowed_paraphrases_json.clone(), "允许改述")?;
     let already_available = normalize_rubric_evidence(&target_point.canonical_text)
         == normalized_text
         || allowed

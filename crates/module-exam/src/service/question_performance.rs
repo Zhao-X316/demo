@@ -1530,10 +1530,7 @@ pub fn resolve_question_impact_review_case(
     required(owner_id, "题库老师")?;
     required(&request.request_key, "请求标识")?;
     required(&request.case_public_id, "待处理 case")?;
-    required(
-        &request.expected_source_snapshot_hash,
-        "来源快照校验值",
-    )?;
+    required(&request.expected_source_snapshot_hash, "来源快照校验值")?;
     required(&request.teacher_note, "老师处理说明")?;
     required(&request.resolved_by, "处理老师")?;
     if request.resolved_by.trim() != owner_id.trim() {
@@ -1552,111 +1549,113 @@ pub fn resolve_question_impact_review_case(
         &scope.target_rubric_version_public_id,
     )?;
     let teacher_note = request.teacher_note.trim();
-    let (teacher_score, component_results) =
-        if matches!(scope.question_type.as_str(), "single" | "multiple" | "true_false") {
-            if !request.components.is_empty() {
-                return Err(CoreError::Invalid("客观题不能提交逐项评分".into()));
+    let (teacher_score, component_results) = if matches!(
+        scope.question_type.as_str(),
+        "single" | "multiple" | "true_false"
+    ) {
+        if !request.components.is_empty() {
+            return Err(CoreError::Invalid("客观题不能提交逐项评分".into()));
+        }
+        let score = request
+            .teacher_score
+            .ok_or_else(|| CoreError::Invalid("客观题必须填写老师确认分数".into()))?;
+        if !score.is_finite() || score < 0.0 || score > scope.max_score + 0.000_001 {
+            return Err(CoreError::Invalid("老师确认分数超出题目分值".into()));
+        }
+        (score, Vec::<Value>::new())
+    } else {
+        if request.teacher_score.is_some() {
+            return Err(CoreError::Invalid(
+                "填空和简答题总分由逐项分数自动汇总".into(),
+            ));
+        }
+        let target_total = target_components
+            .iter()
+            .map(|component| component.max_score)
+            .sum::<f64>();
+        if (target_total - scope.max_score).abs() > 0.000_001 {
+            return Err(CoreError::Invalid(
+                "目标答案或评分点总分与作业题目分值不一致".into(),
+            ));
+        }
+        let mut inputs = BTreeMap::new();
+        for input in &request.components {
+            required(&input.source_public_id, "评分项")?;
+            if inputs
+                .insert(input.source_public_id.trim().to_owned(), input)
+                .is_some()
+            {
+                return Err(CoreError::Invalid("同一评分项不能重复提交".into()));
             }
-            let score = request
-                .teacher_score
-                .ok_or_else(|| CoreError::Invalid("客观题必须填写老师确认分数".into()))?;
-            if !score.is_finite() || score < 0.0 || score > scope.max_score + 0.000_001 {
-                return Err(CoreError::Invalid("老师确认分数超出题目分值".into()));
+        }
+        if inputs.len() != target_components.len() {
+            return Err(CoreError::Invalid(
+                "必须逐项确认目标答案槽位或评分点".into(),
+            ));
+        }
+        let response_text = scope
+            .student_response_text
+            .as_deref()
+            .unwrap_or_default()
+            .trim();
+        let mut total_score = 0.0;
+        let mut results = Vec::with_capacity(target_components.len());
+        for component in &target_components {
+            let input = inputs
+                .get(&component.source_public_id)
+                .ok_or_else(|| CoreError::Invalid(format!("缺少评分项：{}", component.label)))?;
+            if !input.teacher_score.is_finite()
+                || input.teacher_score < 0.0
+                || input.teacher_score > component.max_score + 0.000_001
+            {
+                return Err(CoreError::Invalid(format!(
+                    "评分项“{}”的得分超出范围",
+                    component.label
+                )));
             }
-            (score, Vec::<Value>::new())
-        } else {
-            if request.teacher_score.is_some() {
-                return Err(CoreError::Invalid(
-                    "填空和简答题总分由逐项分数自动汇总".into(),
-                ));
-            }
-            let target_total = target_components
-                .iter()
-                .map(|component| component.max_score)
-                .sum::<f64>();
-            if (target_total - scope.max_score).abs() > 0.000_001 {
-                return Err(CoreError::Invalid(
-                    "目标答案或评分点总分与作业题目分值不一致".into(),
-                ));
-            }
-            let mut inputs = BTreeMap::new();
-            for input in &request.components {
-                required(&input.source_public_id, "评分项")?;
-                if inputs
-                    .insert(input.source_public_id.trim().to_owned(), input)
-                    .is_some()
-                {
-                    return Err(CoreError::Invalid("同一评分项不能重复提交".into()));
-                }
-            }
-            if inputs.len() != target_components.len() {
-                return Err(CoreError::Invalid(
-                    "必须逐项确认目标答案槽位或评分点".into(),
-                ));
-            }
-            let response_text = scope
-                .student_response_text
+            let evidence_text = input
+                .evidence_text
                 .as_deref()
-                .unwrap_or_default()
-                .trim();
-            let mut total_score = 0.0;
-            let mut results = Vec::with_capacity(target_components.len());
-            for component in &target_components {
-                let input = inputs.get(&component.source_public_id).ok_or_else(|| {
-                    CoreError::Invalid(format!("缺少评分项：{}", component.label))
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            if input.teacher_score > 0.000_001 {
+                let evidence = evidence_text.ok_or_else(|| {
+                    CoreError::Invalid(format!(
+                        "评分项“{}”给分时必须引用学生原答案",
+                        component.label
+                    ))
                 })?;
-                if !input.teacher_score.is_finite()
-                    || input.teacher_score < 0.0
-                    || input.teacher_score > component.max_score + 0.000_001
-                {
+                if response_text.is_empty() || !response_text.contains(evidence) {
                     return Err(CoreError::Invalid(format!(
-                        "评分项“{}”的得分超出范围",
+                        "评分项“{}”的证据必须来自当前学生答案",
                         component.label
                     )));
                 }
-                let evidence_text = input
-                    .evidence_text
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty());
-                if input.teacher_score > 0.000_001 {
-                    let evidence = evidence_text.ok_or_else(|| {
-                        CoreError::Invalid(format!(
-                            "评分项“{}”给分时必须引用学生原答案",
-                            component.label
-                        ))
-                    })?;
-                    if response_text.is_empty() || !response_text.contains(evidence) {
-                        return Err(CoreError::Invalid(format!(
-                            "评分项“{}”的证据必须来自当前学生答案",
-                            component.label
-                        )));
-                    }
-                }
-                let result_status = if input.teacher_score <= 0.000_001 {
-                    "incorrect"
-                } else if (input.teacher_score - component.max_score).abs() <= 0.000_001 {
-                    "correct"
-                } else {
-                    "partial"
-                };
-                total_score += input.teacher_score;
-                results.push(serde_json::json!({
-                    "source_type": component.source_type,
-                    "source_public_id": component.source_public_id,
-                    "stable_id": component.stable_id,
-                    "order_index": component.order_index,
-                    "label": component.label,
-                    "max_score": component.max_score,
-                    "teacher_score": input.teacher_score,
-                    "result_status": result_status,
-                    "evidence_text": evidence_text,
-                    "teacher_note": input.teacher_note.as_deref().map(str::trim)
-                        .filter(|value| !value.is_empty())
-                }));
             }
-            (total_score, results)
-        };
+            let result_status = if input.teacher_score <= 0.000_001 {
+                "incorrect"
+            } else if (input.teacher_score - component.max_score).abs() <= 0.000_001 {
+                "correct"
+            } else {
+                "partial"
+            };
+            total_score += input.teacher_score;
+            results.push(serde_json::json!({
+                "source_type": component.source_type,
+                "source_public_id": component.source_public_id,
+                "stable_id": component.stable_id,
+                "order_index": component.order_index,
+                "label": component.label,
+                "max_score": component.max_score,
+                "teacher_score": input.teacher_score,
+                "result_status": result_status,
+                "evidence_text": evidence_text,
+                "teacher_note": input.teacher_note.as_deref().map(str::trim)
+                    .filter(|value| !value.is_empty())
+            }));
+        }
+        (total_score, results)
+    };
     let component_results_json = serde_json::json!({
         "schema_version": 1,
         "question_type": scope.question_type,
@@ -1873,10 +1872,7 @@ pub fn publish_question_impact_review_case(
 ) -> CoreResult<PublishQuestionImpactReviewCaseResult> {
     required(owner_id, "题库老师")?;
     required(&request.case_public_id, "待处理 case")?;
-    required(
-        &request.expected_grade_decision_public_id,
-        "待发布评分",
-    )?;
+    required(&request.expected_grade_decision_public_id, "待发布评分")?;
     required(&request.published_by, "发布老师")?;
     if request.published_by.trim() != owner_id.trim() {
         return Err(CoreError::Invalid("只能以当前老师身份发布成绩".into()));
@@ -3300,7 +3296,11 @@ mod tests {
             .contains("新的发布 revision"));
     }
 
-    fn prepared_case(fixture: &mut Fixture, action: &str, request_key: &str) -> QuestionImpactReviewCase {
+    fn prepared_case(
+        fixture: &mut Fixture,
+        action: &str,
+        request_key: &str,
+    ) -> QuestionImpactReviewCase {
         let preview = preview_question_version_impact(
             &fixture.conn,
             "local_teacher",
@@ -3361,12 +3361,9 @@ mod tests {
             teacher_note: "按修订后的标准答案确认不得分".into(),
             resolved_by: "local_teacher".into(),
         };
-        let resolved = resolve_question_impact_review_case(
-            &mut fixture.conn,
-            "local_teacher",
-            &request,
-        )
-        .unwrap();
+        let resolved =
+            resolve_question_impact_review_case(&mut fixture.conn, "local_teacher", &request)
+                .unwrap();
         assert_eq!(resolved.grade_decision.revision, 2);
         assert_eq!(resolved.grade_decision.teacher_score, 0.0);
         assert!(resolved.old_publication_unchanged);
@@ -3393,15 +3390,15 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!((before.0, before.1, 1), (after_resolution.0, after_resolution.1, after_resolution.2));
+        assert_eq!(
+            (before.0, before.1, 1),
+            (after_resolution.0, after_resolution.1, after_resolution.2)
+        );
         assert_eq!(after_resolution.3, None);
         assert_eq!(after_resolution.4, "ready_to_publish");
-        let repeated = resolve_question_impact_review_case(
-            &mut fixture.conn,
-            "local_teacher",
-            &request,
-        )
-        .unwrap();
+        let repeated =
+            resolve_question_impact_review_case(&mut fixture.conn, "local_teacher", &request)
+                .unwrap();
         assert_eq!(
             repeated.grade_decision.public_id,
             resolved.grade_decision.public_id
@@ -3453,12 +3450,9 @@ mod tests {
             teacher_note: "复核正式成绩后按新答案改为不得分".into(),
             resolved_by: "local_teacher".into(),
         };
-        let resolved = resolve_question_impact_review_case(
-            &mut fixture.conn,
-            "local_teacher",
-            &request,
-        )
-        .unwrap();
+        let resolved =
+            resolve_question_impact_review_case(&mut fixture.conn, "local_teacher", &request)
+                .unwrap();
         let after_resolution: (String, String, i64, String) = fixture
             .conn
             .query_row(

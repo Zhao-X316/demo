@@ -79,7 +79,9 @@ fn parse_info(path: &Path) -> Option<BackupInfo> {
     let parsed = DateTime::parse_from_str(stamp, "%Y%m%dT%H%M%S%z").ok()?;
     let kind = ["daily", "pre-migration", "manual", "before-restore"]
         .into_iter()
-        .find(|kind| kind_with_suffix == *kind || kind_with_suffix.starts_with(&format!("{kind}-")))?
+        .find(|kind| {
+            kind_with_suffix == *kind || kind_with_suffix.starts_with(&format!("{kind}-"))
+        })?
         .to_string();
     let size_bytes = path.metadata().ok()?.len();
     Some(BackupInfo {
@@ -95,7 +97,11 @@ pub fn list_backups(dir: &Path) -> CoreResult<BackupCatalog> {
     let mut items = Vec::new();
     for entry in std::fs::read_dir(dir).map_err(|err| io_error("读取备份目录失败", err))? {
         let entry = entry.map_err(|err| io_error("读取备份条目失败", err))?;
-        if entry.file_type().map_err(|err| io_error("读取备份类型失败", err))?.is_file() {
+        if entry
+            .file_type()
+            .map_err(|err| io_error("读取备份类型失败", err))?
+            .is_file()
+        {
             if let Some(info) = parse_info(&entry.path()) {
                 items.push(info);
             }
@@ -153,7 +159,9 @@ pub fn verify_connection(conn: &Connection) -> CoreResult<()> {
     if result == "ok" {
         Ok(())
     } else {
-        Err(CoreError::Invalid(format!("数据库完整性检查失败: {result}")))
+        Err(CoreError::Invalid(format!(
+            "数据库完整性检查失败: {result}"
+        )))
     }
 }
 
@@ -193,7 +201,11 @@ where
     let protective_path = dir.join(&protective.file_name);
 
     let restored = conn
-        .restore(DatabaseName::Main, &source, None::<fn(rusqlite::backup::Progress)>)
+        .restore(
+            DatabaseName::Main,
+            &source,
+            None::<fn(rusqlite::backup::Progress)>,
+        )
         .map_err(CoreError::from)
         .and_then(|_| after_restore(conn))
         .and_then(|_| verify_connection(conn));
@@ -216,10 +228,8 @@ mod tests {
     use super::*;
 
     fn test_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "jiaofu-backup-{label}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("jiaofu-backup-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -233,8 +243,10 @@ mod tests {
     fn online_backup_and_restore_return_database_to_snapshot() {
         let dir = test_dir("restore");
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE sample(value TEXT); INSERT INTO sample VALUES ('before');")
-            .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sample(value TEXT); INSERT INTO sample VALUES ('before');",
+        )
+        .unwrap();
         let backup = create_backup_at(&conn, &dir, BackupKind::Manual, fixed_time(10)).unwrap();
         conn.execute("UPDATE sample SET value='after'", []).unwrap();
 
@@ -251,15 +263,21 @@ mod tests {
     fn failed_post_restore_check_automatically_restores_protective_snapshot() {
         let dir = test_dir("rollback");
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE sample(value TEXT); INSERT INTO sample VALUES ('backup');")
-            .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sample(value TEXT); INSERT INTO sample VALUES ('backup');",
+        )
+        .unwrap();
         let backup = create_backup_at(&conn, &dir, BackupKind::Manual, fixed_time(11)).unwrap();
-        conn.execute("UPDATE sample SET value='current'", []).unwrap();
+        conn.execute("UPDATE sample SET value='current'", [])
+            .unwrap();
 
         let result = restore_with(&mut conn, &dir, &backup.file_name, |_| {
             Err(CoreError::Invalid("injected migration failure".into()))
         });
-        assert!(result.unwrap_err().to_string().contains("已自动回到恢复前状态"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("已自动回到恢复前状态"));
         let value: String = conn
             .query_row("SELECT value FROM sample", [], |row| row.get(0))
             .unwrap();
@@ -270,21 +288,26 @@ mod tests {
     fn catalog_keeps_older_files_and_reports_retention_warning() {
         let dir = test_dir("retention");
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE sample(value TEXT);").unwrap();
+        conn.execute_batch("CREATE TABLE sample(value TEXT);")
+            .unwrap();
         for hour in 0..=14 {
             create_backup_at(&conn, &dir, BackupKind::Manual, fixed_time(hour)).unwrap();
         }
         let catalog = list_backups(&dir).unwrap();
         assert_eq!(catalog.items.len(), 15);
         assert_eq!(catalog.older_retained, 1);
-        assert!(catalog.items.iter().all(|item| dir.join(&item.file_name).is_file()));
+        assert!(catalog
+            .items
+            .iter()
+            .all(|item| dir.join(&item.file_name).is_file()));
     }
 
     #[test]
     fn restore_rejects_paths_outside_backup_directory() {
         let dir = test_dir("path-traversal");
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE sample(value TEXT);").unwrap();
+        conn.execute_batch("CREATE TABLE sample(value TEXT);")
+            .unwrap();
         let result = restore_with(&mut conn, &dir, "../secrets.json", |_| Ok(()));
         assert!(result.unwrap_err().to_string().contains("备份文件名非法"));
         assert!(list_backups(&dir).unwrap().items.is_empty());

@@ -49,7 +49,8 @@ pub fn classify_failure(message: &str) -> (&'static str, bool) {
         ("rate_limited", true)
     } else if message.contains("请求失败") || message.contains("HTTP 5") {
         ("network", true)
-    } else if message.contains("格式") || message.contains("解码") || message.contains("返回为空") {
+    } else if message.contains("格式") || message.contains("解码") || message.contains("返回为空")
+    {
         ("invalid_audio", false)
     } else {
         ("asr_error", false)
@@ -60,7 +61,11 @@ pub fn claim(conn: &Connection, submission_id: i64) -> CoreResult<()> {
     submissions::claim_recognition(conn, submission_id)
 }
 
-pub fn mark_failed(conn: &Connection, submission_id: i64, message: &str) -> CoreResult<RecognitionFailureMeta> {
+pub fn mark_failed(
+    conn: &Connection,
+    submission_id: i64,
+    message: &str,
+) -> CoreResult<RecognitionFailureMeta> {
     let submission = submissions::get(conn, submission_id)?
         .ok_or_else(|| CoreError::NotFound(format!("submission {submission_id}")))?;
     let attempts = parse_failure_meta(submission.recognize_meta.as_deref())
@@ -150,9 +155,10 @@ pub fn void_unconfirmed(conn: &Connection, submission_id: i64) -> CoreResult<boo
     let tx = conn.unchecked_transaction()?;
     let submission = submissions::get(&tx, submission_id)?
         .ok_or_else(|| CoreError::NotFound(format!("submission {submission_id}")))?;
-    let human_result = verdicts::get_by_submission(&tx, submission_id)?
-        .and_then(|verdict| verdict.human_result);
-    if submission.status == "confirmed" || matches!(human_result.as_deref(), Some("pass" | "fail")) {
+    let human_result =
+        verdicts::get_by_submission(&tx, submission_id)?.and_then(|verdict| verdict.human_result);
+    if submission.status == "confirmed" || matches!(human_result.as_deref(), Some("pass" | "fail"))
+    {
         return Err(CoreError::Invalid("已终审提交不能作废，请使用改判".into()));
     }
     submissions::set_status(&tx, submission_id, "voided")?;
@@ -175,9 +181,9 @@ pub fn void_unconfirmed(conn: &Connection, submission_id: i64) -> CoreResult<boo
 mod tests {
     use super::*;
     use suite_core::db::repo::ai_runs::NewAiRun;
+    use suite_core::db::repo::students::{upsert as upsert_student, StudentInput};
     use suite_core::db::repo::submissions::NewSubmission;
     use suite_core::db::repo::tasks::NewTask;
-    use suite_core::db::repo::students::{upsert as upsert_student, StudentInput};
     use suite_core::db::{open_in_memory, run_migrations, CORE_MIGRATIONS};
     use suite_core::models::{MediaType, TaskKind};
 
@@ -273,7 +279,10 @@ mod tests {
         let submission_id = insert_submission(&conn, None, &hash);
         relocate_same_hash(&conn, submission_id, &good_path).unwrap();
         assert_eq!(
-            submissions::get(&conn, submission_id).unwrap().unwrap().file_path,
+            submissions::get(&conn, submission_id)
+                .unwrap()
+                .unwrap()
+                .file_path,
             good_path.to_string_lossy()
         );
 
@@ -306,13 +315,19 @@ mod tests {
         tasks::set_status(&conn, task_id, TaskStatus::Submitted).unwrap();
         let only = insert_submission(&conn, Some(task_id), "h1");
         assert!(void_unconfirmed(&conn, only).unwrap());
-        assert_eq!(tasks::get(&conn, task_id).unwrap().unwrap().status, TaskStatus::Reopened);
+        assert_eq!(
+            tasks::get(&conn, task_id).unwrap().unwrap().status,
+            TaskStatus::Reopened
+        );
 
         tasks::set_status(&conn, task_id, TaskStatus::Submitted).unwrap();
         let first = insert_submission(&conn, Some(task_id), "h2");
         let _other = insert_submission(&conn, Some(task_id), "h3");
         assert!(!void_unconfirmed(&conn, first).unwrap());
-        assert_eq!(tasks::get(&conn, task_id).unwrap().unwrap().status, TaskStatus::Submitted);
+        assert_eq!(
+            tasks::get(&conn, task_id).unwrap().unwrap().status,
+            TaskStatus::Submitted
+        );
 
         let unbound = insert_submission(&conn, None, "h4");
         assert!(!void_unconfirmed(&conn, unbound).unwrap());

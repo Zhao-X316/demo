@@ -31,7 +31,9 @@ fn e<E: ToString>(err: E) -> String {
 
 /// 日切基准：Asia/Shanghai (UTC+8)。
 fn today_str() -> String {
-    (Utc::now() + Duration::hours(8)).format("%Y-%m-%d").to_string()
+    (Utc::now() + Duration::hours(8))
+        .format("%Y-%m-%d")
+        .to_string()
 }
 fn today_naive() -> NaiveDate {
     (Utc::now() + Duration::hours(8)).date_naive()
@@ -139,21 +141,21 @@ pub struct TaskCard {
 pub struct TodayContentStat {
     content_no: String,
     content_title: String,
-    should: i64,     // 应背 = 该内容今日任务数
-    submitted: i64,  // 实背 = 已交
-    passed: i64,     // 通过
-    failed: i64,     // 不通过
+    should: i64,    // 应背 = 该内容今日任务数
+    submitted: i64, // 实背 = 已交
+    passed: i64,    // 通过
+    failed: i64,    // 不通过
 }
 
 /// 今日看板顶部汇总。
 #[derive(Serialize, Default)]
 pub struct TodaySummary {
-    should: i64,     // 应背人数 = 今日任务总数
-    submitted: i64,  // 实背人数 = 有提交的任务数
-    passed: i64,     // 通过人数
-    failed: i64,     // 不通过人数
-    pending: i64,    // 待确认 = 最新判定存在且未终审
-    makeup: i64,     // 补背人数 = 今日补背任务数
+    should: i64,    // 应背人数 = 今日任务总数
+    submitted: i64, // 实背人数 = 有提交的任务数
+    passed: i64,    // 通过人数
+    failed: i64,    // 不通过人数
+    pending: i64,   // 待确认 = 最新判定存在且未终审
+    makeup: i64,    // 补背人数 = 今日补背任务数
     contents: Vec<TodayContentStat>,
 }
 
@@ -207,8 +209,7 @@ fn structured_score_card(
                 confidence: point.confidence,
                 evidence_spans,
                 reason: point.reason,
-                teacher_confirmation_level: review
-                    .map(|item| item.confirmation_level.clone()),
+                teacher_confirmation_level: review.map(|item| item.confirmation_level.clone()),
                 teacher_state: review.map(|item| item.confirmed_state.clone()),
                 teacher_note: review.and_then(|item| item.teacher_note.clone()),
             })
@@ -246,9 +247,13 @@ fn submission_card(
         pass: verdict.as_ref().and_then(|value| value.pass),
         fluency: verdict.as_ref().and_then(|value| value.secondary_score),
         quality: verdict.as_ref().and_then(|value| value.quality.clone()),
-        human_result: verdict.as_ref().and_then(|value| value.human_result.clone()),
+        human_result: verdict
+            .as_ref()
+            .and_then(|value| value.human_result.clone()),
         human_note: verdict.as_ref().and_then(|value| value.human_note.clone()),
-        machine_note: verdict.as_ref().and_then(|value| value.machine_note.clone()),
+        machine_note: verdict
+            .as_ref()
+            .and_then(|value| value.machine_note.clone()),
         structured_score,
     })
 }
@@ -269,10 +274,22 @@ fn task_card_with_submission(
         kind: kind_str(task.kind).to_string(),
         status: status_str(task.status).to_string(),
         due_date: task.due_date.clone(),
-        student_no: student.as_ref().map(|value| value.student_no.clone()).unwrap_or_default(),
-        student_name: student.as_ref().map(|value| value.name.clone()).unwrap_or_default(),
-        content_no: content.as_ref().map(|value| value.content_no.clone()).unwrap_or_default(),
-        content_title: content.as_ref().map(|value| value.title.clone()).unwrap_or_default(),
+        student_no: student
+            .as_ref()
+            .map(|value| value.student_no.clone())
+            .unwrap_or_default(),
+        student_name: student
+            .as_ref()
+            .map(|value| value.name.clone())
+            .unwrap_or_default(),
+        content_no: content
+            .as_ref()
+            .map(|value| value.content_no.clone())
+            .unwrap_or_default(),
+        content_title: content
+            .as_ref()
+            .map(|value| value.title.clone())
+            .unwrap_or_default(),
         submission,
     })
 }
@@ -286,10 +303,7 @@ fn task_card(conn: &rusqlite::Connection, task: &suite_core::models::Task) -> R<
 
 /// 按提交 ID 回看背诵终审证据。必须使用该次历史提交，不能退化成任务的最新提交。
 #[tauri::command]
-pub fn recitation_submission_detail(
-    state: State<'_, AppState>,
-    submission_id: i64,
-) -> R<TaskCard> {
+pub fn recitation_submission_detail(state: State<'_, AppState>, submission_id: i64) -> R<TaskCard> {
     let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     let submission = submissions::get(&conn, submission_id)
         .map_err(e)?
@@ -337,7 +351,10 @@ pub fn dashboard_today(state: State<'_, AppState>) -> R<TodayView> {
         // —— 顶部汇总统计（不额外查库，顺手 tally）——
         let st = status_str(t.status);
         let has_sub = card.submission.is_some();
-        let pending_review = card.submission.as_ref().is_some_and(|item| item.pending_review);
+        let pending_review = card
+            .submission
+            .as_ref()
+            .is_some_and(|item| item.pending_review);
         let is_pass = st == "passed";
         let is_fail = st == "failed";
         let c_no = card.content_no.clone();
@@ -358,7 +375,11 @@ pub fn dashboard_today(state: State<'_, AppState>) -> R<TodayView> {
         if pending_review {
             view.summary.pending += 1;
         }
-        let idx = view.summary.contents.iter().position(|x| x.content_no == c_no);
+        let idx = view
+            .summary
+            .contents
+            .iter()
+            .position(|x| x.content_no == c_no);
         let cs = match idx {
             Some(i) => &mut view.summary.contents[i],
             None => {
@@ -395,7 +416,11 @@ pub fn dashboard_today(state: State<'_, AppState>) -> R<TodayView> {
     let overdue = tasks::list_review_candidates_before(&conn, MODULE, &date).map_err(e)?;
     for task in overdue {
         let card = task_card(&conn, &task)?;
-        if card.submission.as_ref().is_some_and(|item| item.pending_review) {
+        if card
+            .submission
+            .as_ref()
+            .is_some_and(|item| item.pending_review)
+        {
             view.summary.pending += 1;
             view.overdue_review.push(card);
         }
@@ -449,13 +474,18 @@ pub fn suggest_match(state: State<'_, AppState>, text: String) -> R<SuggestDto> 
     let rcfg = RecitationConfig::load(&conn).map_err(e)?;
     let scfg = rcfg.to_score_cfg();
     let student = matching::find_student(&conn, &text).map_err(e)?;
-    let tops = matching::top_contents(&conn, &text, &scfg.normalize, &scfg.accuracy, 3).map_err(e)?;
+    let tops =
+        matching::top_contents(&conn, &text, &scfg.normalize, &scfg.accuracy, 3).map_err(e)?;
     Ok(SuggestDto {
         student_no: student.as_ref().map(|s| s.student_no.clone()),
         student_name: student.as_ref().map(|s| s.name.clone()),
         contents: tops
             .into_iter()
-            .map(|(c, score)| ContentCandidate { content_no: c.content_no, title: c.title, score })
+            .map(|(c, score)| ContentCandidate {
+                content_no: c.content_no,
+                title: c.title,
+                score,
+            })
             .collect(),
     })
 }
@@ -535,10 +565,38 @@ pub fn seed_demo(state: State<'_, AppState>) -> R<String> {
     let date = today_str();
     let ymd = date.replace('-', "");
 
-    let s1 = students::upsert(&conn, &StudentInput { student_no: "2023001", name: "张三", class_id: None, enabled: true }).map_err(e)?;
-    let s2 = students::upsert(&conn, &StudentInput { student_no: "2023002", name: "李四", class_id: None, enabled: true }).map_err(e)?;
+    let s1 = students::upsert(
+        &conn,
+        &StudentInput {
+            student_no: "2023001",
+            name: "张三",
+            class_id: None,
+            enabled: true,
+        },
+    )
+    .map_err(e)?;
+    let s2 = students::upsert(
+        &conn,
+        &StudentInput {
+            student_no: "2023002",
+            name: "李四",
+            class_id: None,
+            enabled: true,
+        },
+    )
+    .map_err(e)?;
     let answer = "床前明月光，疑是地上霜。举头望明月，低头思故乡。";
-    let c = contents::upsert(&conn, &ContentInput { content_no: "C012", title: "静夜思", answer_text: answer, subject_id: None, enabled: true }).map_err(e)?;
+    let c = contents::upsert(
+        &conn,
+        &ContentInput {
+            content_no: "C012",
+            title: "静夜思",
+            answer_text: answer,
+            subject_id: None,
+            enabled: true,
+        },
+    )
+    .map_err(e)?;
 
     task_svc::generate_normal(&conn, &date, &[(s1.id, c.id), (s2.id, c.id)]).map_err(e)?;
 
@@ -550,8 +608,15 @@ pub fn seed_demo(state: State<'_, AppState>) -> R<String> {
     ];
     for (no, name, text, hash) in rows {
         let stem = format!("{ymd}_{no}_{name}_C012");
-        let item = import::ImportItem { file_path: &stem, file_stem: &stem, file_hash: hash, duration_ms: Some(8000) };
-        if let import::ImportOutcome::Imported { submission_id, .. } = import::import_one(&conn, &item).map_err(e)? {
+        let item = import::ImportItem {
+            file_path: &stem,
+            file_stem: &stem,
+            file_hash: hash,
+            duration_ms: Some(8000),
+        };
+        if let import::ImportOutcome::Imported { submission_id, .. } =
+            import::import_one(&conn, &item).map_err(e)?
+        {
             scoring::finish_recognition_and_score(
                 &conn,
                 submission_id,
@@ -590,12 +655,7 @@ pub fn backups_list(state: State<'_, AppState>) -> R<BackupCatalog> {
 #[tauri::command]
 pub fn backup_create(state: State<'_, AppState>) -> R<BackupInfo> {
     let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
-    backup::create_backup(
-        &conn,
-        &state.data_dir.join("backups"),
-        BackupKind::Manual,
-    )
-    .map_err(e)
+    backup::create_backup(&conn, &state.data_dir.join("backups"), BackupKind::Manual).map_err(e)
 }
 
 #[tauri::command]
@@ -653,7 +713,12 @@ pub fn students_upsert(
     let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     students::upsert(
         &conn,
-        &StudentInput { student_no: &student_no, name: &name, class_id: None, enabled },
+        &StudentInput {
+            student_no: &student_no,
+            name: &name,
+            class_id: None,
+            enabled,
+        },
     )
     .map_err(e)
 }
@@ -723,13 +788,22 @@ pub fn students_import(state: State<'_, AppState>, rows: Vec<StudentRow>) -> R<B
         }
         match students::upsert(
             &conn,
-            &StudentInput { student_no: no, name, class_id: None, enabled: true },
+            &StudentInput {
+                student_no: no,
+                name,
+                class_id: None,
+                enabled: true,
+            },
         ) {
             Ok(_) => ok += 1,
             Err(err) => errors.push(format!("{no} {name}: {err}")),
         }
     }
-    Ok(BatchImport { ok, failed: errors.len(), errors })
+    Ok(BatchImport {
+        ok,
+        failed: errors.len(),
+        errors,
+    })
 }
 
 #[tauri::command]
@@ -813,18 +887,30 @@ pub fn contents_import(state: State<'_, AppState>, rows: Vec<ContentRow>) -> R<B
         let title = r.title.trim();
         let ans = r.answer_text.trim();
         if no.is_empty() || title.is_empty() || ans.is_empty() {
-            errors.push(format!("跳过不完整行: 编号='{no}'（需 编号/标题/答案 三项）"));
+            errors.push(format!(
+                "跳过不完整行: 编号='{no}'（需 编号/标题/答案 三项）"
+            ));
             continue;
         }
         match contents::upsert(
             &conn,
-            &ContentInput { content_no: no, title, answer_text: ans, subject_id: None, enabled: true },
+            &ContentInput {
+                content_no: no,
+                title,
+                answer_text: ans,
+                subject_id: None,
+                enabled: true,
+            },
         ) {
             Ok(_) => ok += 1,
             Err(err) => errors.push(format!("{no}: {err}")),
         }
     }
-    Ok(BatchImport { ok, failed: errors.len(), errors })
+    Ok(BatchImport {
+        ok,
+        failed: errors.len(),
+        errors,
+    })
 }
 
 #[tauri::command]
@@ -853,7 +939,9 @@ pub fn parse_syllabus(
     text: String,
     prefix: String,
 ) -> R<Vec<module_recitation::domain::syllabus::ParsedContent>> {
-    Ok(module_recitation::domain::syllabus::parse_syllabus(&text, &prefix))
+    Ok(module_recitation::domain::syllabus::parse_syllabus(
+        &text, &prefix,
+    ))
 }
 
 #[derive(Serialize)]
@@ -885,7 +973,9 @@ pub fn tasks_generate(state: State<'_, AppState>, pairs: Vec<(i64, i64)>) -> R<T
 #[tauri::command]
 pub fn task_cancel(state: State<'_, AppState>, task_id: i64) -> R<()> {
     let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
-    let t = tasks::get(&conn, task_id).map_err(e)?.ok_or_else(|| "任务不存在".to_string())?;
+    let t = tasks::get(&conn, task_id)
+        .map_err(e)?
+        .ok_or_else(|| "任务不存在".to_string())?;
     if t.status != TaskStatus::Open {
         return Err("该任务已提交或已完成，不能撤销".to_string());
     }
@@ -904,7 +994,10 @@ pub fn tasks_reassign(
     let date = today_str();
     let sset: std::collections::HashSet<i64> = student_ids.iter().copied().collect();
     for t in tasks::list_by_date(&conn, MODULE, &date).map_err(e)? {
-        if t.kind == TaskKind::Normal && t.status == TaskStatus::Open && sset.contains(&t.student_id) {
+        if t.kind == TaskKind::Normal
+            && t.status == TaskStatus::Open
+            && sset.contains(&t.student_id)
+        {
             tasks::set_status(&conn, t.id, TaskStatus::Closed).map_err(e)?;
         }
     }
@@ -948,10 +1041,10 @@ pub fn tasks_remove(
 #[derive(Serialize)]
 pub struct ImportHistoryRow {
     submission_id: i64,
-    file_name: String,         // 当前文件名（智能识别改名后即「改后名」）
-    student: Option<String>,   // 张明 (2023001)
-    content: Option<String>,   // 道法8上-04课-05 为什么要以礼待人
-    status: String,            // 已评分 / 未识别·待改派 / 待分析 …
+    file_name: String,       // 当前文件名（智能识别改名后即「改后名」）
+    student: Option<String>, // 张明 (2023001)
+    content: Option<String>, // 道法8上-04课-05 为什么要以礼待人
+    status: String,          // 已评分 / 未识别·待改派 / 待分析 …
     recognized: Option<String>,
     has_evidence_detail: bool,
 }
@@ -1035,7 +1128,11 @@ pub struct StageDto {
 /// 返回每个文件能否进入「待分析」队列；真正的识别评分由前端随后对 staged 文件调用
 /// `import_autoname` 完成（即「开始分析」）。
 #[tauri::command]
-pub fn import_stage(state: State<'_, AppState>, paths: Vec<String>, force: Option<bool>) -> R<Vec<StageDto>> {
+pub fn import_stage(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    force: Option<bool>,
+) -> R<Vec<StageDto>> {
     let conn = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     let force = force.unwrap_or(false);
     let mut out = Vec::with_capacity(paths.len());
@@ -1060,7 +1157,11 @@ pub fn import_stage(state: State<'_, AppState>, paths: Vec<String>, force: Optio
                 detail: "重复文件（已导入过，跳过）".into(),
             }
         } else {
-            StageDto { file: p.clone(), status: "staged".into(), detail: "已加入待分析队列".into() }
+            StageDto {
+                file: p.clone(),
+                status: "staged".into(),
+                detail: "已加入待分析队列".into(),
+            }
         });
     }
     Ok(out)
@@ -1185,7 +1286,11 @@ async fn run_recitation_asr(
 /// 分析录音 → 识别学生/内容 → 自动重命名为 `日期_学号_姓名_内容编号` → 落库评分。
 /// 录音内容约定为「姓名 + 日期 + 背诵内容」。日期暂用当天（后续可解析口述日期）。
 #[tauri::command]
-pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, force: Option<bool>) -> R<Vec<AutonameDto>> {
+pub async fn import_autoname(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    force: Option<bool>,
+) -> R<Vec<AutonameDto>> {
     let creds = secrets::load(&state.data_dir);
     let force = force.unwrap_or(false);
     let mut out = Vec::with_capacity(paths.len());
@@ -1216,7 +1321,9 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
             if let Some(hit) = file_ledger::get(&conn, &hash).map_err(e)? {
                 hit.submission_id
             } else {
-                submissions::get_by_hash(&conn, &hash).map_err(e)?.map(|s| s.id)
+                submissions::get_by_hash(&conn, &hash)
+                    .map_err(e)?
+                    .map(|s| s.id)
             }
         };
         if existing_submission_id.is_some() && !force {
@@ -1233,17 +1340,14 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
             continue;
         }
 
-        let archived = match crate::archive::archive_audio(
-            path,
-            &hash,
-            &state.data_dir.join("archive"),
-        ) {
-            Ok(archived) => archived,
-            Err(err) => {
-                out.push(fail(format!("录音归档失败: {err}")));
-                continue;
-            }
-        };
+        let archived =
+            match crate::archive::archive_audio(path, &hash, &state.data_dir.join("archive")) {
+                Ok(archived) => archived,
+                Err(err) => {
+                    out.push(fail(format!("录音归档失败: {err}")));
+                    continue;
+                }
+            };
         let archived_path = match archived.path.to_str() {
             Some(path) => path.to_string(),
             None => {
@@ -1305,7 +1409,8 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
         let rcfg = RecitationConfig::load(&conn).map_err(e)?;
         let scfg = rcfg.to_score_cfg();
         let student = matching::find_student(&conn, &asr.text).map_err(e)?;
-        let content = matching::best_content(&conn, &asr.text, &scfg.normalize, &scfg.accuracy).map_err(e)?;
+        let content =
+            matching::best_content(&conn, &asr.text, &scfg.normalize, &scfg.accuracy).map_err(e)?;
 
         match (student, content) {
             (Some(s), Some((c, score))) if score >= MATCH_MIN => {
@@ -1352,10 +1457,13 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
                             match std::fs::rename(&p, &np) {
                                 Ok(()) => {
                                     let final_path = np.to_string_lossy().to_string();
-                                    submissions::set_file_path(&conn, tracking_id, &final_path).map_err(e)?;
+                                    submissions::set_file_path(&conn, tracking_id, &final_path)
+                                        .map_err(e)?;
                                     format!("匹配度 {score:.0}%")
                                 }
-                                Err(err) => format!("匹配度 {score:.0}%；文件重命名失败，已保留原路径：{err}"),
+                                Err(err) => format!(
+                                    "匹配度 {score:.0}%；文件重命名失败，已保留原路径：{err}"
+                                ),
                             }
                         }
                         None => format!("匹配度 {score:.0}%；文件无父目录，已保留原路径"),
@@ -1367,7 +1475,11 @@ pub async fn import_autoname(state: State<'_, AppState>, paths: Vec<String>, for
                 }
                 out.push(AutonameDto {
                     file: p.clone(),
-                    status: if reused { "rescored".into() } else { "scored".into() },
+                    status: if reused {
+                        "rescored".into()
+                    } else {
+                        "scored".into()
+                    },
                     detail,
                     new_name,
                     student: Some(format!("{} {}", s.student_no, s.name)),
@@ -1681,18 +1793,12 @@ mod tests {
         std::fs::write(&archived, b"archived").unwrap();
 
         assert_eq!(
-            preferred_playback_path(
-                original.to_str().unwrap(),
-                Some(archived.to_str().unwrap())
-            ),
+            preferred_playback_path(original.to_str().unwrap(), Some(archived.to_str().unwrap())),
             archived.to_string_lossy()
         );
         std::fs::remove_file(&archived).unwrap();
         assert_eq!(
-            preferred_playback_path(
-                original.to_str().unwrap(),
-                Some(archived.to_str().unwrap())
-            ),
+            preferred_playback_path(original.to_str().unwrap(), Some(archived.to_str().unwrap())),
             original.to_string_lossy()
         );
     }

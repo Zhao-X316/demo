@@ -14,10 +14,10 @@ use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ParsedContent {
-    pub content_no: String,   // {prefix}-{NN}课-{MM}
-    pub title: String,        // 第X课·课题 ｜ 设问
-    pub answer_text: String,  // 该点全文（清洗后，保留①②③）
-    pub is_key: bool,         // ★ 重点
+    pub content_no: String,  // {prefix}-{NN}课-{MM}
+    pub title: String,       // 第X课·课题 ｜ 设问
+    pub answer_text: String, // 该点全文（清洗后，保留①②③）
+    pub is_key: bool,        // ★ 重点
     pub lesson_no: u32,
     pub point_seq: u32,       // 按出现顺序，从 1
     pub original_no: String,  // 印刷编号（备注）
@@ -40,14 +40,23 @@ fn clean(text: &str) -> String {
 
 /// 中文数字 → 阿拉伯（支持 一..十, 十一.., 二十..）。
 fn cn_num(s: &str) -> u32 {
-    let digit = |c: char| -> Option<u32> { "零一二三四五六七八九".find(c).map(|i| (i / 3) as u32) };
+    let digit = |c: char| -> Option<u32> {
+        "零一二三四五六七八九".find(c).map(|i| (i / 3) as u32)
+    };
     let chars: Vec<char> = s.chars().collect();
     if let Some(pos) = chars.iter().position(|&c| c == '十') {
-        let tens = if pos == 0 { 1 } else { digit(chars[0]).unwrap_or(1) };
+        let tens = if pos == 0 {
+            1
+        } else {
+            digit(chars[0]).unwrap_or(1)
+        };
         let ones = chars.get(pos + 1).and_then(|&c| digit(c)).unwrap_or(0);
         tens * 10 + ones
     } else {
-        chars.iter().filter_map(|&c| digit(c)).fold(0, |a, d| a * 10 + d)
+        chars
+            .iter()
+            .filter_map(|&c| digit(c))
+            .fold(0, |a, d| a * 10 + d)
     }
 }
 
@@ -57,7 +66,11 @@ fn extract_question(s: &str) -> String {
     let mut end = s.len();
     for (i, c) in s.char_indices() {
         if stops.contains(&c) {
-            end = if c == '？' || c == '?' { i + c.len_utf8() } else { i };
+            end = if c == '？' || c == '?' {
+                i + c.len_utf8()
+            } else {
+                i
+            };
             break;
         }
     }
@@ -153,10 +166,22 @@ mod tests {
         assert_eq!(r[3].content_no, "道法8上-02课-01");
         assert!(r[3].is_key);
         // 标题带课题前缀 + 设问
-        assert!(r[0].title.starts_with("第一课·丰富的社会生活 ｜ "), "got: {}", r[0].title);
-        assert!(r[1].title.contains("如何认识社会关系？"), "got: {}", r[1].title);
+        assert!(
+            r[0].title.starts_with("第一课·丰富的社会生活 ｜ "),
+            "got: {}",
+            r[0].title
+        );
+        assert!(
+            r[1].title.contains("如何认识社会关系？"),
+            "got: {}",
+            r[1].title
+        );
         // 答案保留子点 ①②，去掉开头点号
-        assert!(r[0].answer_text.starts_with("个人与社会的关系"), "got: {}", r[0].answer_text);
+        assert!(
+            r[0].answer_text.starts_with("个人与社会的关系"),
+            "got: {}",
+            r[0].answer_text
+        );
         assert!(r[0].answer_text.contains('①'));
     }
 
@@ -164,7 +189,11 @@ mod tests {
     fn cleans_watermark() {
         let t = "第一课 测试1．甲乙丙学科网（北京）股份有限公司丁戊。";
         let r = parse_syllabus(t, "x");
-        assert!(!r[0].answer_text.contains("学科网"), "水印未清: {}", r[0].answer_text);
+        assert!(
+            !r[0].answer_text.contains("学科网"),
+            "水印未清: {}",
+            r[0].answer_text
+        );
         assert!(r[0].answer_text.contains("丁戊"));
     }
 }

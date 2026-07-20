@@ -83,8 +83,7 @@ pub fn load(dir: &Path) -> std::io::Result<VolcanoCreds> {
 
 pub fn save(dir: &Path, creds: &VolcanoCreds) -> std::io::Result<()> {
     let p = secrets_path(dir);
-    let s = serde_json::to_string_pretty(creds)
-        .map_err(std::io::Error::other)?;
+    let s = serde_json::to_string_pretty(creds).map_err(std::io::Error::other)?;
     std::fs::write(&p, s)?;
     #[cfg(unix)]
     {
@@ -174,7 +173,8 @@ mod tests {
 
     #[test]
     fn malformed_secret_file_is_not_silently_overwritten() {
-        let dir = std::env::temp_dir().join(format!("jiaofu-secrets-invalid-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("jiaofu-secrets-invalid-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("secrets.json");
