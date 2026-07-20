@@ -1,0 +1,16 @@
+{
+  "productName": "JiaofuSuiteM25Fixture",
+  "identifier": "com.jiaofu.suite.m25fixture",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "教辅系统 · M2.5 默认换版隔离验收",
+        "width": 1280,
+        "height": 860,
+        "minWidth": 980,
+        "minHeight": 680
+      }
+    ]
+  }
+}

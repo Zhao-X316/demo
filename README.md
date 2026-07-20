@@ -118,6 +118,10 @@ cargo test --manifest-path src-tauri/Cargo.toml --example t6_subjective_fixture
 npm run acceptance:recitation:build
 cargo test --manifest-path src-tauri/Cargo.toml --example m1_structured_fixture
 
+# M2.5 未来作业默认版本升级独立验收包（真实 IPC + 历史不变式；独立 bundle id）
+npm run acceptance:m25:build
+cargo test --manifest-path src-tauri/Cargo.toml --example m25_default_fixture
+
 # M1.2 背诵合成黄金集只读评估（不调用 provider、不写成绩或学习证据）
 cargo run -p module-recitation --example evaluate_recitation_golden -- \
   --manifest crates/module-recitation/tests/fixtures/golden/synthetic_contract_manifest_v1.json \
