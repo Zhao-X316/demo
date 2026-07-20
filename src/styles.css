@@ -710,9 +710,23 @@ code { background: #EEF0F3; padding: 1px 5px; border-radius: 4px; font-size: 12p
 .blueprint-confirm-row > div { display: flex; flex-direction: column; gap: 3px; }
 .blueprint-confirm-row b { font-size: 13px; }
 .blueprint-confirm-row span { color: var(--muted); font-size: 11.5px; }
-.blueprint-history-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 18px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); font-size: 12px; }
+.blueprint-history-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 18px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); font-size: 12px; }
 .blueprint-history-row > div { display: flex; flex-direction: column; gap: 3px; }
 .blueprint-history-row > div span, .blueprint-history-row time { color: var(--muted); font-size: 11px; }
+.blueprint-paper-editor { margin-top: 16px; border-color: var(--brand-line); }
+.blueprint-paper-title { display: block; max-width: 520px; margin-bottom: 10px; }
+.blueprint-paper-title input,
+.blueprint-paper-item select { width: 100%; padding: 8px 9px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--panel); }
+.blueprint-paper-items { display: flex; flex-direction: column; gap: 9px; margin-top: 12px; }
+.blueprint-paper-item { display: grid; grid-template-columns: 120px minmax(0, 1fr) auto; gap: 10px 14px; align-items: center; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-sub); }
+.blueprint-paper-order { display: flex; flex-direction: column; gap: 7px; align-self: stretch; justify-content: center; }
+.blueprint-paper-order > div { display: flex; gap: 5px; }
+.blueprint-paper-order button { padding: 4px 7px; font-size: 10.5px; }
+.blueprint-paper-item > p { grid-column: 2 / 4; margin: -3px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.blueprint-paper-break { display: flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 11px; color: var(--text-2); }
+.blueprint-paper-export { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 12px; padding: 12px; border: 1px solid #B8DDCC; border-radius: 8px; background: var(--ok-bg); }
+.blueprint-paper-export > div { display: flex; flex: 1; flex-direction: column; gap: 3px; }
+.blueprint-paper-export span { color: var(--muted); font-size: 11px; }
 .question-bank-tabs { margin-top: 14px; }
 .source-import-hero { margin-top: 14px; }
 .source-import-flow { display: flex; flex-direction: column; gap: 12px; }
@@ -808,6 +822,11 @@ code { background: #EEF0F3; padding: 1px 5px; border-radius: 4px; font-size: 12p
   .blueprint-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .blueprint-type-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .blueprint-live { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .blueprint-history-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; }
+  .blueprint-paper-item { grid-template-columns: 90px minmax(0, 1fr); }
+  .blueprint-paper-item > p { grid-column: 1 / 3; }
+  .blueprint-paper-break { grid-column: 1 / 3; }
+  .blueprint-paper-export { align-items: stretch; flex-direction: column; }
   .question-search-main { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .source-review-layout { grid-template-columns: 1fr; }
   .answer-source-upload { grid-template-columns: 1fr; align-items: stretch; }

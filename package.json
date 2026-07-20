@@ -14,7 +14,8 @@
     "acceptance:t6:build": "tauri build --debug --bundles app --config src-tauri/tauri.acceptance.conf.json",
     "acceptance:subjective:build": "tauri build --debug --bundles app --config src-tauri/tauri.subjective-acceptance.conf.json",
     "acceptance:recitation:build": "tauri build --debug --bundles app --config src-tauri/tauri.recitation-acceptance.conf.json",
-    "acceptance:m25:build": "tauri build --debug --bundles app --config src-tauri/tauri.m25-acceptance.conf.json"
+    "acceptance:m25:build": "tauri build --debug --bundles app --config src-tauri/tauri.m25-acceptance.conf.json",
+    "acceptance:k1-paper:build": "tauri build --debug --bundles app --config src-tauri/tauri.k1-paper-acceptance.conf.json"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

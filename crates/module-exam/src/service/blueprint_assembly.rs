@@ -193,24 +193,24 @@ pub struct BlueprintAssembly {
 }
 
 #[derive(Debug, Clone)]
-struct Scope {
-    class_name: String,
-    knowledge_map_id: i64,
-    knowledge_map_public_id: String,
-    knowledge_map_title: String,
-    curriculum_node_id: Option<i64>,
-    curriculum_node_public_id: Option<String>,
-    curriculum_node_title: Option<String>,
-    eligible_knowledge_ids: HashSet<i64>,
+pub(super) struct Scope {
+    pub(super) class_name: String,
+    pub(super) knowledge_map_id: i64,
+    pub(super) knowledge_map_public_id: String,
+    pub(super) knowledge_map_title: String,
+    pub(super) curriculum_node_id: Option<i64>,
+    pub(super) curriculum_node_public_id: Option<String>,
+    pub(super) curriculum_node_title: Option<String>,
+    pub(super) eligible_knowledge_ids: HashSet<i64>,
 }
 
 #[derive(Debug, Clone)]
-struct InternalCandidate {
-    output: BlueprintCandidate,
-    question_version_id: i64,
-    answer_key_version_id: i64,
-    rubric_version_id: i64,
-    link_set_id: i64,
+pub(super) struct InternalCandidate {
+    pub(super) output: BlueprintCandidate,
+    pub(super) question_version_id: i64,
+    pub(super) answer_key_version_id: i64,
+    pub(super) rubric_version_id: i64,
+    pub(super) link_set_id: i64,
 }
 
 #[derive(Serialize)]
@@ -392,7 +392,7 @@ pub fn list_blueprint_options(conn: &Connection) -> CoreResult<BlueprintOptions>
     })
 }
 
-fn load_scope(
+pub(super) fn load_scope(
     conn: &Connection,
     request: &BlueprintPreviewRequest,
     required: &[String],
@@ -498,7 +498,10 @@ fn load_scope(
     })
 }
 
-fn load_candidates(conn: &Connection, scope: &Scope) -> CoreResult<Vec<InternalCandidate>> {
+pub(super) fn load_candidates(
+    conn: &Connection,
+    scope: &Scope,
+) -> CoreResult<Vec<InternalCandidate>> {
     let base_rows = {
         let mut stmt = conn.prepare(
             "SELECT version.id,version.public_id,version.question_type,version.stem,

@@ -1,0 +1,16 @@
+{
+  "productName": "JiaofuSuiteK1PaperFixture",
+  "identifier": "com.jiaofu.suite.k1paperfixture",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "教辅系统 · K1 换题打印隔离验收",
+        "width": 1280,
+        "height": 860,
+        "minWidth": 980,
+        "minHeight": 680
+      }
+    ]
+  }
+}

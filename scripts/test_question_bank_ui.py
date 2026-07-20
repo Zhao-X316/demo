@@ -1,7 +1,8 @@
-"""K1 可解释题库组卷浏览器冒烟测试。
+"""K1 可解释题库组卷、换题排版与打印浏览器冒烟测试。
 
 通过浏览器端 Tauri invoke mock 验证：一页式蓝图输入、L3 候选解释、
-题型/总分/知识点对齐门禁、老师确认、冻结作业摘要和历史列表。
+题型/总分/知识点对齐门禁、老师确认、冻结作业摘要、同槽位换题、
+简单排序/分页，以及题卷和答案卷分别保存。
 后端固定版本、事务、幂等和旧预览失效由 Rust 单元测试覆盖。
 """
 
@@ -13,6 +14,8 @@ window.__blueprintCalls = [];
 window.__assemblies = [];
 window.__duplicateDecision = null;
 window.__candidatePending = true;
+window.__paperRevision = 0;
+window.__paperItems = null;
 window.__TAURI_INTERNALS__ = {
   transformCallback: () => 1,
   unregisterCallback: () => undefined,
@@ -191,6 +194,8 @@ window.__TAURI_INTERNALS__ = {
         question_types: ["single", "multiple", "true_false", "fill_blank", "short_answer"]
       };
     }
+    if (cmd === "k1_link_review_catalog") return { maps: [] };
+    if (cmd === "k1_link_review_inbox") return [];
     if (cmd === "k1_blueprint_list") return window.__assemblies;
     if (cmd === "k1_blueprint_preview") {
       return {
@@ -304,6 +309,111 @@ window.__TAURI_INTERNALS__ = {
       window.__assemblies = [assembly];
       return assembly;
     }
+    if (cmd === "k1_blueprint_paper_editor") {
+      const initialItems = [
+        {
+          source_slot_order_index: 0, order_index: 0,
+          question_version_public_id: "question-1", question_type: "single",
+          stem: "鸦片战争爆发于哪一年？", material_text: null,
+          score: 1, page_break_before: false
+        },
+        {
+          source_slot_order_index: 1, order_index: 1,
+          question_version_public_id: "question-2", question_type: "single",
+          stem: "鸦片战争开始的时间是？", material_text: null,
+          score: 1, page_break_before: false
+        }
+      ];
+      const candidates = [
+        {
+          question_version_public_id: "question-1", question_type: "single",
+          stem: "鸦片战争爆发于哪一年？", material_text: null, score: 1,
+          quality_level: "L3", knowledge_nodes: [], ability_dimensions: [],
+          explanation: "合格题"
+        },
+        {
+          question_version_public_id: "question-2", question_type: "single",
+          stem: "鸦片战争开始的时间是？", material_text: null, score: 1,
+          quality_level: "L3", knowledge_nodes: [], ability_dimensions: [],
+          explanation: "合格题"
+        },
+        {
+          question_version_public_id: "question-3", question_type: "single",
+          stem: "中国近代史开端对应哪次战争？", material_text: null, score: 1,
+          quality_level: "L3", knowledge_nodes: [], ability_dimensions: [],
+          explanation: "合格替换题"
+        }
+      ];
+      return {
+        schema_version: 1,
+        rule_version: "k1-blueprint-paper-v1",
+        assembly_public_id: "assembly-1",
+        title: "课堂练习",
+        class_name: "八年级一班",
+        knowledge_map_title: "中国历史八年级上册",
+        curriculum_node_title: "鸦片战争",
+        current_edition_public_id: window.__paperRevision ? "paper-edition-1" : null,
+        current_revision: window.__paperRevision,
+        source_assessment_version_public_id:
+          window.__paperRevision ? "assessment-version-2" : "assessment-version-1",
+        required_knowledge_node_public_ids: ["knowledge-1"],
+        items: window.__paperItems || initialItems,
+        candidates,
+        boundary_note:
+          "换题只允许同题型、同分值的当前 L3/L4 题；确认会追加新作业版本和打印快照。"
+      };
+    }
+    if (cmd === "k1_blueprint_paper_confirm") {
+      window.__paperRevision = 1;
+      window.__paperItems = args.input.items.map((item, index) => {
+        const source = item.questionVersionPublicId === "question-3"
+          ? { stem: "中国近代史开端对应哪次战争？" }
+          : item.questionVersionPublicId === "question-2"
+            ? { stem: "鸦片战争开始的时间是？" }
+            : { stem: "鸦片战争爆发于哪一年？" };
+        return {
+          source_slot_order_index: item.sourceSlotOrderIndex,
+          order_index: index,
+          question_version_public_id: item.questionVersionPublicId,
+          question_type: "single",
+          stem: source.stem,
+          material_text: null,
+          score: 1,
+          page_break_before: item.pageBreakBefore
+        };
+      });
+      return {
+        public_id: "paper-edition-1",
+        assembly_public_id: "assembly-1",
+        revision: 1,
+        title: args.input.title,
+        assessment_public_id: "assessment-1",
+        source_assessment_version_public_id: "assessment-version-1",
+        assessment_version_public_id: "assessment-version-2",
+        supersedes_edition_public_id: null,
+        item_set_hash: "d".repeat(64),
+        question_html_sha256: "e".repeat(64),
+        answer_html_sha256: "f".repeat(64),
+        suggested_question_file_name: "课堂练习-题卷-第1版.html",
+        suggested_answer_file_name: "课堂练习-答案-第1版.html",
+        state: "confirmed",
+        confirmed_by: "local_teacher",
+        confirmed_at: "2026-07-19T12:10:00Z",
+        items: window.__paperItems
+      };
+    }
+    if (cmd === "plugin:dialog|save") {
+      return `/tmp/${args.options.defaultPath}`;
+    }
+    if (cmd === "k1_blueprint_paper_write") {
+      return {
+        edition_public_id: args.editionPublicId,
+        export_kind: args.exportKind,
+        file_name: args.outputPath.split("/").pop(),
+        byte_size: 2048,
+        sha256: args.exportKind === "question" ? "e".repeat(64) : "f".repeat(64)
+      };
+    }
     return [];
   }
 };
@@ -321,6 +431,7 @@ def test_question_bank(base_url: str) -> None:
         page.locator(".mod-row").filter(has_text="改作业").click()
         page.get_by_role("button", name="题目与题库").click()
         expect(page.get_by_role("heading", name="题目与知识库")).to_be_visible()
+        page.get_by_role("button", name="找题与查重").click()
         expect(page.get_by_role("button", name="找题与查重")).to_have_class("tab active")
         expect(page.get_by_text("找到 2 道题", exact=True)).to_be_visible()
         expect(page.locator(".question-search-card")).to_have_count(2)
@@ -388,6 +499,53 @@ def test_question_bank(base_url: str) -> None:
         expect(page.get_by_text("最近确认的组卷", exact=True)).to_be_visible()
         expect(page.locator(".blueprint-history-row")).to_have_count(1)
         expect(page.get_by_text("不代表学生已经提交或成绩已经发布", exact=False)).to_be_visible()
+
+        page.get_by_role("button", name="换题与打印").click()
+        expect(page.get_by_text("调整题目并生成打印稿", exact=True)).to_be_visible()
+        expect(page.locator(".blueprint-paper-item")).to_have_count(2)
+        page.get_by_label("第 1 题换题").select_option("question-3")
+        expect(page.get_by_role("paragraph").filter(
+            has_text="中国近代史开端对应哪次战争？"
+        )).to_be_visible()
+        page.get_by_label("第 1 题下移").click()
+        page.locator(".blueprint-paper-item").nth(1).get_by_text("从新页开始").click()
+        page.get_by_role("button", name="确认新版并生成打印稿").click()
+        expect(page.get_by_text("第 1 版已冻结。现在可分别保存题卷和答案卷。", exact=True)).to_be_visible()
+        expect(page.get_by_role("button", name="保存题卷")).to_be_visible()
+        expect(page.get_by_role("button", name="保存答案卷")).to_be_visible()
+
+        paper_calls = page.evaluate(
+            """window.__blueprintCalls.filter((item) =>
+              item.cmd === "k1_blueprint_paper_confirm")"""
+        )
+        assert len(paper_calls) == 1
+        paper_input = paper_calls[0]["args"]["input"]
+        assert paper_input["expectedSourceAssessmentVersionPublicId"] == "assessment-version-1"
+        assert paper_input["items"] == [
+            {
+                "sourceSlotOrderIndex": 1,
+                "questionVersionPublicId": "question-2",
+                "pageBreakBefore": False,
+            },
+            {
+                "sourceSlotOrderIndex": 0,
+                "questionVersionPublicId": "question-3",
+                "pageBreakBefore": True,
+            },
+        ]
+        page.get_by_role("button", name="保存题卷").click()
+        expect(page.get_by_text("已保存 课堂练习-题卷-第1版.html", exact=False)).to_be_visible()
+        page.get_by_role("button", name="保存答案卷").click()
+        expect(page.get_by_text("已保存 课堂练习-答案-第1版.html", exact=False)).to_be_visible()
+        write_calls = page.evaluate(
+            """window.__blueprintCalls.filter((item) =>
+              item.cmd === "k1_blueprint_paper_write")"""
+        )
+        assert [item["args"]["exportKind"] for item in write_calls] == [
+            "question",
+            "answer",
+        ]
+        page.screenshot(path="/tmp/jiaofu-blueprint-paper.png", full_page=True)
 
         calls = page.evaluate(
             """window.__blueprintCalls.filter((item) =>

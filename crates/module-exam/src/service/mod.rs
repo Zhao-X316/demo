@@ -5,6 +5,7 @@ pub mod answer_sheet_page;
 pub mod answer_source;
 pub mod assessment;
 pub mod blueprint_assembly;
+pub mod blueprint_paper;
 pub mod dictation_pipeline;
 pub mod fixed_paper;
 pub mod grading;

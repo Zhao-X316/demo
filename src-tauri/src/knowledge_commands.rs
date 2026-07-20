@@ -7,6 +7,10 @@ use module_exam::service::blueprint_assembly::{
     self, BlueprintAssembly, BlueprintOptions, BlueprintPreview, BlueprintPreviewRequest,
     BlueprintQuestionTypeTarget, ConfirmBlueprintRequest,
 };
+use module_exam::service::blueprint_paper::{
+    self, BlueprintPaperEdition, BlueprintPaperEditor, BlueprintPaperItemInput,
+    ConfirmBlueprintPaperRequest, WrittenBlueprintPaper,
+};
 use module_exam::service::question_candidate_review::{
     self, CandidateReviewDecision, CandidateReviewInbox, DiscardCandidateRequest,
     PromoteCandidateRequest,
@@ -80,6 +84,24 @@ pub struct ConfirmBlueprintInput {
     preview: BlueprintPreviewInput,
     expected_preview_hash: String,
     selected_question_version_public_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlueprintPaperItemRequest {
+    source_slot_order_index: i64,
+    question_version_public_id: String,
+    page_break_before: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmBlueprintPaperInput {
+    request_key: String,
+    assembly_public_id: String,
+    expected_source_assessment_version_public_id: String,
+    title: String,
+    items: Vec<BlueprintPaperItemRequest>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -212,6 +234,62 @@ pub fn k1_blueprint_list(
     let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     blueprint_assembly::list_blueprint_assemblies(&connection, class_id, limit.unwrap_or(20))
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn k1_blueprint_paper_editor(
+    state: State<'_, AppState>,
+    assembly_public_id: String,
+) -> Result<BlueprintPaperEditor, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    blueprint_paper::load_blueprint_paper_editor(&connection, &assembly_public_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn k1_blueprint_paper_confirm(
+    state: State<'_, AppState>,
+    input: ConfirmBlueprintPaperInput,
+) -> Result<BlueprintPaperEdition, String> {
+    let mut connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    blueprint_paper::confirm_blueprint_paper(
+        &mut connection,
+        &ConfirmBlueprintPaperRequest {
+            request_key: input.request_key,
+            assembly_public_id: input.assembly_public_id,
+            expected_source_assessment_version_public_id: input
+                .expected_source_assessment_version_public_id,
+            title: input.title,
+            items: input
+                .items
+                .into_iter()
+                .map(|item| BlueprintPaperItemInput {
+                    source_slot_order_index: item.source_slot_order_index,
+                    question_version_public_id: item.question_version_public_id,
+                    page_break_before: item.page_break_before,
+                })
+                .collect(),
+            confirmed_by: LOCAL_TEACHER_ACTOR_ID.into(),
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn k1_blueprint_paper_write(
+    state: State<'_, AppState>,
+    edition_public_id: String,
+    export_kind: String,
+    output_path: String,
+) -> Result<WrittenBlueprintPaper, String> {
+    let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+    blueprint_paper::write_blueprint_paper_html(
+        &connection,
+        &edition_public_id,
+        &export_kind,
+        &output_path,
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
