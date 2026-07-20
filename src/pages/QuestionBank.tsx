@@ -26,6 +26,7 @@ import {
   K1QuestionType,
   QuestionSearchInput,
   QuestionSearchResponse,
+  SemanticQuestionSearchResponse,
   QuestionImpactAction,
   QuestionImpactPlan,
   QuestionImpactReviewCase,
@@ -60,6 +61,7 @@ import {
   promoteCandidateToL1,
   reviewDuplicate,
   searchQuestions,
+  semanticSearchQuestions,
   suggestKnowledgeLinks,
   loadQuestionPerformance,
   loadQuestionImpactCases,
@@ -102,6 +104,12 @@ function newDuplicateRequestKey() {
   const random = globalThis.crypto?.randomUUID?.()
     ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   return `k1-duplicate-${random}`;
+}
+
+function newSemanticSearchRequestKey() {
+  const random = globalThis.crypto?.randomUUID?.()
+    ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `k1-semantic-search-${random}`;
 }
 
 function newCandidateRequestKey(action: "promote" | "discard") {
@@ -1684,6 +1692,7 @@ function SourceImportPanel() {
 }
 
 function QuestionSearchPanel({ options }: { options: BlueprintOptions | null }) {
+  const [searchMode, setSearchMode] = useState<"keyword" | "semantic">("keyword");
   const [query, setQuery] = useState("");
   const [ownerScope, setOwnerScope] = useState<"all" | "personal" | "official">("all");
   const [questionType, setQuestionType] = useState<K1QuestionType | "">("");
@@ -1693,6 +1702,7 @@ function QuestionSearchPanel({ options }: { options: BlueprintOptions | null }) 
   const [curriculumPublicId, setCurriculumPublicId] = useState("");
   const [knowledgePublicId, setKnowledgePublicId] = useState("");
   const [result, setResult] = useState<QuestionSearchResponse | null>(null);
+  const [semanticResult, setSemanticResult] = useState<SemanticQuestionSearchResponse | null>(null);
   const [working, setWorking] = useState(false);
   const [reviewing, setReviewing] = useState("");
   const [error, setError] = useState("");
@@ -1737,8 +1747,8 @@ function QuestionSearchPanel({ options }: { options: BlueprintOptions | null }) 
     knowledgeMapPublicId: mapPublicId || null,
     curriculumNodePublicId: curriculumPublicId || null,
     knowledgeNodePublicId: knowledgePublicId || null,
-    duplicateOnly,
-    limit: 50,
+    duplicateOnly: searchMode === "keyword" && duplicateOnly,
+    limit: searchMode === "semantic" ? 20 : 50,
     offset: 0,
   }), [
     query,
@@ -1749,6 +1759,7 @@ function QuestionSearchPanel({ options }: { options: BlueprintOptions | null }) 
     curriculumPublicId,
     knowledgePublicId,
     duplicateOnly,
+    searchMode,
   ]);
 
   const runSearch = async () => {
@@ -1756,9 +1767,24 @@ function QuestionSearchPanel({ options }: { options: BlueprintOptions | null }) 
     setError("");
     setNotice("");
     try {
-      setResult(await searchQuestions(input));
+      if (searchMode === "semantic") {
+        if (query.trim().length < 2) {
+          throw new Error("按意思查找需要输入至少 2 个字符。");
+        }
+        const semantic = await semanticSearchQuestions({
+          requestKey: newSemanticSearchRequestKey(),
+          search: input,
+        });
+        setSemanticResult(semantic);
+        if (semantic.failure) setError(semantic.failure.safe_message);
+        setResult(null);
+      } else {
+        setResult(await searchQuestions(input));
+        setSemanticResult(null);
+      }
     } catch (reason) {
       setResult(null);
+      setSemanticResult(null);
       setError(String(reason));
     } finally {
       setWorking(false);
@@ -1810,12 +1836,31 @@ function QuestionSearchPanel({ options }: { options: BlueprintOptions | null }) 
           <span className="tag">当前版本</span>
         </div>
         <div className="question-search-main">
+          <label className="field">
+            <span className="fl">查找方式</span>
+            <select
+              value={searchMode}
+              onChange={(event) => {
+                const next = event.target.value as typeof searchMode;
+                setSearchMode(next);
+                if (next === "semantic") setDuplicateOnly(false);
+                setResult(null);
+                setSemanticResult(null);
+                setError("");
+              }}
+            >
+              <option value="keyword">关键词匹配（本机）</option>
+              <option value="semantic">按意思查找（AI）</option>
+            </select>
+          </label>
           <label className="field question-search-keyword">
-            <span className="fl">关键词</span>
+            <span className="fl">{searchMode === "semantic" ? "想找什么题" : "关键词"}</span>
             <input
               value={query}
               maxLength={100}
-              placeholder="题干、材料或选项，如：洋务运动"
+              placeholder={searchMode === "semantic"
+                ? "如：找考查中国近代史开端、适合基础复习的题"
+                : "题干、材料或选项，如：洋务运动"}
               onChange={(event) => setQuery(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") void runSearch();
@@ -1848,7 +1893,9 @@ function QuestionSearchPanel({ options }: { options: BlueprintOptions | null }) 
             </select>
           </label>
           <button className="primary" disabled={working} onClick={runSearch}>
-            {working ? "正在查找…" : "查找题目"}
+            {working
+              ? searchMode === "semantic" ? "正在理解并查找…" : "正在查找…"
+              : searchMode === "semantic" ? "按意思查找" : "查找题目"}
           </button>
         </div>
         <details className="question-search-advanced">
@@ -1889,20 +1936,75 @@ function QuestionSearchPanel({ options }: { options: BlueprintOptions | null }) 
               </select>
             </label>
             <label className="question-search-check">
-              <input type="checkbox" checked={duplicateOnly} onChange={(event) => setDuplicateOnly(event.target.checked)} />
+              <input
+                type="checkbox"
+                checked={duplicateOnly}
+                disabled={searchMode === "semantic"}
+                onChange={(event) => setDuplicateOnly(event.target.checked)}
+              />
               只看有重复提示的题
             </label>
           </div>
         </details>
+        {searchMode === "semantic" && (
+          <div className="question-search-summary">
+            <b>AI 只负责排序</b>
+            <span>系统先在本机按权限和筛选条件冻结最多 80 道候选，再让 AI 按意思排序；不会自动合并、改答案或改变历史作业。</span>
+          </div>
+        )}
         {result && (
           <div className="question-search-summary">
             <b>找到 {result.total} 道题</b>
             <span>{result.boundary_note}</span>
           </div>
         )}
+        {semanticResult && (
+          <div className="question-search-summary">
+            <b>
+              {semanticResult.status === "succeeded"
+                ? `按意思找到 ${semanticResult.items.length} 道题`
+                : "本次按意思查找未完成"}
+            </b>
+            <span>{semanticResult.boundaryNote}</span>
+          </div>
+        )}
       </section>
 
       <section className="question-search-results">
+        {semanticResult?.items.map(({ candidate, score, reason }) => (
+          <article className="question-search-card" key={candidate.questionVersionPublicId}>
+            <div className="question-search-card-head">
+              <div>
+                <span className="tag">{TYPE_LABEL[candidate.questionType]}</span>
+                <span className="tag">{candidate.ownerLabel}</span>
+                <span className="tag">{candidate.qualityLevel}</span>
+                <span className="tag ok">语义相关 {Math.round(score * 100)}%</span>
+              </div>
+              <strong>{candidate.maxScore} 分</strong>
+            </div>
+            <h3>{candidate.stem}</h3>
+            {candidate.materialText && <p>{candidate.materialText}</p>}
+            {candidate.options.length > 0 && (
+              <div className="question-search-options">
+                {candidate.options.map((option) => (
+                  <span key={option.label}>{option.label}. {option.content}</span>
+                ))}
+              </div>
+            )}
+            <div className="question-search-summary">
+              <b>为什么匹配</b>
+              <span>{reason}</span>
+            </div>
+            <div className="blueprint-evidence-tags">
+              {candidate.knowledgeTitles.map((title) => (
+                <span key={`knowledge-${title}`}>知识 · {title}</span>
+              ))}
+              {candidate.abilityTitles.map((title) => (
+                <span key={`ability-${title}`}>能力 · {title}</span>
+              ))}
+            </div>
+          </article>
+        ))}
         {result?.items.map((item) => (
           <article className="question-search-card" key={item.question_version_public_id}>
             <div className="question-search-card-head">
@@ -1966,6 +2068,13 @@ function QuestionSearchPanel({ options }: { options: BlueprintOptions | null }) 
         ))}
         {result && result.items.length === 0 && (
           <div className="dashboard-panel muted">没有符合条件的题，试试放宽筛选条件。</div>
+        )}
+        {semanticResult
+          && semanticResult.status === "succeeded"
+          && semanticResult.items.length === 0 && (
+          <div className="dashboard-panel muted">
+            冻结候选中没有足够相关的题。可以换一种说法，或先选择教材、章节和题型缩小范围。
+          </div>
         )}
       </section>
     </>

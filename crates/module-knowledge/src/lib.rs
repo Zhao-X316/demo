@@ -6,6 +6,7 @@
 
 pub mod db;
 pub mod link_suggestion;
+pub mod semantic_search;
 pub mod source_import;
 
 use suite_core::models::ModuleKey;

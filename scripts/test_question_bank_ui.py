@@ -162,6 +162,39 @@ window.__TAURI_INTERNALS__ = {
         ]
       };
     }
+    if (cmd === "k1_question_semantic_search") {
+      return {
+        aiRunId: 91,
+        status: "succeeded",
+        state: "ready",
+        confidence: 0.95,
+        issueCodes: [],
+        items: [{
+          candidate: {
+            questionVersionPublicId: "question-1",
+            revision: 1,
+            ownerScope: "personal",
+            ownerLabel: "我的题库",
+            questionType: "single",
+            stem: "鸦片战争爆发于哪一年？",
+            materialText: null,
+            maxScore: 1,
+            qualityLevel: "L3",
+            options: [
+              { label: "A", content: "1840年" },
+              { label: "B", content: "1842年" }
+            ],
+            knowledgeTitles: ["鸦片战争爆发时间"],
+            abilityTitles: ["事实识记与提取"]
+          },
+          score: 0.97,
+          reason: "直接考查中国近代史开端的标志性事件"
+        }],
+        failure: null,
+        catalogSnapshotHash: "a".repeat(64),
+        boundaryNote: "本机先按老师权限和结构化条件冻结 2 道候选；AI 只在该清单内按意思排序。结果仅供选题。"
+      };
+    }
     if (cmd === "k1_duplicate_review") {
       window.__duplicateDecision = args.input.decision;
       return {
@@ -446,6 +479,24 @@ def test_question_bank(base_url: str) -> None:
         assert duplicate_calls[0]["args"]["input"]["leftQuestionVersionPublicId"] == "question-1"
         assert duplicate_calls[0]["args"]["input"]["rightQuestionVersionPublicId"] == "question-2"
         page.screenshot(path="/tmp/jiaofu-question-search.png", full_page=True)
+
+        page.get_by_label("查找方式").select_option("semantic")
+        page.get_by_label("想找什么题").fill("找考查中国近代史开端的题")
+        page.get_by_role("button", name="按意思查找").click()
+        expect(page.get_by_text("按意思找到 1 道题", exact=True)).to_be_visible()
+        expect(page.get_by_text("语义相关 97%", exact=True)).to_be_visible()
+        expect(page.get_by_text("直接考查中国近代史开端的标志性事件", exact=True)).to_be_visible()
+        semantic_calls = page.evaluate(
+            """window.__blueprintCalls.filter((item) =>
+              item.cmd === "k1_question_semantic_search")"""
+        )
+        assert len(semantic_calls) == 1
+        semantic_input = semantic_calls[0]["args"]["input"]
+        assert semantic_input["search"]["query"] == "找考查中国近代史开端的题"
+        assert semantic_input["search"]["limit"] == 20
+        assert semantic_input["search"]["duplicateOnly"] is False
+        assert semantic_input["requestKey"].startswith("k1-semantic-search-")
+        page.screenshot(path="/tmp/jiaofu-question-semantic-search.png", full_page=True)
 
         page.get_by_role("button", name="待整理新题").click()
         expect(page.get_by_text("1 道待整理", exact=True)).to_be_visible()

@@ -362,6 +362,54 @@ export interface DuplicateReviewDecision {
 export const searchQuestions = (input: QuestionSearchInput) =>
   call<QuestionSearchResponse>("k1_question_search", { input });
 
+export interface SemanticSearchCandidate {
+  questionVersionPublicId: string;
+  revision: number;
+  ownerScope: "personal" | "official";
+  ownerLabel: string;
+  questionType: K1QuestionType;
+  stem: string;
+  materialText: string | null;
+  maxScore: number;
+  qualityLevel: "C0" | "L0" | "L1" | "L2" | "L3" | "L4";
+  options: QuestionSearchOption[];
+  knowledgeTitles: string[];
+  abilityTitles: string[];
+}
+
+export interface SemanticQuestionSearchItem {
+  candidate: SemanticSearchCandidate;
+  score: number;
+  reason: string;
+}
+
+export interface SemanticRunFailure {
+  schema_version: number;
+  code: string;
+  safe_message: string;
+  retryable: boolean;
+}
+
+export interface SemanticQuestionSearchResponse {
+  aiRunId: number;
+  status: "succeeded" | "failed";
+  state: "ready" | "needs_review" | "blocked" | "failed";
+  confidence: number | null;
+  issueCodes: string[];
+  items: SemanticQuestionSearchItem[];
+  failure: SemanticRunFailure | null;
+  catalogSnapshotHash: string;
+  boundaryNote: string;
+}
+
+export interface SemanticQuestionSearchInput {
+  requestKey: string;
+  search: QuestionSearchInput;
+}
+
+export const semanticSearchQuestions = (input: SemanticQuestionSearchInput) =>
+  call<SemanticQuestionSearchResponse>("k1_question_semantic_search", { input });
+
 export const reviewDuplicate = (input: ReviewDuplicateInput) =>
   call<DuplicateReviewDecision>("k1_duplicate_review", { input });
 

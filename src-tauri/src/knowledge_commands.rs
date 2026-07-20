@@ -38,8 +38,12 @@ use module_knowledge::db::source_documents::{
     SourceDraftReview, SourceInboxItem,
 };
 use module_knowledge::link_suggestion::{LinkSuggester, LinkSuggestionInput};
+use module_knowledge::semantic_search::{
+    validate_output as validate_semantic_output, SemanticQuestionSearcher, SemanticSearchCandidate,
+    SemanticSearchInput,
+};
 use module_knowledge::source_import::{SourceOptionDraft, SourceQuestionRecognizer};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::State;
 
@@ -49,6 +53,10 @@ use crate::knowledge_answer_run::{
 };
 use crate::knowledge_link_provider::ArkKnowledgeLinkSuggester;
 use crate::knowledge_link_run::{self, BeginLinkRun, LinkSuggestionAnalysisResult};
+use crate::knowledge_semantic_provider::ArkSemanticQuestionSearcher;
+use crate::knowledge_semantic_run::{
+    self, BeginSemanticRun, SemanticRunFailure, SemanticSearchAnalysisResult,
+};
 use crate::knowledge_source_provider::ArkSourceQuestionRecognizer;
 use crate::knowledge_source_run::{
     self, BeginSourceRun, ImportSourceRequest, SourceImportAnalysisResult,
@@ -167,6 +175,94 @@ pub struct SuggestKnowledgeLinksInput {
     question_version_public_id: String,
     knowledge_map_public_id: String,
     request_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticQuestionSearchInput {
+    request_key: String,
+    search: QuestionSearchRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticQuestionSearchItem {
+    candidate: SemanticSearchCandidate,
+    score: f64,
+    reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticQuestionSearchResponse {
+    ai_run_id: i64,
+    status: String,
+    state: String,
+    confidence: Option<f64>,
+    issue_codes: Vec<String>,
+    items: Vec<SemanticQuestionSearchItem>,
+    failure: Option<SemanticRunFailure>,
+    catalog_snapshot_hash: String,
+    boundary_note: String,
+}
+
+fn semantic_search_response(
+    input: &SemanticSearchInput,
+    result: SemanticSearchAnalysisResult,
+) -> suite_core::error::CoreResult<SemanticQuestionSearchResponse> {
+    let SemanticSearchAnalysisResult {
+        ai_run_id,
+        status,
+        output,
+        failure,
+    } = result;
+    let Some(output) = output else {
+        return Ok(SemanticQuestionSearchResponse {
+            ai_run_id,
+            status,
+            state: "failed".into(),
+            confidence: None,
+            issue_codes: Vec::new(),
+            items: Vec::new(),
+            failure,
+            catalog_snapshot_hash: input.catalog_snapshot_hash.clone(),
+            boundary_note:
+                "本机关键词查找仍可使用；失败的 AI 结果不会修改题库、作业、成绩或学习证据。".into(),
+        });
+    };
+    validate_semantic_output(input, &output)?;
+    let mut items = Vec::with_capacity(output.matches.len());
+    for matched in &output.matches {
+        let candidate = input
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.question_version_public_id == matched.question_version_public_id
+            })
+            .cloned()
+            .ok_or_else(|| {
+                suite_core::error::CoreError::Invalid("语义找题结果不属于冻结候选清单".into())
+            })?;
+        items.push(SemanticQuestionSearchItem {
+            candidate,
+            score: matched.score,
+            reason: matched.reason.clone(),
+        });
+    }
+    Ok(SemanticQuestionSearchResponse {
+        ai_run_id,
+        status,
+        state: output.state,
+        confidence: Some(output.confidence),
+        issue_codes: output.issue_codes,
+        items,
+        failure,
+        catalog_snapshot_hash: input.catalog_snapshot_hash.clone(),
+        boundary_note: format!(
+            "本机先按老师权限和结构化条件冻结 {} 道候选；AI 只在该清单内按意思排序。结果仅供选题，不会自动合并、改答案、发布、重算历史成绩或形成学习证据。",
+            input.candidates.len()
+        ),
+    })
 }
 
 impl From<BlueprintPreviewInput> for BlueprintPreviewRequest {
@@ -300,6 +396,47 @@ pub fn k1_question_search(
     let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
     search::search_questions(&connection, LOCAL_TEACHER_ACTOR_ID, &input)
         .map_err(|error| error.to_string())
+}
+
+/// 在本地有权访问的有限题目清单内按意思排序。
+///
+/// 候选清单先在短锁内冻结，外部调用不持 SQLite 锁；模型只能返回清单内版本 ID。
+#[tauri::command]
+pub async fn k1_question_semantic_search(
+    state: State<'_, AppState>,
+    input: SemanticQuestionSearchInput,
+) -> Result<SemanticQuestionSearchResponse, String> {
+    let semantic_input = {
+        let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+        search::prepare_semantic_search(&connection, LOCAL_TEACHER_ACTOR_ID, &input.search)
+            .map_err(|error| error.to_string())?
+    };
+    let creds = secrets::load(&state.data_dir).map_err(|error| error.to_string())?;
+    let searcher = ArkSemanticQuestionSearcher::from_creds(&creds);
+    let begin = {
+        let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+        knowledge_semantic_run::begin(&connection, &semantic_input, &searcher, &input.request_key)
+            .map_err(|error| error.to_string())?
+    };
+    let result = match begin {
+        BeginSemanticRun::Completed(result) => *result,
+        BeginSemanticRun::Execute { ai_run_id } => {
+            let worker_input = std::sync::Arc::new(semantic_input.clone());
+            let thread_input = std::sync::Arc::clone(&worker_input);
+            let result =
+                tauri::async_runtime::spawn_blocking(move || searcher.search(&thread_input))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(suite_core::error::CoreError::Invalid(
+                            "语义找题任务意外中断，可稍后重试或改用关键词查找".into(),
+                        ))
+                    });
+            let connection = state.db.lock().map_err(|_| "数据库忙".to_string())?;
+            knowledge_semantic_run::finish(&connection, &worker_input, ai_run_id, result)
+                .map_err(|error| error.to_string())?
+        }
+    };
+    semantic_search_response(&semantic_input, result).map_err(|error| error.to_string())
 }
 
 #[tauri::command]

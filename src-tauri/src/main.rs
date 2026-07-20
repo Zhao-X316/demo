@@ -21,6 +21,8 @@ mod knowledge_answer_run;
 mod knowledge_commands;
 mod knowledge_link_provider;
 mod knowledge_link_run;
+mod knowledge_semantic_provider;
+mod knowledge_semantic_run;
 mod knowledge_source_provider;
 mod knowledge_source_run;
 mod learning_commands;
@@ -146,6 +148,7 @@ fn main() {
             knowledge_commands::k1_blueprint_paper_confirm,
             knowledge_commands::k1_blueprint_paper_write,
             knowledge_commands::k1_question_search,
+            knowledge_commands::k1_question_semantic_search,
             knowledge_commands::k1_duplicate_review,
             knowledge_commands::k1_question_performance,
             knowledge_commands::k1_question_impact_preview,

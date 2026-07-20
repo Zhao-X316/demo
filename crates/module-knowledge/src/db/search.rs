@@ -14,6 +14,12 @@ use suite_core::domain::{hashing, ids, similarity, time};
 use suite_core::error::{CoreError, CoreResult};
 use suite_core::models::AuditActorType;
 
+use crate::semantic_search::{
+    candidate_snapshot_hash, SemanticSearchCandidate, SemanticSearchInput, SemanticSearchOption,
+    MAX_SEMANTIC_CANDIDATES, MAX_SEMANTIC_RESULTS, SEMANTIC_SEARCH_INPUT_VERSION,
+    SEMANTIC_SEARCH_SCHEMA_VERSION,
+};
+
 pub const SEARCH_SCHEMA_VERSION: i64 = 1;
 pub const SEARCH_RULE_VERSION: &str = "k1-structured-search-v1";
 pub const DUPLICATE_RULE_VERSION: &str = "k1-deterministic-duplicate-v1";
@@ -191,6 +197,10 @@ fn normalize_text(value: &str) -> String {
         .filter(|character| character.is_alphanumeric())
         .take(600)
         .collect()
+}
+
+fn limited_text(value: &str, limit: usize) -> String {
+    value.chars().take(limit).collect()
 }
 
 fn searchable_text(question: &CatalogQuestion) -> String {
@@ -735,6 +745,140 @@ pub fn search_questions(
     })
 }
 
+/// 冻结一次真正语义检索的本地候选清单。
+///
+/// 权限、题型、质量、状态和教材范围全部先在本地校验；AI 只会收到这个有限清单，
+/// 不能越权检索学校空间，也不能返回清单外题目。
+pub fn prepare_semantic_search(
+    conn: &Connection,
+    actor_id: &str,
+    input: &QuestionSearchRequest,
+) -> CoreResult<SemanticSearchInput> {
+    required(actor_id, "当前老师")?;
+    validate_request(input)?;
+    if input.query.trim().chars().count() < 2 {
+        return Err(CoreError::Invalid("按意思查找需要输入至少 2 个字符".into()));
+    }
+    if input.duplicate_only {
+        return Err(CoreError::Invalid(
+            "按意思查找与重复候选筛选不能同时使用".into(),
+        ));
+    }
+    let catalog = load_catalog(conn, actor_id)?;
+    let minimum_quality = quality_rank(&input.minimum_quality).unwrap();
+    let scoped_knowledge = scoped_knowledge_ids(
+        conn,
+        input.knowledge_map_public_id.as_deref(),
+        input.curriculum_node_public_id.as_deref(),
+    )?;
+    let requested_knowledge = requested_knowledge_id(
+        conn,
+        input.knowledge_map_public_id.as_deref(),
+        input.knowledge_node_public_id.as_deref(),
+    )?;
+    let mut candidates = Vec::new();
+    for question in &catalog {
+        if input.owner_scope != "all" && question.owner_scope != input.owner_scope {
+            continue;
+        }
+        if input
+            .question_type
+            .as_deref()
+            .is_some_and(|value| value != question.question_type)
+        {
+            continue;
+        }
+        if quality_rank(&question.quality_level).unwrap_or(-1) < minimum_quality {
+            continue;
+        }
+        let state_matches = match input.state.as_str() {
+            "active" => !matches!(question.state.as_str(), "deprecated" | "archived"),
+            "all" => true,
+            value => question.state == value,
+        };
+        if !state_matches {
+            continue;
+        }
+        let (knowledge_nodes, ability_dimensions, linked_knowledge_ids) =
+            load_links(conn, question.id, input.knowledge_map_public_id.as_deref())?;
+        if scoped_knowledge
+            .as_ref()
+            .is_some_and(|scope| linked_knowledge_ids.is_disjoint(scope))
+        {
+            continue;
+        }
+        if requested_knowledge.is_some_and(|id| !linked_knowledge_ids.contains(&id)) {
+            continue;
+        }
+        let mut knowledge_titles = knowledge_nodes
+            .into_iter()
+            .map(|node| limited_text(&node.title, 100))
+            .collect::<Vec<_>>();
+        knowledge_titles.sort();
+        knowledge_titles.dedup();
+        knowledge_titles.truncate(20);
+        let mut ability_titles = ability_dimensions
+            .into_iter()
+            .map(|ability| limited_text(&ability.title, 100))
+            .collect::<Vec<_>>();
+        ability_titles.sort();
+        ability_titles.dedup();
+        ability_titles.truncate(12);
+        candidates.push(SemanticSearchCandidate {
+            question_version_public_id: question.version_public_id.clone(),
+            revision: question.revision,
+            owner_scope: question.owner_scope.clone(),
+            owner_label: if question.owner_scope == "official" {
+                "官方精选".into()
+            } else {
+                "我的题库".into()
+            },
+            question_type: question.question_type.clone(),
+            stem: limited_text(&question.stem, 500),
+            material_text: question
+                .material_text
+                .as_deref()
+                .map(|value| limited_text(value, 500)),
+            max_score: question.max_score,
+            quality_level: question.quality_level.clone(),
+            options: question
+                .options
+                .iter()
+                .take(12)
+                .map(|option| SemanticSearchOption {
+                    label: option.label.clone(),
+                    content: limited_text(&option.content, 200),
+                })
+                .collect(),
+            knowledge_titles,
+            ability_titles,
+        });
+    }
+    if candidates.is_empty() {
+        return Err(CoreError::Invalid(
+            "当前筛选范围没有可供按意思查找的题目".into(),
+        ));
+    }
+    if candidates.len() > MAX_SEMANTIC_CANDIDATES {
+        return Err(CoreError::Invalid(format!(
+            "当前范围有 {} 道题，按意思查找单次最多处理 {MAX_SEMANTIC_CANDIDATES} 道；请先选择题型、教材章节或知识点",
+            candidates.len()
+        )));
+    }
+    let catalog_snapshot_hash = candidate_snapshot_hash(&candidates)?;
+    Ok(SemanticSearchInput {
+        schema_version: SEMANTIC_SEARCH_SCHEMA_VERSION,
+        input_version: SEMANTIC_SEARCH_INPUT_VERSION.into(),
+        query: input.query.trim().into(),
+        catalog_snapshot_hash,
+        result_limit: input
+            .limit
+            .min(MAX_SEMANTIC_RESULTS as i64)
+            .min(candidates.len() as i64),
+        candidates,
+    })
+}
+
 fn accessible_current_by_public_id(
     conn: &Connection,
     actor_id: &str,
@@ -1140,6 +1284,62 @@ mod tests {
             )
             .unwrap();
         assert!(indexed >= 4);
+    }
+
+    #[test]
+    fn semantic_catalog_is_frozen_after_local_access_and_scope_filters() {
+        let connection = setup();
+        let personal = create(
+            &connection,
+            "personal",
+            "local_teacher",
+            false,
+            "中国近代史开始于哪次战争？",
+            &[("A", "鸦片战争"), ("B", "第二次鸦片战争")],
+        );
+        create(
+            &connection,
+            "personal",
+            "other_teacher",
+            false,
+            "别的老师题库中的近代史题",
+            &[("A", "鸦片战争"), ("B", "甲午中日战争")],
+        );
+        create(
+            &connection,
+            "school",
+            "school-1",
+            false,
+            "尚未开放的学校题库",
+            &[("A", "鸦片战争"), ("B", "八国联军侵华战争")],
+        );
+        let official = create(
+            &connection,
+            "official",
+            "official",
+            true,
+            "中国近代史开端的标志性事件是什么？",
+            &[("A", "鸦片战争"), ("B", "洋务运动")],
+        );
+        let mut input = request("找考查近代史开端的题");
+        input.limit = 20;
+        let frozen = prepare_semantic_search(&connection, "local_teacher", &input).unwrap();
+        crate::semantic_search::validate_input(&frozen).unwrap();
+        assert_eq!(frozen.candidates.len(), 2);
+        assert_eq!(
+            frozen
+                .candidates
+                .iter()
+                .map(|candidate| candidate.question_version_public_id.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                personal.version_public_id.as_str(),
+                official.version_public_id.as_str()
+            ])
+        );
+
+        input.duplicate_only = true;
+        assert!(prepare_semantic_search(&connection, "local_teacher", &input).is_err());
     }
 
     #[test]

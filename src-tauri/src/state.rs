@@ -126,6 +126,10 @@ pub fn init(app: &App) -> Result<AppState, Box<dyn std::error::Error>> {
     if recovered > 0 {
         eprintln!("[ASR恢复] {recovered} 条中断的 processing 已转为 failed");
     }
+    let recovered_semantic = crate::knowledge_semantic_run::recover_interrupted(&conn)?;
+    if recovered_semantic > 0 {
+        eprintln!("[语义找题恢复] {recovered_semantic} 条中断运行已转为可重试失败");
+    }
     let allowed = allow_existing_media(app, &conn).map_err(std::io::Error::other)?;
     if allowed > 0 {
         eprintln!("[媒体白名单] 已按精确路径放行 {allowed} 个历史媒体文件");
