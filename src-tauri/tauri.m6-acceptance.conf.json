@@ -1,0 +1,16 @@
+{
+  "productName": "JiaofuSuiteM6Fixture",
+  "identifier": "com.jiaofu.suite.m6fixture",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "教辅系统 · M6 报告与课堂重点隔离验收",
+        "width": 1280,
+        "height": 860,
+        "minWidth": 980,
+        "minHeight": 680
+      }
+    ]
+  }
+}

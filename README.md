@@ -89,7 +89,8 @@ macOS 本地教辅平台。模块化单体：共享内核 `core` + 业务模块�
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 
-# Tauri 外壳必须单独检查
+# workspace 与 Tauri 外壳共用根目录 target；Tauri 仍须单独检查
+npm run check:cargo-target
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo check --manifest-path src-tauri/Cargo.toml
@@ -104,7 +105,7 @@ npm run bundle:macos
 
 # 快速调试构建，或单独复核既有 DMG
 npm run bundle:macos:debug
-npm run verify:macos:dmg -- src-tauri/target/debug/bundle/dmg/JiaofuSuite_0.1.0_aarch64.dmg
+npm run verify:macos:dmg -- target/debug/bundle/dmg/JiaofuSuite_0.1.0_aarch64.dmg
 
 # T6 独立验收包（独立 bundle id，不读取正式应用目录）
 npm run acceptance:t6:build

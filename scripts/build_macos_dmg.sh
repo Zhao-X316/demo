@@ -29,7 +29,14 @@ esac
 # preserving the app bundle, Applications symlink, volume icon, and compression.
 CI=true npx tauri "${tauri_args[@]}"
 
-bundle_dir="src-tauri/target/${profile}/bundle/dmg"
+target_dir="$(
+  cargo metadata \
+    --format-version 1 \
+    --no-deps \
+    --manifest-path src-tauri/Cargo.toml |
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])'
+)"
+bundle_dir="${target_dir}/${profile}/bundle/dmg"
 shopt -s nullglob
 dmg_files=("${bundle_dir}"/JiaofuSuite_*.dmg)
 shopt -u nullglob

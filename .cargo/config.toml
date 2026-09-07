@@ -1,0 +1,3 @@
+[build]
+# The workspace and the standalone Tauri package share one build cache.
+target-dir = "target"

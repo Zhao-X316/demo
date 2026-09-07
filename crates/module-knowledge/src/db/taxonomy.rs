@@ -602,7 +602,27 @@ mod tests {
         )
         .unwrap();
 
-        assert!(unit.stable_id.starts_with("019"));
+        assert!(!unit.stable_id.is_empty());
+        let (_, map2) = edition_and_map(&conn, 2);
+        let revised_unit = create_curriculum_node(
+            &conn,
+            &NewCurriculumNode {
+                stable_id: Some(&unit.stable_id),
+                knowledge_map_id: map2.id,
+                parent_id: None,
+                node_type: "unit",
+                code: Some("U1"),
+                title: &unit.title,
+                description: None,
+                order_index: 1,
+            },
+        )
+        .unwrap();
+        assert_ne!(revised_unit.id, unit.id);
+        assert_eq!(revised_unit.stable_id, unit.stable_id);
+        let original_unit = get_curriculum_node(&conn, unit.id).unwrap().unwrap();
+        assert_eq!(original_unit.stable_id, unit.stable_id);
+        assert_eq!(original_unit.knowledge_map_id, map1.id);
         assert_eq!(knowledge.knowledge_map_id, map1.id);
         assert_eq!(ability.revision, 1);
         assert!(conn

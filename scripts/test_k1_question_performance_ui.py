@@ -314,6 +314,14 @@ def test_k1_question_performance(base_url: str) -> None:
         expect(page.get_by_text("随堂测验 40 份 · 75%", exact=True)).to_be_visible()
         page.screenshot(path=str(OUTPUT_DIR / "01-performance.png"), full_page=True)
 
+        # React StrictMode may repeat the initial read. Start the action contract
+        # after the loaded view; every teacher mutation below must still occur once.
+        initial_reads = page.evaluate(
+            "window.__performanceCalls.filter((item) => item.cmd === 'k1_question_performance')"
+        )
+        assert len(initial_reads) >= 1
+        page.evaluate("window.__performanceCalls = []")
+
         page.get_by_role("button", name="查看新版影响").click()
         expect(page.get_by_text("版本变更影响预览", exact=True)).to_be_visible()
         expect(page.get_by_text("已发布作答", exact=True).last).to_be_visible()
@@ -360,7 +368,6 @@ def test_k1_question_performance(base_url: str) -> None:
               || item.cmd === "k1_question_impact_publish")"""
         )
         assert [item["cmd"] for item in calls] == [
-            "k1_question_performance",
             "k1_question_impact_preview",
             "k1_question_impact_confirm",
             "k1_question_impact_cases",
@@ -371,20 +378,20 @@ def test_k1_question_performance(base_url: str) -> None:
             "k1_question_impact_cases",
             "k1_question_performance",
         ]
-        payload = calls[2]["args"]["input"]
+        payload = calls[1]["args"]["input"]
         assert payload["action"] == "review_published"
         assert payload["plannedBy"] == "local_teacher"
         assert payload["expectedPreviewHash"] == "a" * 64
-        prepare_payload = calls[4]["args"]["input"]
+        prepare_payload = calls[3]["args"]["input"]
         assert prepare_payload["planPublicId"] == "impact-plan-1"
         assert prepare_payload["expectedTaskCount"] == 2
         assert prepare_payload["preparedBy"] == "local_teacher"
-        resolve_payload = calls[5]["args"]["input"]
+        resolve_payload = calls[4]["args"]["input"]
         assert resolve_payload["teacherScore"] == 0
         assert resolve_payload["components"] == []
         assert resolve_payload["teacherNote"] == "按修订后的答案核对"
         assert resolve_payload["resolvedBy"] == "local_teacher"
-        publish_payload = calls[7]["args"]["input"]
+        publish_payload = calls[6]["args"]["input"]
         assert publish_payload["expectedGradeDecisionPublicId"] == "decision-new-1"
         assert publish_payload["publishedBy"] == "local_teacher"
         browser.close()

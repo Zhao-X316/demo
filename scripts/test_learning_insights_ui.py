@@ -37,6 +37,19 @@ window.__TAURI_INTERNALS__ = {
           ? { id: 2, class_id: 1, student_no: "02", name: "小周" }
           : { id: 1, class_id: 1, student_no: "01", name: "小林" },
         range_start: input.rangeStart, range_end: input.rangeEnd,
+        scope_selection: {
+          selector_kind: "knowledge_map",
+          selector_public_id: "knowledge-map-1",
+          selector_key: "knowledge_map:knowledge-map-1",
+          title: "中国历史八上",
+          path: "中国历史八上 · 全册",
+          node_type: "knowledge_map",
+          knowledge_map_public_id: "knowledge-map-1",
+          knowledge_map_version: "knowledge-map-1:r1",
+          textbook_edition_public_id: "edition-1",
+          textbook_title: "中国历史八上",
+          knowledge_node_count: 3
+        },
         policy: {
           public_id: "profile-policy-1", revision: 1,
           min_independent_groups: 3, min_distinct_dates: 2,
@@ -50,6 +63,7 @@ window.__TAURI_INTERNALS__ = {
           ability_node_eligible: 0, machine_only_excluded: 2,
           teacher_overall_excluded: 1, unmapped_formal_excluded: 1,
           unsupported_contract_excluded: 1,
+          out_of_scope_excluded: 0,
           referenced_knowledge_map_count: 1
         },
         recitation_summary: {
@@ -89,6 +103,19 @@ window.__TAURI_INTERNALS__ = {
           name: input.studentId === 2 ? "小周" : "小林" },
         range_start: input.rangeStart, range_end: input.rangeEnd,
         scope_kind: "confirmed_evidence_maps",
+        scope_selection: {
+          selector_kind: "knowledge_map",
+          selector_public_id: "knowledge-map-1",
+          selector_key: "knowledge_map:knowledge-map-1",
+          title: "中国历史八上",
+          path: "中国历史八上 · 全册",
+          node_type: "knowledge_map",
+          knowledge_map_public_id: "knowledge-map-1",
+          knowledge_map_version: "knowledge-map-1:r1",
+          textbook_edition_public_id: "edition-1",
+          textbook_title: "中国历史八上",
+          knowledge_node_count: 3
+        },
         evidence_cutoff_at: "2026-07-17T03:00:00Z",
         policy: {
           public_id: "profile-policy-1", revision: 1,
