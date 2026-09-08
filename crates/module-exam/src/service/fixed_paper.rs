@@ -961,15 +961,29 @@ fn current_region_count(
     )?)
 }
 
-fn preflight_fixed_paper_batch_impl(
+/// Current read-only preflight projection; no revision is created.
+#[derive(Debug)]
+pub struct FixedPaperInspection {
+    pub route: String,
+    pub target_count: i64,
+    pub ready_count: i64,
+    pub review_count: i64,
+    pub blocked_count: i64,
+    pub completed_count: i64,
+    pub reason_codes_json: String,
+    pub authority_summary: String,
+    pub grouping_json: String,
+    pub snapshot_hash: String,
+}
+
+pub fn inspect_fixed_paper_batch(
     conn: &Connection,
     input: &FixedPaperPreflightInput<'_>,
-    fail_after_supersede: bool,
-) -> CoreResult<FixedPaperPreflightRevision> {
+) -> CoreResult<FixedPaperInspection> {
     if input.expected_pages_per_attempt < 1 {
         return Err(CoreError::Invalid("固定试卷每份页数必须大于 0".into()));
     }
-    let actor_type = audit_actor(input.created_by_type, input.created_by)?;
+    audit_actor(input.created_by_type, input.created_by)?;
     let assessment_version_id = batch_assessment_version(conn, input.ingest_batch_id)?;
     let items = collect_items(conn, assessment_version_id)?;
     if items.is_empty() {
@@ -1106,6 +1120,38 @@ fn preflight_fixed_paper_batch_impl(
     let snapshot_bytes = serde_json::to_vec(&snapshot)
         .map_err(|error| CoreError::Parse(format!("固定试卷预检快照失败：{error}")))?;
     let snapshot_hash = hashing::sha256_hex(&snapshot_bytes);
+    Ok(FixedPaperInspection {
+        route: route.to_string(),
+        target_count,
+        ready_count,
+        review_count,
+        blocked_count,
+        completed_count,
+        reason_codes_json: reason_codes_json.to_string(),
+        authority_summary: authority_summary.to_string(),
+        grouping_json: grouping_json.to_string(),
+        snapshot_hash,
+    })
+}
+
+fn preflight_fixed_paper_batch_impl(
+    conn: &Connection,
+    input: &FixedPaperPreflightInput<'_>,
+    fail_after_supersede: bool,
+) -> CoreResult<FixedPaperPreflightRevision> {
+    let actor_type = audit_actor(input.created_by_type, input.created_by)?;
+    let FixedPaperInspection {
+        route,
+        target_count,
+        ready_count,
+        review_count,
+        blocked_count,
+        completed_count,
+        reason_codes_json,
+        authority_summary,
+        grouping_json,
+        snapshot_hash,
+    } = inspect_fixed_paper_batch(conn, input)?;
     let existing = conn
         .query_row(
             "SELECT id,public_id,ingest_batch_id,revision,snapshot_hash,

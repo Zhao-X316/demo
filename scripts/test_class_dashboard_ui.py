@@ -1,3 +1,4 @@
+from ui_navigation import enter_exam as navigate_exam, enter_materials, enter_learning, enter_dashboard
 """M6.1/M6-4 班级仪表盘、掌握快照、共性教学输入与教学行动浏览器冒烟测试。
 
 通过浏览器端 Tauri invoke mock 验证运行事实、掌握预览/确认、热力图、
@@ -655,6 +656,8 @@ def test_dashboard(base_url: str) -> None:
         page.goto(base_url)
         page.wait_for_load_state("networkidle")
 
+        enter_dashboard(page)
+
         expect(page.get_by_role("heading", name="班级概览")).to_be_visible()
         expect(page.locator(".dashboard-stat")).to_have_count(5)
         expect(page.get_by_text("1 / 2 人", exact=False)).to_be_visible()
@@ -767,7 +770,7 @@ def test_dashboard(base_url: str) -> None:
         page.get_by_text("处理背诵识别失败", exact=True).click()
         expect(page.get_by_role("heading", name="批改台")).to_be_visible()
 
-        page.locator("button.nav", has_text="班级概览").click()
+        enter_dashboard(page)
         expect(page.get_by_role("heading", name="班级概览")).to_be_visible()
         page.get_by_text("当前作业已上传", exact=True).click()
         expect(page.get_by_role("heading", name="题目批改")).to_be_visible()
@@ -776,6 +779,7 @@ def test_dashboard(base_url: str) -> None:
         narrow.add_init_script(MOCK_SCRIPT)
         narrow.goto(base_url)
         narrow.wait_for_load_state("networkidle")
+        enter_dashboard(narrow)
         expect(narrow.get_by_role("heading", name="班级概览")).to_be_visible()
         expect(narrow.locator(".dashboard-stat")).to_have_count(5)
         expect(narrow.get_by_text("班级掌握快照", exact=True)).to_be_visible()
@@ -790,6 +794,7 @@ def test_dashboard(base_url: str) -> None:
         retry.add_init_script(MOCK_SCRIPT)
         retry.goto(base_url)
         retry.wait_for_load_state("networkidle")
+        enter_dashboard(retry)
         retry.locator(".class-profile-heatmap thead button").click()
         retry.get_by_role("button", name="确认并建立练习").click()
         expect(retry.get_by_text("行动草稿已保存，但练习作业尚未建立", exact=False)).to_be_visible()
@@ -803,6 +808,7 @@ def test_dashboard(base_url: str) -> None:
         stale.add_init_script(MOCK_SCRIPT)
         stale.goto(base_url)
         stale.wait_for_load_state("networkidle")
+        enter_dashboard(stale)
         expect(stale.get_by_role("button", name="导出 CSV")).to_be_disabled()
         expect(stale.get_by_text("快照过期时禁止导出", exact=False)).to_be_visible()
         stale_calls = stale.evaluate(
@@ -817,6 +823,7 @@ def test_dashboard(base_url: str) -> None:
         empty.add_init_script(MOCK_SCRIPT)
         empty.goto(base_url)
         empty.wait_for_load_state("networkidle")
+        enter_dashboard(empty)
         expect(empty.locator(".empty-state")).to_contain_text("暂无班级")
         expect(empty.get_by_role("button", name="去建立班级")).to_be_visible()
 

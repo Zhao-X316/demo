@@ -616,3 +616,30 @@ fn strict_dictation_batch_is_idempotent_and_records_already_confirmed_exclusion(
         Some("ALREADY_CONFIRMED")
     );
 }
+
+#[test]
+fn scoped_workspace_dictation_read_is_readonly_and_fail_closed() {
+    let mut fixture = setup();
+    prepare_machine_result(&mut fixture);
+    let all = list_dictation_workbench(&fixture.conn, Some(1), 10).unwrap();
+    let target = all.rows[0].attempt_id;
+    fixture.conn.execute_batch("PRAGMA query_only=ON").unwrap();
+    let scoped = super::dictation_pipeline::list_dictation_workbench_scoped(
+        &fixture.conn,
+        Some(1),
+        1,
+        Some(&[target]),
+    )
+    .unwrap();
+    assert_eq!(scoped, all);
+    for ids in [&[][..], &[target + 999][..]] {
+        let empty = super::dictation_pipeline::list_dictation_workbench_scoped(
+            &fixture.conn,
+            None,
+            1,
+            Some(ids),
+        )
+        .unwrap();
+        assert!(empty.rows.is_empty() && empty.attempts.is_empty());
+    }
+}

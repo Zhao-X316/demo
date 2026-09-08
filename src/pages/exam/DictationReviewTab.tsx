@@ -17,9 +17,11 @@ function dictationStateLabel(row: DictationWorkbenchRow) {
 
 function DictationReviewTab({
   workbench,
+  taskMode=false,
   onDone,
   onError,
 }: {
+  taskMode?:boolean;
   workbench: DictationWorkbench;
   onDone: (message: string) => void;
   onError: (message: string) => void;
@@ -68,7 +70,9 @@ function DictationReviewTab({
 
   return (
     <>
-      <section className="objective-toolbar exam-card">
+      {taskMode ? <section className="task-question"><b>第 {rows[0]?.question_no} 题 · {rows[0]?.question_stem}</b>
+        {eligibleRows.length > 1 && <div><button className="primary" disabled={busy} onClick={()=>void acceptStrictBatch()}>确认本题 {eligibleRows.length} 条符合条件的结果</button><p className="muted">仅纳入满足原严格批量规则的项目；异常项仍需逐条核对。</p></div>}
+      </section> : <section className="objective-toolbar exam-card">
         <label className="field">
           <span className="fl">作业版本</span>
           <select value={assessmentVersionId} onChange={(event) => selectAssessment(Number(event.target.value))}>
@@ -95,7 +99,7 @@ function DictationReviewTab({
           {busy ? "处理中…" : `确认 ${eligibleRows.length} 条精确结果`}
         </button>
         <div className="meta objective-batch-note">只纳入置信度不低于 0.95 的精确答案；未写、模糊、涂改、分歧和已终审项都会逐条排除。</div>
-      </section>
+      </section>}
 
       <div className="sech">本题证据 <span className="n">按学号排序</span></div>
       <div className="objective-review-list">
@@ -183,7 +187,7 @@ function DictationReviewTab({
         })}
       </div>
 
-      <div className="sech">整份默写发布 <span className="n">终审完成不等于已发布</span></div>
+      {!taskMode && <><div className="sech">整份默写发布 <span className="n">终审完成不等于已发布</span></div>
       <div className="objective-publish-grid">
         {attempts.map((attempt) => (
           <article className="exam-card objective-attempt" key={attempt.attempt_id}>
@@ -201,7 +205,7 @@ function DictationReviewTab({
             </button>
           </article>
         ))}
-      </div>
+      </div></>}
     </>
   );
 }

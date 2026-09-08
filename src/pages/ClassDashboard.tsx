@@ -6,6 +6,8 @@ import { ClassProfileNodeDetails } from "./class-dashboard/ClassProfileNodeDetai
 import { ClassActionBuilder } from "./class-dashboard/ClassActionBuilder";
 
 interface Props {
+  initialClassId?: number;
+  onClassChange?: (id: number) => void;
   onNavigate: (module: AppModule, view: DashboardTargetView | "students") => void;
   onOpenLearning: () => void;
 }
@@ -42,7 +44,7 @@ const TEACHING_EVENT_TYPES: Array<{
   { value: "schedule_pause", label: "教学暂停" },
 ];
 
-export default function ClassDashboard({ onNavigate, onOpenLearning }: Props) {
+export default function ClassDashboard({ onNavigate, onOpenLearning, initialClassId, onClassChange }: Props) {
   const {
     classes,
     classId,
@@ -93,7 +95,7 @@ export default function ClassDashboard({ onNavigate, onOpenLearning }: Props) {
     startTeachingEvent,
     saveTeachingEvent,
     voidTeachingEvent,
-  } = useClassDashboardController();
+  } = useClassDashboardController(initialClassId);
 
 
   if (classes.length === 0 && !loading) {
@@ -122,7 +124,7 @@ export default function ClassDashboard({ onNavigate, onOpenLearning }: Props) {
         <div className="dashboard-scope">
           <label>
             <span>班级</span>
-            <select value={classId ?? ""} onChange={(event) => setClassId(Number(event.target.value))}>
+            <select value={classId ?? ""} onChange={(event) => { setClassId(Number(event.target.value)); onClassChange?.(Number(event.target.value)); }}>
               {classes.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
             </select>
           </label>
@@ -208,8 +210,8 @@ export default function ClassDashboard({ onNavigate, onOpenLearning }: Props) {
               )}
             </section>
 
-            <section className="dashboard-panel dashboard-rules">
-              <div className="dashboard-panel-head"><b>本页统计口径</b></div>
+            <details className="dashboard-panel dashboard-rules">
+              <summary>本页统计口径</summary>
               <div>
                 <span>背诵</span>
                 <p>{dashboard.recitation.denominator_note}</p>
@@ -221,7 +223,7 @@ export default function ClassDashboard({ onNavigate, onOpenLearning }: Props) {
               <div className="dashboard-rule-note">
                 未提交、识别失败和证据不足都不是“能力差”；本页不读取或展示旧的 mastery 聚合。
               </div>
-            </section>
+            </details>
           </div>
 
           <section className="dashboard-panel class-profile-panel">

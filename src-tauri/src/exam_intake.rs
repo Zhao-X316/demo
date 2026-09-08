@@ -40,6 +40,7 @@ use module_exam::service::page_cycle;
 use module_exam::service::papers::{self, NewIngestBatch, NewIngestPage};
 
 const ACTOR: &str = "teacher";
+pub(crate) mod resume;
 const ORIGINAL_STUDENT_VERSION: &str = "exam-intake-original-student-v1";
 const ORIGINAL_ANSWER_VERSION: &str = "exam-intake-original-answer-v1";
 const PDF_PAGE_VERSION: &str = "exam-intake-pdf-page-v1";

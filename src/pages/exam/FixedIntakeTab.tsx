@@ -1,3 +1,5 @@
+import ResumeProgress from "../workspace/ResumeProgress";
+import type { IntakeResume } from "../../api/workspace";
 import { FixedIntakeOption } from "../../api/exam";
 import { FixedIntakeAnswerSourcePanel } from "./FixedIntakeAnswerSourcePanel";
 import { FixedIntakeAnswerSheetProgressPanel } from "./FixedIntakeAnswerSheetProgressPanel";
@@ -22,19 +24,31 @@ const MATERIAL_TYPE_LABEL: Record<string, string> = {
 
 export function FixedIntakeTab({
   options,
+  initialClassId,
+  resume,
+  onBatchSaved,
+  onDirtyChange,
   onOpenReview,
   onDone,
   onError,
 }: {
   options: FixedIntakeOption[];
+  initialClassId?: number;
+  resume?: IntakeResume;
+  onBatchSaved?: (batchId: number) => void;
+  onDirtyChange?: (dirty:boolean)=>void;
   onOpenReview: (tab: "objective" | "subjective" | "dictation") => void;
   onDone: (message: string) => void;
   onError: (message: string) => void;
 }) {
-  const { view, actions } = useFixedIntakeController(
+  const { view, actions, progressRestored, restoringProgress, continueSavedProcessing } = useFixedIntakeController(
     options,
     onDone,
     onError,
+    initialClassId,
+    resume,
+    onBatchSaved,
+    onDirtyChange,
   );
   const {
     classOptions,
@@ -130,7 +144,7 @@ export function FixedIntakeTab({
     processDictationPages,
   } = actions;
 
-  if (!options.length) {
+  if (!options.length && !resume) {
     return (
       <div className="exam-card objective-empty">
         <b>还没有可上传的固定卷作业</b>
@@ -139,9 +153,12 @@ export function FixedIntakeTab({
     );
   }
 
+  if(!resume && !result && classId>0 && !assessmentOptions.length) return <div className="exam-card objective-empty"><b>当前班级还没有可批改的作业</b><span>请先在资料中为本班准备作业，或返回工作台选择其他班级。</span></div>;
+
   return (
     <div className="intake-layout">
-      <FixedIntakeUploadForm
+      {(resume || result) && <div className="intake-restored-note"><b>本批材料已保存</b><p>班级、作业版本和页面归属已固定。已有结果可直接进入老师核对。</p><details><summary>查看已归档材料</summary>{(result ?? resume!.result).documents.map((document,index)=><p key={index}>{document.originalName} · {document.pageCount} 页</p>)}</details></div>}
+      {!resume && (result ? <details className="intake-new-task"><summary>另建一份批改</summary><p>改变这里的材料或作业会创建另一批任务，原批次继续保留。</p><FixedIntakeUploadForm
         classOptions={classOptions}
         classId={classId}
         selectClass={selectClass}
@@ -160,7 +177,26 @@ export function FixedIntakeTab({
         clearAnswerSource={clearAnswerSource}
         busy={busy}
         submit={submit}
-      />
+      /></details> : <FixedIntakeUploadForm
+        classOptions={classOptions}
+        classId={classId}
+        selectClass={selectClass}
+        assessmentOptions={assessmentOptions}
+        assessmentVersionId={assessmentVersionId}
+        selectAssessment={selectAssessment}
+        pickStudentPapers={pickStudentPapers}
+        studentPaths={studentPaths}
+        pageCycle={pageCycle}
+        expectedPages={expectedPages}
+        changeExpectedPages={changeExpectedPages}
+        pickAnswer={pickAnswer}
+        answerPath={answerPath}
+        answerText={answerText}
+        changeAnswerText={changeAnswerText}
+        clearAnswerSource={clearAnswerSource}
+        busy={busy}
+        submit={submit}
+      />)}
 
       <aside className="exam-card intake-result-card">
         <div className="exam-card-head">
@@ -168,7 +204,7 @@ export function FixedIntakeTab({
           {result && <span className={`tag intake-route ${result.route}`}>{routeLabel}</span>}
         </div>
         {!result ? (
-          <div className="empty-state">上传后这里只显示三种结果和一个下一步，不让老师处理技术参数。</div>
+          <div className="empty-state">选择材料后开始整理，处理进度和需要补充的项目会显示在这里。</div>
         ) : (
           <>
             <div className="intake-import-summary">
@@ -179,7 +215,7 @@ export function FixedIntakeTab({
                 每人 {result.expectedPagesPerAttempt} 页
                 {result.pageCycleSource === "visual_repeating_layout_v1"
                   ? ` · 重复版式识别 ${Math.round(result.pageCycleConfidence * 100)}%`
-                  : " · 已按老师填写页数排列"}
+                  : result.pageCycleSource === "saved_grouping" ? " · 沿用已保存的分组" : " · 已按老师填写页数排列"}
               </span>
               <span>资料类型：{MATERIAL_TYPE_LABEL[result.materialType] || result.materialType} · 预计 {result.studentGroupCount} 名学生</span>
             </div>
@@ -222,6 +258,8 @@ export function FixedIntakeTab({
               retakingPageId={retakingPageId}
               replaceRejectedPage={replaceRejectedPage}
             />
+            {resume && <ResumeProgress resume={resume} loading={restoringProgress} onContinue={()=>void continueSavedProcessing()} onReview={()=>onOpenReview("objective")} />}
+            {progressRestored && <>
             <FixedIntakeOrdinaryProgressPanel
               result={result}
               analyzingPageIds={analyzingPageIds}
@@ -277,6 +315,7 @@ export function FixedIntakeTab({
               processDictationPages={processDictationPages}
               groupingEvidence={groupingEvidence}
             />
+            </>}
             <FixedIntakeResultSummaryPanel
               result={result}
               answerSheetSubjectiveRegionCount={answerSheetSubjectiveRegionCount}

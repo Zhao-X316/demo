@@ -25,7 +25,9 @@ function newRequestKey() {
 }
 
 export default function QuestionBank({ onOpenExam }: { onOpenExam: () => void }) {
-  const [mode, setMode] = useState<"import" | "search" | "candidates" | "performance" | "blueprint">("import");
+  const [mode, setMode] = useState<"import" | "search" | "candidates" | "performance" | "blueprint">("search");
+  const [visited,setVisited]=useState(new Set(["search"]));
+  useEffect(()=>{setVisited(current=>new Set([...current,mode]));},[mode]);
   const [options, setOptions] = useState<BlueprintOptions | null>(null);
   const [classId, setClassId] = useState(0);
   const [mapPublicId, setMapPublicId] = useState("");
@@ -219,29 +221,20 @@ export default function QuestionBank({ onOpenExam }: { onOpenExam: () => void })
       </div>
 
       <div className="tabs question-bank-tabs">
-        <button className={mode === "import" ? "tab active" : "tab"} onClick={() => setMode("import")}>
-          导入题目
-        </button>
-        <button className={mode === "search" ? "tab active" : "tab"} onClick={() => setMode("search")}>
-          找题与查重
-        </button>
-        <button className={mode === "candidates" ? "tab active" : "tab"} onClick={() => setMode("candidates")}>
-          待整理新题
-        </button>
-        <button className={mode === "performance" ? "tab active" : "tab"} onClick={() => setMode("performance")}>
-          表现与版本影响
-        </button>
-        <button className={mode === "blueprint" ? "tab active" : "tab"} onClick={() => setMode("blueprint")}>
-          按蓝图组卷
-        </button>
+        <button className={mode === "search" ? "tab active" : "tab"} onClick={() => setMode("search")}>找题与查重</button>
+        <button className={mode === "import" ? "tab active" : "tab"} onClick={() => setMode("import")}>导入题目</button>
+        <details className="question-bank-more"><summary>整理与组卷</summary><div className="tabs">
+          <button className={mode === "candidates" ? "tab active" : "tab"} onClick={() => setMode("candidates")}>待整理新题</button>
+          <button className={mode === "performance" ? "tab active" : "tab"} onClick={() => setMode("performance")}>表现与版本影响</button>
+          <button className={mode === "blueprint" ? "tab active" : "tab"} onClick={() => setMode("blueprint")}>按蓝图组卷</button>
+        </div></details>
       </div>
 
-      {mode === "import" ? <SourceImportPanel /> : mode === "search" ? <QuestionSearchPanel options={options} /> : mode === "candidates" ? (
-        <CandidateReviewPanel />
-      ) : mode === "performance" ? (
-        <QuestionPerformancePanel onOpenExam={onOpenExam} />
-      ) : (
-        <>
+      {visited.has("import") && <div hidden={mode!=="import"}><SourceImportPanel /></div>}
+      <div hidden={mode!=="search"}><QuestionSearchPanel options={options} /></div>
+      {visited.has("candidates") && <div hidden={mode!=="candidates"}><CandidateReviewPanel /></div>}
+      {visited.has("performance") && <div hidden={mode!=="performance"}><QuestionPerformancePanel onOpenExam={onOpenExam} /></div>}
+      {visited.has("blueprint") && <div hidden={mode!=="blueprint"}>
           {error && <div className="error">{error}</div>}
           {notice && <div className="ok-banner">{notice}</div>}
 
@@ -446,8 +439,7 @@ export default function QuestionBank({ onOpenExam }: { onOpenExam: () => void })
           </div>
         ))}
           </section>
-        </>
-      )}
+      </div>}
     </div>
   );
 }

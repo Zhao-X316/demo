@@ -61,7 +61,7 @@ export function createFixedIntakeAnswerSheetCommands({
           identity,
           completion: { type: "ANSWER_SHEET_STATUS_LOAD_SUCCEEDED", status },
         });
-        if (status.templateSet.ready) {
+        if (status.templateSet.ready && !runtime.resume) {
           void processAnswerSheetPages(groupingEvidence);
         }
       },

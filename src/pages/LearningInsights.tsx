@@ -14,16 +14,20 @@ import { formatTime } from "./learning-insights/shared";
 import { ItemCard } from "./learning-insights/WrongbookItemCard";
 
 interface Props {
+  initialClassId?: number;
+  initialStudentId?: number | null;
+  onClassChange?: (id: number) => void;
   onOpenExam: () => void;
   onOpenStudents: () => void;
 }
 
-export default function LearningInsights({ onOpenExam, onOpenStudents }: Props) {
+export default function LearningInsights({ onOpenExam, onOpenStudents, initialClassId, initialStudentId, onClassChange }: Props) {
   const [classes, setClasses] = useState<Class[]>([]);
   const [allStudents, setAllStudents] = useState<Student[]>([]);
-  const [classId, setClassId] = useState<number | null>(null);
+  const [classId, setClassId] = useState<number | null>(initialClassId || null);
+  useEffect(()=>{if(initialClassId)setClassId(initialClassId);},[initialClassId]);
   const [dashboard, setDashboard] = useState<ClassWrongbookDashboard | null>(null);
-  const [studentFilter, setStudentFilter] = useState("all");
+  const [studentFilter, setStudentFilter] = useState(initialStudentId ? String(initialStudentId) : "all");
   const [statusFilter, setStatusFilter] = useState<WrongbookStatus | "all">("all");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -34,6 +38,10 @@ export default function LearningInsights({ onOpenExam, onOpenStudents }: Props) 
   const [reportOpen, setReportOpen] = useState(false);
   const [reportRefreshTick, setReportRefreshTick] = useState(0);
   const [activeTab, setActiveTab] = useState<"wrongbook" | "profile">("wrongbook");
+
+  useEffect(() => {
+    setStudentFilter(initialStudentId && classId === initialClassId ? String(initialStudentId) : "all");
+  }, [classId, initialClassId, initialStudentId]);
 
   useEffect(() => {
     Promise.all([classesList(), studentsList()])
@@ -63,7 +71,6 @@ export default function LearningInsights({ onOpenExam, onOpenStudents }: Props) 
     let current = true;
     setLoading(true);
     setError("");
-    setStudentFilter("all");
     loadClassWrongbookDashboard(classId)
       .then((value) => {
         if (current) setDashboard(value);
@@ -84,6 +91,7 @@ export default function LearningInsights({ onOpenExam, onOpenStudents }: Props) 
 
   const students = useMemo(() => {
     const seen = new Map<number, { id: number; no: string; name: string }>();
+    allStudents.filter(student=>student.class_id===classId).forEach(student=>seen.set(student.id,{id:student.id,no:student.student_no,name:student.name}));
     dashboard?.items.forEach((item) => {
       seen.set(item.student_id, {
         id: item.student_id,
@@ -92,7 +100,7 @@ export default function LearningInsights({ onOpenExam, onOpenStudents }: Props) 
       });
     });
     return [...seen.values()];
-  }, [dashboard]);
+  }, [dashboard,allStudents,classId]);
 
   const visibleItems = useMemo(
     () =>
@@ -103,12 +111,13 @@ export default function LearningInsights({ onOpenExam, onOpenStudents }: Props) 
       ),
     [dashboard, statusFilter, studentFilter],
   );
-  const selectedStudent = useMemo(
-    () => studentFilter === "all"
-      ? null
-      : students.find((student) => student.id === Number(studentFilter)) ?? null,
-    [studentFilter, students],
-  );
+  const selectedStudent = useMemo(() => {
+    if(studentFilter==="all")return null;
+    const known=students.find(student=>student.id===Number(studentFilter));
+    if(known)return known;
+    const student=allStudents.find(row=>row.id===Number(studentFilter)&&row.class_id===classId);
+    return student ? {id:student.id,no:student.student_no,name:student.name}:null;
+  },[studentFilter,students,allStudents,classId]);
   const classStudents = useMemo(
     () => allStudents
       .filter((student) => student.enabled && student.class_id === classId)
@@ -141,7 +150,7 @@ export default function LearningInsights({ onOpenExam, onOpenStudents }: Props) 
         <div className="learning-scope">
           <label>
             <span>班级</span>
-            <select value={classId ?? ""} onChange={(event) => setClassId(Number(event.target.value))}>
+            <select value={classId ?? ""} onChange={(event) => { setClassId(Number(event.target.value)); onClassChange?.(Number(event.target.value)); }}>
               {classes.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
             </select>
           </label>
@@ -177,6 +186,8 @@ export default function LearningInsights({ onOpenExam, onOpenStudents }: Props) 
 
       {activeTab === "profile" && classId != null && (
         <StudentProfilePanel classId={classId} students={classStudents}
+          selectedStudentId={studentFilter === "all" ? classStudents[0]?.id ?? null : Number(studentFilter)}
+          onStudentChange={(id) => setStudentFilter(String(id))}
           refreshToken={refreshTick} onOpenExam={onOpenExam} />
       )}
 

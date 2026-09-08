@@ -50,9 +50,10 @@ function classProfileExportFileName(snapshot: ClassProfileSnapshot) {
   return `${safeClassName || "班级"}_班级掌握脱敏摘要_${snapshot.range_start}_至${snapshot.range_end}.csv`;
 }
 
-export function useClassDashboardController() {
+export function useClassDashboardController(initialClassId?: number) {
   const [classes, setClasses] = useState<Class[]>([]);
-  const [classId, setClassId] = useState<number | null>(null);
+  const [classId, setClassId] = useState<number | null>(initialClassId || null);
+  useEffect(()=>{if(initialClassId)setClassId(initialClassId);},[initialClassId]);
   const [asOfDate, setAsOfDate] = useState(localDate);
   const [dashboard, setDashboard] = useState<ClassOperationsDashboard | null>(null);
   const [loading, setLoading] = useState(true);

@@ -682,3 +682,30 @@ fn workbench_read_model_tracks_review_totals_and_explicit_publication() {
     assert!(!published_attempt.can_publish);
     assert_eq!(published_attempt.published_total_score, Some(1.0));
 }
+
+#[test]
+fn scoped_workspace_read_excludes_other_attempts_before_limit() {
+    let fixture = setup();
+    record_objective_observation(
+        &fixture.conn,
+        &observed(fixture.region_one, "scope-first", 0.99),
+    )
+    .unwrap();
+    record_objective_observation(
+        &fixture.conn,
+        &observed(fixture.region_two, "scope-second", 0.98),
+    )
+    .unwrap();
+    let all = list_objective_workbench(&fixture.conn, None, 100).unwrap();
+    assert_eq!(all.rows.len(), 2);
+    let target = all.rows[1].attempt_id;
+    fixture.conn.execute_batch("PRAGMA query_only=ON").unwrap();
+    let scoped =
+        list_objective_workbench_scoped(&fixture.conn, Some(1), 1, Some(&[target])).unwrap();
+    assert_eq!(scoped.rows.len(), 1);
+    assert_eq!(scoped.rows[0].attempt_id, target);
+    assert_eq!(scoped.attempts.len(), 1);
+    assert_eq!(scoped.attempts[0].attempt_id, target);
+    let empty = list_objective_workbench_scoped(&fixture.conn, None, 1, Some(&[])).unwrap();
+    assert!(empty.rows.is_empty() && empty.attempts.is_empty());
+}

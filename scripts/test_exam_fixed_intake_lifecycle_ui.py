@@ -1,3 +1,4 @@
+from ui_navigation import expand_new_intake
 """R3-H1 固定上传生命周期风险红测试。
 
 该脚本只扩展既有共享 mock，不修改生产请求，也不触发老师终审、计分或发布。
@@ -110,6 +111,7 @@ def test_old_prepare_cannot_repopulate_switched_assessment(browser: Browser, bas
 
     page.get_by_role("button", name="上传并开始整理").click()
     page.wait_for_function("window.__prepareAttempts === 1")
+    expand_new_intake(page)
     page.get_by_label("批改哪份作业").select_option("13")
     assert page.get_by_label("批改哪份作业").input_value() == "13"
 

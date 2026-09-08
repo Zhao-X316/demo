@@ -307,7 +307,24 @@ pub fn list_objective_workbench(
     assessment_version_id: Option<i64>,
     limit: i64,
 ) -> CoreResult<ObjectiveWorkbench> {
-    let limit = limit.clamp(1, 1000);
+    list_objective_workbench_scoped(conn, assessment_version_id, limit, None)
+}
+
+pub fn list_objective_workbench_scoped(
+    conn: &Connection,
+    assessment_version_id: Option<i64>,
+    limit: i64,
+    attempt_ids: Option<&[i64]>,
+) -> CoreResult<ObjectiveWorkbench> {
+    let scope = attempt_ids
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| CoreError::Parse(format!("批改任务范围无法读取：{error}")))?;
+    let limit = if attempt_ids.is_some() {
+        i64::MAX
+    } else {
+        limit.clamp(1, 1000)
+    };
     let mut row_stmt = conn.prepare(
         "SELECT a.id,v.id,a.title,
                 at.id,at.state,at.active_publication_id,
@@ -340,11 +357,12 @@ pub fn list_objective_workbench(
          LEFT JOIN exam_grade_decision_objective_sources_v2 src
            ON src.grade_decision_id=d.id
          WHERE s.state='active' AND (?1 IS NULL OR v.id=?1)
+           AND (?3 IS NULL OR at.id IN (SELECT value FROM json_each(?3)))
          ORDER BY v.id DESC,i.order_index,st.student_no,at.attempt_no
          LIMIT ?2",
     )?;
     let rows = row_stmt
-        .query_map((assessment_version_id, limit), |row| {
+        .query_map((assessment_version_id, limit, scope.as_deref()), |row| {
             Ok(ObjectiveWorkbenchRow {
                 assessment_id: row.get(0)?,
                 assessment_version_id: row.get(1)?,
@@ -416,11 +434,12 @@ pub fn list_objective_workbench(
            AND (?1 IS NULL OR v.id=?1)
            AND EXISTS(SELECT 1 FROM exam_objective_grade_suggestions_v2 s
                       WHERE s.attempt_id=at.id AND s.state='active')
+           AND (?3 IS NULL OR at.id IN (SELECT value FROM json_each(?3)))
          ORDER BY v.id DESC,st.student_no,at.attempt_no
          LIMIT ?2",
     )?;
     let attempts = attempt_stmt
-        .query_map((assessment_version_id, limit), |row| {
+        .query_map((assessment_version_id, limit, scope.as_deref()), |row| {
             Ok(ObjectiveAttemptSummary {
                 assessment_id: row.get(0)?,
                 assessment_version_id: row.get(1)?,

@@ -39,6 +39,7 @@ mod short_answer_run;
 mod state;
 mod subjective_run;
 mod vlm;
+mod workspace;
 
 use tauri::Manager;
 
@@ -60,6 +61,9 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            workspace::workspace_tasks,
+            workspace::exam_fixed_intake_resume,
+            workspace::workspace_exam_review,
             commands::dashboard_today,
             commands::day_rollover,
             commands::verdict_human_decide,

@@ -5,9 +5,10 @@ import {
   importHistory,
   recitationSubmissionDetail,
 } from "../api/records";
+import {asrAndScore} from "../api/importing";
 import { TaskRow } from "./Today";
 
-export default function Records() {
+export default function Records({ initialSubmissionId }: { initialSubmissionId?: number }) {
   const [rows, setRows] = useState<ImportHistoryRow[] | null>(null);
   const [q, setQ] = useState("");
   const [err, setErr] = useState("");
@@ -42,6 +43,10 @@ export default function Records() {
     setDetailLoadingId(null);
   };
 
+  useEffect(() => {
+    if (initialSubmissionId) void openDetail(initialSubmissionId);
+  }, [initialSubmissionId]);
+
   const decide = async (
     task: TaskCard,
     result: "pass" | "fail" | "reopen",
@@ -66,12 +71,12 @@ export default function Records() {
     () =>
       (rows ?? []).filter(
         (r) =>
-          !q ||
+          (!initialSubmissionId || r.submission_id === initialSubmissionId) && (!q ||
           r.file_name.includes(q) ||
           (r.student ?? "").includes(q) ||
-          (r.content ?? "").includes(q),
+          (r.content ?? "").includes(q)),
       ),
-    [rows, q],
+    [rows, q, initialSubmissionId],
   );
 
   return (
@@ -142,7 +147,11 @@ export default function Records() {
       )}
       {detail && (
         <div style={{ marginTop: 18 }}>
-          <div className="sech">历史终审证据</div>
+          <div className="sech">录音与终审证据</div>
+          {detail.submission && detail.submission.accuracy===null && <div className="hint">本条录音尚无可核对评分。<button disabled={reviewBusy} onClick={async()=>{
+            const id=detail.submission!.submission_id;setReviewBusy(true);setErr("");
+            try{await asrAndScore(id);setDetail(await recitationSubmissionDetail(id));await loadRows();}catch(reason){setErr(String(reason));}finally{setReviewBusy(false);}
+          }}>继续识别这条录音</button></div>}
           <TaskRow
             t={detail}
             busy={reviewBusy}

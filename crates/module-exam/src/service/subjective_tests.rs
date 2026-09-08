@@ -1696,3 +1696,22 @@ fn database_rejects_wrong_question_type_or_non_routed_scope() {
         .contains("M2_SUBJECTIVE_TRANSCRIPTION_SCOPE_MISMATCH"));
     assert!(subjective::load_region_scope(&fixture.conn, 999_999).is_err());
 }
+
+#[test]
+fn scoped_workspace_subjective_read_is_readonly_and_fail_closed() {
+    let mut fixture = setup();
+    let run = successful_run(&mut fixture, "scope-read", "1842 年");
+    subjective::record_ocr_ai_run_transcription(&mut fixture.conn, run).unwrap();
+    let all = subjective::list_subjective_workbench(&fixture.conn, Some(1), 10).unwrap();
+    let target = all.rows[0].attempt_id;
+    fixture.conn.execute_batch("PRAGMA query_only=ON").unwrap();
+    let scoped =
+        subjective::list_subjective_workbench_scoped(&fixture.conn, Some(1), 1, Some(&[target]))
+            .unwrap();
+    assert_eq!(scoped, all);
+    for ids in [&[][..], &[target + 999][..]] {
+        let empty = subjective::list_subjective_workbench_scoped(&fixture.conn, None, 1, Some(ids))
+            .unwrap();
+        assert!(empty.rows.is_empty() && empty.attempts.is_empty());
+    }
+}

@@ -722,7 +722,7 @@ struct PageForGrouping {
     page_type_decision: Option<String>,
 }
 
-fn current_import_order(conn: &Connection, batch_id: i64) -> CoreResult<ImportOrderRevision> {
+pub fn current_import_order(conn: &Connection, batch_id: i64) -> CoreResult<ImportOrderRevision> {
     conn.query_row(
         "SELECT id,public_id,ingest_batch_id,revision,snapshot_hash,sort_policy,
                 order_confidence,ordered_sources_json,conflict_codes_json,state,
@@ -1065,7 +1065,7 @@ pub fn preview_ordered_grouping(
     .map_err(Into::into)
 }
 
-fn current_grouping(conn: &Connection, batch_id: i64) -> CoreResult<OrderedGroupingRevision> {
+pub fn current_grouping(conn: &Connection, batch_id: i64) -> CoreResult<OrderedGroupingRevision> {
     conn.query_row(
         "SELECT id,public_id,ingest_batch_id,revision,snapshot_hash,
                 import_order_revision_id,material_type_revision_id,

@@ -45,7 +45,7 @@ type Sel =
   | { kind: "failure"; id: number }
   | null;
 
-export default function GradingDesk() {
+export default function GradingDesk({ initialSubmissionId,onDirtyChange }: { initialSubmissionId?: number;onDirtyChange?:(dirty:boolean)=>void }) {
   const [staged, setStaged] = useState<StageResult[]>([]);
   const [force, setForce] = useState(false);
   const [results, setResults] = useState<AutonameResult[]>([]);
@@ -63,6 +63,10 @@ export default function GradingDesk() {
       const [list, failed] = await Promise.all([anomaliesList(), recognitionFailuresList()]);
       setAnomalies(list);
       setFailures(failed);
+      if (initialSubmissionId) {
+        if (failed.some(row => row.submission_id === initialSubmissionId)) setSel({kind:"failure",id:initialSubmissionId});
+        else if (list.some(row => row.submission_id === initialSubmissionId)) setSel({kind:"anomaly",id:initialSubmissionId});
+      }
       const sug: Record<number, Suggest> = {};
       for (const r of list) {
         const t = asrText(r.parsed_meta);
@@ -111,6 +115,7 @@ export default function GradingDesk() {
       setErr("打开文件 / 导入失败：" + String(e));
     }
   };
+  useEffect(()=>{onDirtyChange?.(busy || staged.some(row=>row.status==="staged"||row.status==="analyzing"));},[busy,staged]);
   const queued = staged.filter((s) => s.status === "staged");
   const analyze = async () => {
     setBusy(true);

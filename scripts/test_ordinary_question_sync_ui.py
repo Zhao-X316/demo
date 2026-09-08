@@ -1,3 +1,4 @@
+from ui_navigation import enter_exam as navigate_exam, enter_materials, enter_learning, enter_dashboard
 """固定普通试卷印刷题自动沉淀的浏览器冒烟测试。
 
 通过浏览器端 Tauri invoke mock 验证：
@@ -82,6 +83,8 @@ window.__TAURI_INTERNALS__ = {
         || cmd === "exam_dictation_workbench") {
       return { rows: [], attempts: [] };
     }
+    if (cmd === "workspace_tasks") return [];
+    if (cmd === "workspace_exam_review") return {task:{kind:args.kind,sourceId:args.sourceId,title:"洋务运动练习",classId:1,className:"八年级一班",studentName:null,status:"needs_review",updatedAt:"2026-09-07",assessmentVersionId:12,attemptIds:[201],hasEvidence:false},objective:{rows:[],attempts:[]},subjective:{rows:[],attempts:[]},dictation:{rows:[],attempts:[]}};
     if (cmd === "exam_fixed_intake_options") {
       return [{
         classId: 1,
@@ -284,8 +287,7 @@ window.__TAURI_INTERNALS__ = {
 def reach_ready_page(page, base_url: str) -> None:
     page.goto(base_url)
     page.wait_for_load_state("networkidle")
-    page.locator(".mod-row").filter(has_text="改作业").click()
-    page.get_by_role("button", name="题目批改").click()
+    navigate_exam(page)
     expect(page.get_by_role("heading", name="题目批改")).to_be_visible()
     expect(page.get_by_text("上传后自动整理", exact=True)).to_be_visible()
     page.get_by_role("button", name="选择试卷").click()

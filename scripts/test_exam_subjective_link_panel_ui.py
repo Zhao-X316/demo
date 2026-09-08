@@ -1,3 +1,4 @@
+from ui_navigation import enter_exam as navigate_exam, enter_materials, enter_learning, enter_dashboard
 """固定 SubjectiveLinkPanel 的加载、编辑、确认和保存失败行为。"""
 
 from playwright.sync_api import Page, expect, sync_playwright
@@ -146,8 +147,7 @@ def open_subjective_links(page: Page, url: str) -> None:
     page.add_init_script(LINK_MOCK_SCRIPT)
     page.goto(url)
     page.wait_for_load_state("networkidle")
-    page.locator(".mod-row").filter(has_text="改作业").click()
-    page.get_by_role("button", name="题目批改").click()
+    navigate_exam(page)
     page.get_by_role("button", name="答题卡主观题").click()
 
 

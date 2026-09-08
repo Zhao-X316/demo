@@ -59,7 +59,7 @@ export function createFixedIntakeDictationCommands({
           identity,
           completion: { type: "DICTATION_STATUS_LOAD_SUCCEEDED", status },
         });
-        if (status.activeTemplate) {
+        if (status.activeTemplate && !runtime.resume) {
           void processDictationPages(groupingEvidence);
         }
       },

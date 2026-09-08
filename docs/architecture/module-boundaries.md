@@ -6,7 +6,9 @@
 
 | 入口 | 内部职责 |
 | --- | --- |
-| `src/pages/Exam.tsx` | 沿用 `exam/` 的工作台、controller、材料入站状态与生命周期边界。 |
+| `src/App.tsx`、`src/pages/workspace/AppShell.tsx` | 工作台 / 资料 / 学生三项主导航，设置在底部；共享班级筛选，保留已访问页面中的草稿。 |
+| `src/pages/workspace/` | 已保存任务列表、当前任务核对队列和结果；仅保存领域定位，评分与发布分别调用现有命令。 |
+| `src/pages/Exam.tsx` | 在本次批次或答卷范围内组合资料、处理、老师核对、结果；复用 `exam/` 的 controller、材料入站状态与生命周期边界。 |
 | `src/pages/QuestionBank.tsx` | 保留组卷入口；`question-bank/` 分别管理来源导入、答案、关联、检索、候选复核、表现与版本影响、题卷编辑。 |
 | `src/pages/LearningInsights.tsx` | 保留班级/学生筛选；`learning-insights/` 分别管理个人快照、错题报告、单题干预、排期策略。 |
 | `src/pages/ClassDashboard.tsx` | 负责班级视图；`class-dashboard/useClassDashboardController.tsx` 管理读取、快照与课堂事件操作，其余文件负责教学输入、教学行动与节点详情。 |
@@ -26,10 +28,11 @@
 | `crates/module-knowledge` | 沿用 taxonomy、题库版本、答案、关联、来源等模块；不改变版本与去重规则。 |
 | `crates/module-wrongbook` | 错题读模型与干预；读模型测试在 `read_model_tests.rs`。 |
 | `crates/module-profile/src/profile/` | `contracts.rs` 定义快照协议；`metrics.rs` 只计算聚合，不访问数据库；父模块管理证据读取、快照持久化与查询。 |
+| `src-tauri/src/workspace.rs`、`src-tauri/src/exam_intake/resume.rs` | 只读聚合原领域任务、当前处理记录、分组和批改范围；不建通用任务表。恢复页面不调用识别、评分或发布命令。 |
 | `src-tauri/src/exam_intake/` | `contracts.rs` 定义 UI 协议；`files.rs` 管理本地文件准备与归档，不访问数据库或 provider；父模块负责入站事实、分组与事务协调。 |
 | `src-tauri/src/diagnostics.rs` | 诊断导出逻辑；隔离测试在 `diagnostics_tests.rs`，保留脱敏与导出审计。 |
 
-大型内联测试移到相邻 `*_tests.rs`，通过 `#[cfg(test)]` 和 `#[path = ...] mod tests;` 加载，测试模块路径和访问范围保持。生产调用方继续使用原 public 路径。SQL、序列化字段和事务内部语句未因文件拆分改变。
+大型内联测试移到相邻 `*_tests.rs`，通过 `#[cfg(test)]` 和 `#[path = ...] mod tests;` 加载，测试模块路径和访问范围保持。生产调用方继续使用原 public 路径。既有写命令与事务边界沿用。工作台新增只读 DTO；三个批改读模型在 SQL 限额前按答卷 ID 筛选，空范围返回空结果。
 
 ## 验证入口
 

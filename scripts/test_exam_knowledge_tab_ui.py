@@ -1,3 +1,4 @@
+from ui_navigation import enter_exam as navigate_exam, enter_materials, enter_learning, enter_dashboard
 """Exam 知识点 Tab 的浏览器特征测试。
 
 通过浏览器端 Tauri invoke mock 固定当前内联 KnowledgeTab 的树展示、
@@ -106,8 +107,7 @@ window.__TAURI_INTERNALS__ = {
 def reach_knowledge_tab(page, url: str) -> None:
     page.goto(url)
     page.wait_for_load_state("networkidle")
-    page.locator(".mod-row").filter(has_text="改作业").click()
-    page.get_by_role("button", name="题目批改").click()
+    navigate_exam(page)
     expect(page.get_by_role("heading", name="题目批改")).to_be_visible()
     page.get_by_role("button", name="知识点", exact=True).click()
     expect(page.get_by_text("新增知识点", exact=True)).to_be_visible()

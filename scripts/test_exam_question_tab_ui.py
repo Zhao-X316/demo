@@ -1,3 +1,4 @@
+from ui_navigation import enter_exam as navigate_exam, enter_materials, enter_learning, enter_dashboard
 """Exam 手工录题 Tab 的浏览器特征测试。
 
 固定当前内联 QuestionTab 的必填门禁、题型分支、选项解析、
@@ -47,8 +48,7 @@ window.__TAURI_INTERNALS__.invoke = async (cmd, args = {}) => {
 def reach_question_tab(page, url: str) -> None:
     page.goto(url)
     page.wait_for_load_state("networkidle")
-    page.locator(".mod-row").filter(has_text="改作业").click()
-    page.get_by_role("button", name="题目批改").click()
+    navigate_exam(page)
     expect(page.get_by_role("heading", name="题目批改")).to_be_visible()
     page.get_by_role("button", name="题库", exact=True).click()
     expect(page.get_by_text("手工录题", exact=True)).to_be_visible()

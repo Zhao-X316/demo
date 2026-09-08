@@ -1,3 +1,4 @@
+from ui_navigation import enter_exam as navigate_exam, enter_materials, enter_learning, enter_dashboard
 """K1 L2→L3 知识/能力链接复核浏览器冒烟测试。
 
 验证 AI 只填草稿、缺失槽位阻止确认、老师补齐后才晋级 L3，且请求明确声明
@@ -132,6 +133,7 @@ window.__TAURI_INTERNALS__ = {
     if (cmd === "list_class_teaching_events"
         || cmd === "list_class_teaching_inputs"
         || cmd === "list_class_action_drafts") return [];
+    if (cmd === "k1_question_search") return {items:[],total:0,boundary_note:"测试资料"};
     if (cmd === "k1_blueprint_options") {
       return {
         classes: [{ id: 1, name: "八年级一班", term: "2026秋" }],
@@ -208,8 +210,7 @@ def test_k1_link_review(base_url: str) -> None:
         page.goto(base_url)
         page.wait_for_load_state("networkidle")
 
-        page.locator(".mod-row").filter(has_text="改作业").click()
-        page.get_by_role("button", name="题目与题库").click()
+        enter_materials(page)
         page.get_by_role("button", name="导入题目").click()
 
         expect(page.get_by_text("关联知识点与能力", exact=True)).to_be_visible()

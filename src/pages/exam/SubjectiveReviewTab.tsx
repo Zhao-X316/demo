@@ -63,9 +63,11 @@ function rubricEvidencePromotions(raw: string | null) {
 }
 function SubjectiveReviewTab({
   workbench,
+  taskMode=false,
   onDone,
   onError,
 }: {
+  taskMode?:boolean;
   workbench: SubjectiveWorkbench;
   onDone: (message: string) => void;
   onError: (message: string) => void;
@@ -121,7 +123,7 @@ function SubjectiveReviewTab({
 
   return (
     <>
-      <SubjectiveReviewToolbar
+      {taskMode ? <section className="task-question"><b>第 {rows[0]?.question_no} 题 · {rows[0]?.question_stem}</b></section> : <SubjectiveReviewToolbar
         assessmentVersions={assessmentVersions}
         assessmentVersionId={assessmentVersionId}
         onAssessmentVersionChange={selectAssessment}
@@ -132,13 +134,14 @@ function SubjectiveReviewTab({
         confirmedCount={confirmedCount}
         directCount={directCount}
         exceptionCount={exceptionCount}
-      />
+      />}
 
+      <details open={!taskMode}><summary>知识与能力链接</summary>
       <SubjectiveLinkPanel
         assessmentItemId={assessmentItemId}
         onDone={onDone}
         onError={onError}
-      />
+      /></details>
 
       <div className="sech">本题证据 <span className="n">按学号排序</span></div>
       <div className="objective-review-list">
@@ -271,11 +274,11 @@ function SubjectiveReviewTab({
         })}
       </div>
 
-      <SubjectiveAttemptPublishPanel
+      {!taskMode && <SubjectiveAttemptPublishPanel
         attempts={attempts}
         busy={busy}
         onPublish={publishAttempt}
-      />
+      />}
     </>
   );
 }

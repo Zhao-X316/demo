@@ -1,3 +1,5 @@
+from ui_navigation import expand_new_intake
+from ui_navigation import enter_exam as navigate_exam, enter_materials, enter_learning, enter_dashboard
 """固定上传共享壳浏览器特征测试。
 
 覆盖文件顺序/页数、可选答案资料、材料类型、学号与缺交归组、
@@ -297,6 +299,11 @@ window.__TAURI_INTERNALS__ = {
     if (cmd === "exam_objective_workbench"
         || cmd === "exam_answer_sheet_subjective_workbench"
         || cmd === "exam_dictation_workbench") return { rows: [], attempts: [] };
+    if (cmd === "workspace_tasks") return [];
+    if (cmd === "workspace_exam_review") return {
+      task:{kind:args.kind,sourceId:args.sourceId,title:"当前测试批次",classId:1,className:"八年级一班",studentName:null,status:"needs_review",updatedAt:"2026-09-07",assessmentVersionId:12,attemptIds:[301,401],hasEvidence:false},
+      objective:{rows:[],attempts:[]},subjective:{rows:[],attempts:[]},dictation:{rows:[],attempts:[]}
+    };
     if (cmd === "exam_fixed_intake_options") {
       window.__fixedOptionsCalls += 1;
       if (scenario() === "empty") return [];
@@ -682,8 +689,7 @@ SECOND_STUDENT_PATHS = [f"/tmp/NEW_000{index}.jpg" for index in range(1, 7)]
 
 
 def enter_exam(page) -> None:
-    page.locator(".mod-row").filter(has_text="改作业").click()
-    page.get_by_role("button", name="题目批改").click()
+    navigate_exam(page)
     expect(page.get_by_role("heading", name="题目批改")).to_be_visible()
 
 
@@ -694,6 +700,7 @@ def open_exam(page, url: str) -> None:
 
 
 def select_student_papers(page, first_file: str = "IMG_0001.jpg", fourth_file: str = "IMG_0004.jpg") -> None:
+    expand_new_intake(page)
     page.get_by_role("button", name="选择试卷").click()
     expect(page.get_by_text("已选 6 份", exact=True)).to_be_visible()
     expect(page.get_by_text(first_file, exact=True)).to_be_visible()
@@ -823,6 +830,7 @@ def test_context_switch_resets_session_but_keeps_draft(browser, base_url: str) -
     page.get_by_role("button", name="上传并开始整理").click()
     expect(page.get_by_text("已归档 6 份学生卷，共 6 页", exact=True)).to_be_visible()
 
+    expand_new_intake(page)
     page.get_by_label("批改哪份作业").select_option("13")
     expect(page.get_by_text("已归档 6 份学生卷，共 6 页", exact=True)).to_have_count(0)
     expect(page.get_by_text("已选 6 份", exact=True)).to_be_visible()
@@ -832,6 +840,7 @@ def test_context_switch_resets_session_but_keeps_draft(browser, base_url: str) -
     expect(page.get_by_text("已归档 6 份学生卷，共 6 页", exact=True)).to_be_visible()
     assert calls(page, "exam_fixed_intake_prepare")[-1]["args"]["request"]["assessmentVersionId"] == 13
 
+    expand_new_intake(page)
     page.get_by_label("班级").select_option("2")
     expect(page.get_by_label("批改哪份作业")).to_have_value("22")
     expect(page.get_by_text("已归档 6 份学生卷，共 6 页", exact=True)).to_have_count(0)
@@ -857,6 +866,7 @@ def test_answer_file_request(browser, base_url: str) -> None:
     request = calls(page, "exam_fixed_intake_prepare")[0]["args"]["request"]
     assert request["answerPath"] == "/tmp/洋务运动答案.docx"
     assert request["answerText"] is None
+    expand_new_intake(page)
     page.get_by_role("button", name="清除答案资料").click()
     expect(page.get_by_text("已归档 6 份学生卷，共 6 页", exact=True)).to_have_count(0)
     expect(page.get_by_text("已选 6 份", exact=True)).to_be_visible()
@@ -958,7 +968,7 @@ def test_shared_shell_and_failure_retention(browser, base_url: str) -> None:
     review = page.get_by_role("button", name="进入批改终审")
     expect(review).to_be_enabled()
     review.click()
-    expect(page.get_by_role("button", name="标准卷终审")).to_have_class(re.compile(r"\bactive\b"))
+    expect(page.get_by_role("button", name="3 老师核对")).to_have_class(re.compile(r"\bactive\b"))
     assert_no_authority_writes(page)
 
 
@@ -1019,6 +1029,7 @@ def test_equal_options_refresh_preserves_scope(browser, base_url: str) -> None:
     page = browser.new_page(viewport={"width": 1440, "height": 1100})
     page.add_init_script(MOCK_SCRIPT)
     open_exam(page, f"{base_url}?scenario=options_refresh&material=ordinary_paper")
+    expand_new_intake(page)
     page.get_by_label("批改哪份作业").select_option("13")
     select_student_papers(page)
     page.get_by_placeholder("也可以在这里粘贴答案").fill("  刷新后仍保留  ")
@@ -1028,6 +1039,7 @@ def test_equal_options_refresh_preserves_scope(browser, base_url: str) -> None:
     page.get_by_role("button", name="确认 1 页并开始批改").click()
     expect(page.get_by_text("已确认 1", exact=True)).to_be_visible()
     page.wait_for_function("window.__fixedOptionsCalls >= 2")
+    expand_new_intake(page)
 
     expect(page.get_by_label("班级")).to_have_value("1")
     expect(page.get_by_label("批改哪份作业")).to_have_value("13")
@@ -1124,7 +1136,7 @@ def test_review_route(browser, base_url: str, query: str, expected_tab: str, evi
     route = page.get_by_role("button", name="进入批改终审")
     expect(route).to_be_enabled()
     route.click()
-    expect(page.get_by_role("button", name=expected_tab)).to_have_class(re.compile(r"\bactive\b"))
+    expect(page.get_by_role("button", name="3 老师核对")).to_have_class(re.compile(r"\bactive\b"))
     assert_no_authority_writes(page)
 
 

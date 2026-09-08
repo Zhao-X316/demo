@@ -1,3 +1,4 @@
+from ui_navigation import enter_exam as navigate_exam, enter_materials, enter_learning, enter_dashboard
 """固定答题卡主观题逐项确认编辑器的默认值、校验与提交 DTO。"""
 
 from playwright.sync_api import Page, expect, sync_playwright
@@ -302,8 +303,7 @@ def open_subjective_review(page: Page, url: str) -> None:
     page.add_init_script(COMPONENT_EDITOR_MOCK_SCRIPT)
     page.goto(url)
     page.wait_for_load_state("networkidle")
-    page.locator(".mod-row").filter(has_text="改作业").click()
-    page.get_by_role("button", name="题目批改").click()
+    navigate_exam(page)
     page.get_by_role("button", name="答题卡主观题").click()
     expect(page.locator(".objective-review-list")).to_be_visible()
 

@@ -22,7 +22,7 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -30,27 +30,29 @@ jobs:
       - name: Cache cargo (src-tauri)
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "src-tauri -> target"
+          workspaces: |
+            . -> target
+            src-tauri -> ../target
 
       - name: Install frontend deps
-        run: npm install
+        run: npm ci
 
       - name: Generate app icons
-        run: npx --yes @tauri-apps/cli icon assets/icon.png
+        run: npm run tauri -- icon assets/icon.png
 
       # tauri build 会先跑 beforeBuildCommand(npm run build) 再编译+打包
       - name: Build installers
         env:
           # macOS 下显式跳过易受锁屏/无 GUI 影响的 Finder AppleScript。
           CI: true
-        run: npx --yes @tauri-apps/cli build
+        run: npm run tauri -- build
 
       - name: Verify macOS DMG
         if: runner.os == 'macOS'
         shell: bash
         run: |
           shopt -s nullglob
-          dmg_files=(src-tauri/target/release/bundle/dmg/JiaofuSuite_*.dmg)
+          dmg_files=(target/release/bundle/dmg/JiaofuSuite_*.dmg)
           test "${#dmg_files[@]}" -eq 1
           bash scripts/verify_macos_dmg.sh "${dmg_files[0]}"
 
@@ -59,7 +61,7 @@ jobs:
         with:
           name: jiaofu-suite-${{ matrix.os }}
           path: |
-            src-tauri/target/release/bundle/dmg/*.dmg
-            src-tauri/target/release/bundle/**/*.msi
-            src-tauri/target/release/bundle/**/*.exe
-          if-no-files-found: warn
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/**/*.msi
+            target/release/bundle/**/*.exe
+          if-no-files-found: error

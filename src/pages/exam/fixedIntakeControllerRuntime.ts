@@ -1,4 +1,5 @@
 import { useEffect, useReducer, useRef } from "react";
+import type { IntakeResume } from "../../api/workspace";
 
 import {
   createFixedIntakeOperationRegistry,
@@ -16,11 +17,20 @@ import type { FixedIntakeContextSlice } from "./fixedIntakeState.ts";
 
 export function useFixedIntakeControllerRuntime(
   initialContext: FixedIntakeContextSlice,
+  resume?: IntakeResume,
 ) {
   const [state, dispatchFixedIntake] = useReducer(
     fixedIntakeReducer,
     initialContext,
-    createInitialFixedIntakeState,
+    (context) => {
+      const state = createInitialFixedIntakeState(context);
+      if (resume) {
+        state.batch.result = resume.result;
+        state.draft.expectedPages = String(resume.result.expectedPagesPerAttempt);
+        state.grouping.startNo = resume.result.groupingFirstStudentNo ?? "";
+      }
+      return state;
+    },
   );
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -81,6 +91,7 @@ export function useFixedIntakeControllerRuntime(
   };
 
   return {
+    resume,
     state,
     stateRef,
     componentMountedRef,

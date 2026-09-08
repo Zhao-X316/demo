@@ -1,3 +1,4 @@
+from ui_navigation import expand_new_intake
 """R3-H1-S8 普通卷分析与确认生命周期测试。"""
 
 from collections.abc import Callable
@@ -176,6 +177,7 @@ def prepare_without_answer(page: Page) -> None:
 
 
 def switch_assessment_and_prepare(page: Page) -> None:
+    expand_new_intake(page)
     page.get_by_label("批改哪份作业").select_option("13")
     page.get_by_role("button", name="上传并开始整理").click()
     expect(page.get_by_text("只确认一次，这批是什么？", exact=True)).to_be_visible()

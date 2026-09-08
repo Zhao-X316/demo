@@ -1,3 +1,4 @@
+from ui_navigation import enter_exam as navigate_exam, enter_materials, enter_learning, enter_dashboard
 """M3 错题事实/老师确认错因与 M6 掌握入口浏览器冒烟测试。"""
 
 from playwright.sync_api import expect, sync_playwright
@@ -598,7 +599,7 @@ def test_learning_insights(base_url: str) -> None:
         page.goto(base_url)
         page.wait_for_load_state("networkidle")
 
-        page.locator(".mod-row", has_text="错题与掌握").click()
+        enter_learning(page)
         expect(page.get_by_role("heading", name="错题与掌握")).to_be_visible()
         expect(page.get_by_text("订正一次 ≠ 已掌握", exact=False)).to_be_visible()
         page.get_by_role("button", name="个人掌握快照").click()
@@ -765,7 +766,7 @@ def test_learning_insights(base_url: str) -> None:
         page.get_by_role("button", name="去题目批改").click()
         expect(page.get_by_role("heading", name="题目批改")).to_be_visible()
 
-        page.locator(".mod-row", has_text="错题与掌握").click()
+        enter_learning(page)
         page.locator(".learning-scope select").select_option("2")
         expect(page.get_by_text("当前没有符合口径的已发布错题。", exact=True)).to_be_visible()
 
@@ -773,7 +774,7 @@ def test_learning_insights(base_url: str) -> None:
         narrow.add_init_script(MOCK_SCRIPT)
         narrow.goto(base_url)
         narrow.wait_for_load_state("networkidle")
-        narrow.locator(".mod-row", has_text="错题与掌握").click()
+        enter_learning(narrow)
         expect(narrow.locator(".wrongbook-item")).to_have_count(3)
         narrow.get_by_role("button", name="个人掌握快照").click()
         expect(narrow.get_by_text("个人学习掌握快照", exact=True)).to_be_visible()
@@ -788,13 +789,82 @@ def test_learning_insights(base_url: str) -> None:
         empty.add_init_script(MOCK_SCRIPT)
         empty.goto(base_url)
         empty.wait_for_load_state("networkidle")
-        empty.locator(".mod-row", has_text="错题与掌握").click()
+        enter_learning(empty)
         expect(empty.locator(".empty-state")).to_contain_text("暂无班级")
         expect(empty.get_by_role("button", name="去建立班级")).to_be_visible()
 
         browser.close()
 
 
+
+def test_student_context(base_url: str):
+    """The roster identity, both learning tabs and data refresh share one student."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.add_init_script(MOCK_SCRIPT)
+        page.goto(base_url)
+        page.get_by_role("navigation", name="主要导航").get_by_role("button", name="学生", exact=True).click()
+        page.locator(".row").filter(has_text="小周").get_by_role("button", name="查看作业与学习情况 →").click()
+        expect(page.get_by_label("筛选学生")).to_have_value("2")
+        page.get_by_role("button", name="个人掌握快照", exact=True).click()
+        expect(page.get_by_label("掌握快照学生")).to_have_value("2")
+        page.wait_for_function("() => window.__learningCalls.some(x => x.cmd === 'preview_student_profile')")
+        assert page.evaluate("() => window.__learningCalls.filter(x => x.cmd === 'preview_student_profile').every(x => x.args.input.studentId === 2)")
+        page.get_by_label("掌握快照学生").select_option("1")
+        page.get_by_role("button", name="错题事实", exact=True).click()
+        expect(page.get_by_label("筛选学生")).to_have_value("1")
+        page.get_by_label("筛选订正状态").select_option("needs_correction")
+        page.locator(".learning-scope").get_by_role("button", name="刷新", exact=True).click()
+        expect(page.get_by_label("筛选学生")).to_have_value("1")
+        expect(page.get_by_label("筛选订正状态")).to_have_value("needs_correction")
+        page.get_by_role("button", name="个人掌握快照", exact=True).click()
+        expect(page.get_by_label("掌握快照学生")).to_have_value("1")
+        page.evaluate("window.__learningCalls = []")
+        page.locator(".learning-scope select").select_option("2")
+        expect(page.get_by_label("掌握快照学生")).to_have_value("3")
+        page.wait_for_function("() => window.__learningCalls.some(x => x.cmd === 'preview_student_profile' && x.args.input.classId === 2)")
+        assert page.evaluate("() => window.__learningCalls.filter(x => x.cmd === 'preview_student_profile').every(x => x.args.input.classId === 2 && x.args.input.studentId === 3)")
+        page.get_by_role("button", name="错题事实", exact=True).click()
+        expect(page.get_by_label("筛选学生")).to_have_value("all")
+        # An explicitly selected, disabled student must not fall back to a classmate.
+        disabled = browser.new_page(viewport={"width": 1280, "height": 800})
+        disabled.add_init_script(MOCK_SCRIPT + r"""
+          const base = window.__TAURI_INTERNALS__.invoke;
+          window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+            const result = await base(cmd, args);
+            return cmd === 'students_list' ? result.map(s => s.id === 2 ? {...s, enabled: false} : s) : result;
+          };
+        """)
+        disabled.goto(base_url)
+        disabled.get_by_role("navigation", name="主要导航").get_by_role("button", name="学生", exact=True).click()
+        disabled.locator(".row").filter(has_text="小周").get_by_role("button", name="查看作业与学习情况 →").click()
+        disabled.get_by_role("button", name="个人掌握快照", exact=True).click()
+        expect(disabled.get_by_label("掌握快照学生")).to_have_value("")
+        expect(disabled.get_by_role("button", name="确认生成快照")).to_have_count(0)
+        assert disabled.evaluate("() => window.__learningCalls.filter(x => x.cmd === 'preview_student_profile').length") == 0
+        browser.close()
+
+
+def test_student_filter_refresh(base_url: str):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.add_init_script(MOCK_SCRIPT)
+        page.goto(base_url)
+        page.get_by_role("navigation", name="主要导航").get_by_role("button", name="学生", exact=True).click()
+        page.locator(".row").filter(has_text="小周").get_by_role("button", name="查看作业与学习情况 →").click()
+        expect(page.get_by_label("筛选学生")).to_have_value("2")
+        page.get_by_label("筛选学生").select_option("1")
+        reads = page.evaluate("() => window.__learningCalls.filter(x => x.cmd === 'class_wrongbook_dashboard').length")
+        page.locator(".learning-scope").get_by_role("button", name="刷新", exact=True).click()
+        page.wait_for_function("n => window.__learningCalls.filter(x => x.cmd === 'class_wrongbook_dashboard').length > n", arg=reads)
+        page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+        expect(page.get_by_label("筛选学生")).to_have_value("1")
+        browser.close()
+
 if __name__ == "__main__":
+    test_student_context("http://127.0.0.1:4173")
+    test_student_filter_refresh("http://127.0.0.1:4173")
     test_learning_insights("http://127.0.0.1:4173")
     print("learning insights UI smoke: PASS")

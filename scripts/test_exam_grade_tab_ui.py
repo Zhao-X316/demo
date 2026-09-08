@@ -1,3 +1,4 @@
+from ui_navigation import enter_exam as navigate_exam, enter_materials, enter_learning, enter_dashboard
 """固定 GradeTab 的机器建议、老师终审、改判和失败保留行为。"""
 
 from playwright.sync_api import expect, sync_playwright
@@ -118,8 +119,7 @@ window.__TAURI_INTERNALS__.invoke = async (cmd, args = {}) => {
 def reach_grade_tab(page, url: str) -> None:
     page.goto(url)
     page.wait_for_load_state("networkidle")
-    page.locator(".mod-row").filter(has_text="改作业").click()
-    page.get_by_role("button", name="题目批改").click()
+    navigate_exam(page)
     expect(page.get_by_role("heading", name="题目批改")).to_be_visible()
     page.get_by_role("button", name="老师补录", exact=True).click()
     expect(page.get_by_text("录入一题作答", exact=True)).to_be_visible()

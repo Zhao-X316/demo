@@ -61,6 +61,327 @@ fn write_jpeg(path: &Path, value: &[u8]) {
 }
 
 #[test]
+fn workspace_resume_is_read_only_and_preserves_batch_scope_after_reopen() {
+    let root = test_root("workspace-resume");
+    let conn = seed();
+    crate::state::run_all_migrations(&conn).unwrap();
+    let mut batch_ids = Vec::new();
+    for index in 1..=2 {
+        let path = root.join(format!("paper{index}.jpg"));
+        write_jpeg(&path, format!("synthetic-paper-{index}").as_bytes());
+        let result = prepare_fixed_intake(
+            &conn,
+            &root,
+            &FixedIntakeRequest {
+                assessment_version_id: 1,
+                student_paths: vec![path.to_string_lossy().into_owned()],
+                answer_path: None,
+                answer_text: None,
+                expected_pages_per_attempt: 1,
+                material_type: Some("ordinary_paper".into()),
+                idempotency_key: format!("resume-{index}"),
+            },
+        )
+        .unwrap();
+        confirm_intake_grouping(&conn, result.batch_id, &index.to_string(), &[]).unwrap();
+        confirm_intake_grouping_quality(&conn, result.batch_id, &[]).unwrap();
+        batch_ids.push(result.batch_id);
+    }
+    let (page_id, artifact_id): (i64, i64) = conn
+        .query_row(
+            "SELECT id,source_artifact_id FROM exam_ingest_pages_v2 WHERE batch_id=?1",
+            [batch_ids[0]],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let run = suite_core::db::repo::ai_runs::create_or_get(
+        &conn,
+        &suite_core::db::repo::ai_runs::NewAiRun {
+            idempotency_key: "resume-processing",
+            run_type: "ordinary_paper_structure",
+            source_module: "exam",
+            business_ref_type: "ingest_page",
+            business_ref_id: &page_id.to_string(),
+            input_artifact_id: Some(artifact_id),
+            provider: "synthetic",
+            model_name: "synthetic",
+            model_version: "1",
+            config_version: "1",
+            prompt_or_rule_version: "1",
+            input_hash: &"a".repeat(64),
+            retry_of_ai_run_id: None,
+        },
+    )
+    .unwrap();
+    suite_core::db::repo::ai_runs::start(&conn, run.id, "2026-09-07T00:00:00Z", None).unwrap();
+    let path = root.join("reopened.db");
+    conn.execute("VACUUM INTO ?1", [path.to_string_lossy().as_ref()])
+        .unwrap();
+    drop(conn);
+    let reopened =
+        Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let first = resume::read(&reopened, batch_ids[0]).unwrap();
+    let second = resume::read(&reopened, batch_ids[1]).unwrap();
+    assert_eq!(first.processing_history.len(), 1);
+    assert_eq!(first.processing_history[0].status, "processing");
+    assert!(second.processing_history.is_empty());
+    assert_eq!(first.class_id, 1);
+    assert_eq!(first.assessment_version_id, 1);
+    assert!(first.result.quality_review_completed);
+    assert_eq!(first.result.grouping_first_student_no.as_deref(), Some("1"));
+    assert_eq!(
+        second.result.grouping_first_student_no.as_deref(),
+        Some("2")
+    );
+    assert!(!first
+        .result
+        .reason_codes
+        .iter()
+        .any(|code| code == "PAGE_IDENTITY_UNCONFIRMED"));
+    let first_ids = crate::workspace::batch_attempt_ids(&reopened, batch_ids[0]).unwrap();
+    let second_ids = crate::workspace::batch_attempt_ids(&reopened, batch_ids[1]).unwrap();
+    assert_eq!(first_ids.len(), 1);
+    assert_eq!(second_ids.len(), 1);
+    assert_ne!(first_ids, second_ids);
+    let tasks = crate::workspace::read_tasks(&reopened).unwrap();
+    assert_eq!(tasks.len(), 2);
+    assert_eq!(
+        tasks
+            .iter()
+            .find(|task| task.source_id == batch_ids[0])
+            .unwrap()
+            .status,
+        "processing"
+    );
+    assert_eq!(
+        tasks
+            .iter()
+            .find(|task| task.source_id == batch_ids[1])
+            .unwrap()
+            .status,
+        "needs_material"
+    );
+    assert!(tasks.iter().all(|task| task.status != "published"));
+    assert!(resume::read(&reopened, 99999).is_err());
+    assert!(crate::workspace::read_exam_review(&reopened, "recitation", 1).is_err());
+    assert!(crate::workspace::read_exam_review(&reopened, "exam_batch", batch_ids[0]).is_ok());
+}
+
+fn confirm_workspace_attempt(conn: &Connection, attempt_id: i64) {
+    module_exam::service::assessment::decide_grade(
+        conn,
+        &module_exam::service::assessment::NewGradeDecision {
+            attempt_id,
+            assessment_item_id: 1,
+            machine_grade_ai_run_id: None,
+            teacher_score: 1.0,
+            point_results_json: r#"{"schema_version":1,"result":"confirmed"}"#,
+            teacher_note: Some("合成验收"),
+            confirmation_level: "teacher_corrected",
+            decided_by: "teacher",
+        },
+    )
+    .unwrap();
+}
+
+fn legacy_workspace_batch(conn: &Connection) -> (i64, Vec<i64>) {
+    let batch = papers::create_or_get_ingest_batch(
+        conn,
+        &NewIngestBatch {
+            assessment_version_id: 1,
+            source_kind: "fixed_fixture",
+            idempotency_key: "workspace-legacy",
+            created_by: "teacher",
+        },
+    )
+    .unwrap();
+    let mut attempts = Vec::new();
+    for index in 1..=2 {
+        let attempt =
+            module_exam::service::assessment::create_attempt(conn, 1, index, "image", "first")
+                .unwrap();
+        let artifact = artifacts::create_or_get(
+            conn,
+            &NewArtifact {
+                kind: ArtifactKind::Image,
+                sha256: &format!("{index:064x}"),
+                mime_type: "image/jpeg",
+                byte_size: 1,
+                original_name: None,
+                original_path: None,
+                archived_path: "/synthetic.jpg",
+                parent_artifact_id: None,
+                derivative_type: None,
+                processing_version: "workspace-test",
+                privacy_class: PrivacyClass::StudentSensitive,
+                archive_status: ArchiveStatus::Ready,
+            },
+        )
+        .unwrap();
+        let page = papers::register_ingest_page(
+            conn,
+            &NewIngestPage {
+                batch_id: batch.id,
+                source_artifact_id: artifact.id,
+                import_index: index - 1,
+                expected_page_no: Some(1),
+            },
+        )
+        .unwrap();
+        papers::record_page_quality(
+            conn,
+            &papers::NewPageQualityRevision {
+                page_id: page.id,
+                blur_score: 0.0,
+                glare_score: 0.0,
+                brightness_score: 0.5,
+                perspective_score: 0.0,
+                rotation_degrees: 0.0,
+                crop_complete: true,
+                result: "pass",
+                issue_codes_json: r#"{"schema_version":1,"codes":[]}"#,
+                checked_by_type: "teacher",
+                checked_by: Some("teacher"),
+            },
+        )
+        .unwrap();
+        papers::decide_page_match(
+            conn,
+            &papers::NewPageMatchRevision {
+                page_id: page.id,
+                attempt_id: Some(attempt.id),
+                page_no: Some(1),
+                student_confidence: Some(1.0),
+                page_no_confidence: Some(1.0),
+                template_confidence: Some(1.0),
+                decision: "teacher_confirmed",
+                reason_code: None,
+                confirmed_by: Some("teacher"),
+            },
+        )
+        .unwrap();
+        attempts.push(attempt.id);
+    }
+    (batch.id, attempts)
+}
+
+#[test]
+fn workspace_legacy_batch_tracks_confirmation_and_publication_after_reopen() {
+    let conn = seed();
+    crate::state::run_all_migrations(&conn).unwrap();
+    let (batch_id, attempts) = legacy_workspace_batch(&conn);
+    for id in &attempts {
+        confirm_workspace_attempt(&conn, *id);
+    }
+    let tasks = crate::workspace::read_tasks(&conn).unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].status, "ready_to_publish");
+    module_exam::service::assessment::publish_attempt(&conn, attempts[0], "teacher").unwrap();
+    assert_eq!(
+        crate::workspace::read_tasks(&conn).unwrap()[0].status,
+        "ready_to_publish"
+    );
+    module_exam::service::assessment::publish_attempt(&conn, attempts[1], "teacher").unwrap();
+    let root = test_root("workspace-legacy-reopen");
+    let path = root.join("data.db");
+    conn.execute("VACUUM INTO ?1", [path.to_string_lossy().as_ref()])
+        .unwrap();
+    drop(conn);
+    let reopened =
+        Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let tasks = crate::workspace::read_tasks(&reopened).unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].source_id, batch_id);
+    assert_eq!(tasks[0].attempt_ids, attempts);
+    assert_eq!(tasks[0].status, "published");
+    assert_eq!(
+        reopened
+            .query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn workspace_legacy_batch_with_unmatched_page_is_not_complete() {
+    let conn = seed();
+    crate::state::run_all_migrations(&conn).unwrap();
+    let (_, attempts) = legacy_workspace_batch(&conn);
+    for id in attempts {
+        confirm_workspace_attempt(&conn, id);
+        module_exam::service::assessment::publish_attempt(&conn, id, "teacher").unwrap();
+    }
+    conn.execute(
+        "UPDATE exam_page_match_revisions_v2 SET state='superseded' WHERE page_id=2",
+        [],
+    )
+    .unwrap();
+    let task = crate::workspace::read_tasks(&conn)
+        .unwrap()
+        .into_iter()
+        .find(|t| t.kind == "exam_batch")
+        .unwrap();
+    assert_ne!(task.status, "published");
+    assert_ne!(task.status, "ready_to_publish");
+}
+
+#[test]
+fn workspace_ordered_batch_never_falls_back_when_grouping_is_incomplete() {
+    let root = test_root("workspace-ordered-completion");
+    let conn = seed();
+    crate::state::run_all_migrations(&conn).unwrap();
+    let path = root.join("paper.jpg");
+    write_jpeg(&path, b"synthetic ordered paper");
+    let result = prepare_fixed_intake(
+        &conn,
+        &root,
+        &FixedIntakeRequest {
+            assessment_version_id: 1,
+            student_paths: vec![path.to_string_lossy().into_owned()],
+            answer_path: None,
+            answer_text: None,
+            expected_pages_per_attempt: 1,
+            material_type: Some("ordinary_paper".into()),
+            idempotency_key: "ordered-completion".into(),
+        },
+    )
+    .unwrap();
+    confirm_intake_grouping(&conn, result.batch_id, "1", &[]).unwrap();
+    confirm_intake_grouping_quality(&conn, result.batch_id, &[]).unwrap();
+    let id = crate::workspace::batch_attempt_ids(&conn, result.batch_id).unwrap()[0];
+    confirm_workspace_attempt(&conn, id);
+    module_exam::service::assessment::publish_attempt(&conn, id, "teacher").unwrap();
+    assert_eq!(
+        crate::workspace::read_tasks(&conn).unwrap()[0].status,
+        "published"
+    );
+    // All attempts are published, but rejected/unmapped grouping must still block completion.
+    for (revision, mapped, rejected) in [(2, 1, 1), (3, 0, 0)] {
+        conn.execute("UPDATE exam_ordered_grouping_activations_v2 SET state='superseded' WHERE state='active'", []).unwrap();
+        conn.execute("INSERT INTO exam_ordered_grouping_activations_v2
+            (public_id,ingest_batch_id,grouping_decision_id,revision,snapshot_hash,rejected_page_ids_json,
+             attempt_ids_json,page_match_ids_json,mapped_group_count,rejected_group_count,state,confirmed_by,created_at)
+            SELECT public_id||?1,ingest_batch_id,grouping_decision_id,?1,?2,rejected_page_ids_json,
+                attempt_ids_json,page_match_ids_json,?3,?4,'active',confirmed_by,created_at
+            FROM exam_ordered_grouping_activations_v2 WHERE revision=1",
+            rusqlite::params![revision, format!("{revision:064x}"), mapped, rejected]).unwrap();
+        assert_ne!(
+            crate::workspace::read_tasks(&conn).unwrap()[0].status,
+            "published"
+        );
+    }
+    conn.execute(
+        "UPDATE exam_ordered_grouping_revisions_v2 SET state='superseded'",
+        [],
+    )
+    .unwrap();
+    assert_ne!(
+        crate::workspace::read_tasks(&conn).unwrap()[0].status,
+        "published"
+    );
+}
+
+#[test]
 fn office_files_are_accepted_only_as_answer_sources() {
     assert_eq!(
         source_format(Path::new("答案.docx"), true).unwrap(),

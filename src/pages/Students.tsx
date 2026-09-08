@@ -31,7 +31,7 @@ type ModalState =
   | { type: "pick"; classId: number; className: string }
   | null;
 
-export default function Students() {
+export default function Students({ selectedClassId = 0, onOpenStudent,onClassChange,onClassesChanged }: { selectedClassId?: number;onClassChange?:(id:number)=>void;onClassesChanged?:(rows:Class[])=>void; onOpenStudent?: (student: Student) => void }) {
   const [students, setStudents] = useState<Student[]>([]);
   const [classes, setClasses] = useState<Class[]>([]);
   const [tbOptions, setTbOptions] = useState<string[]>([]);
@@ -41,7 +41,7 @@ export default function Students() {
 
   const load = () => {
     studentsList().then(setStudents).catch((e) => setErr(String(e)));
-    classesList().then(setClasses).catch(() => undefined);
+    classesList().then(rows=>{setClasses(rows);onClassesChanged?.(rows);}).catch(() => undefined);
     contentsList().then((c) => setTbOptions(textbookOptionsFrom(c))).catch(() => undefined);
   };
   useEffect(() => {
@@ -63,10 +63,12 @@ export default function Students() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>学生</h1>
+        <div><h1>学生</h1>{onClassChange&&<label className="workspace-class">当前班级 <select aria-label="学生班级" value={selectedClassId} onChange={event=>onClassChange(Number(event.target.value))}><option value={0}>全部班级</option>{classes.map(row=><option key={row.id} value={row.id}>{row.name}</option>)}</select></label>}</div>
         <div style={{ display: "flex", gap: 10 }}>
+          <details><summary>名册管理</summary>
           <button onClick={() => setModal({ type: "classset" })}>⚙ 班级设置</button>
           <button onClick={() => setModal({ type: "studentset" })}>⚙ 学生设置</button>
+          </details>
           <button className="primary" onClick={() => setModal({ type: "import" })}>导入班级 / 学生</button>
         </div>
       </div>
@@ -80,7 +82,7 @@ export default function Students() {
         <div className="loading">先「班级设置」建班，再「批量导入」学生（班级名一行、学生几行可一次建多班）</div>
       )}
 
-      {groups.map((g) => (
+      {groups.filter(g => !selectedClassId || g.id === selectedClassId).map((g) => (
         <div key={g.name}>
           <div className="sech">
             {g.name}
@@ -109,6 +111,7 @@ export default function Students() {
                   {!s.enabled && <span className="tag" style={{ marginLeft: 8 }}>已停用</span>}
                 </div>
                 <div className="meta">学号 {s.student_no}</div>
+                {onOpenStudent && <button className="link" onClick={() => onOpenStudent(s)}>查看作业与学习情况 →</button>}
               </div>
             </div>
           ))}

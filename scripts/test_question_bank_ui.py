@@ -1,3 +1,4 @@
+from ui_navigation import enter_exam as navigate_exam, enter_materials, enter_learning, enter_dashboard
 """K1 可解释题库组卷、换题排版与打印浏览器冒烟测试。
 
 通过浏览器端 Tauri invoke mock 验证：一页式蓝图输入、L3 候选解释、
@@ -461,8 +462,7 @@ def test_question_bank(base_url: str) -> None:
         page.goto(base_url)
         page.wait_for_load_state("networkidle")
 
-        page.locator(".mod-row").filter(has_text="改作业").click()
-        page.get_by_role("button", name="题目与题库").click()
+        enter_materials(page)
         expect(page.get_by_role("heading", name="题目与知识库")).to_be_visible()
         page.get_by_role("button", name="找题与查重").click()
         expect(page.get_by_role("button", name="找题与查重")).to_have_class("tab active")
@@ -534,8 +534,8 @@ def test_question_bank(base_url: str) -> None:
         expect(page.locator(".blueprint-candidate")).to_have_count(2)
         expect(page.locator(".blueprint-candidate input:checked")).to_have_count(2)
         expect(page.get_by_text("当前选中 2 道 · 2.0 / 2 分", exact=True)).to_be_visible()
-        expect(page.get_by_text("知识 · 鸦片战争爆发时间", exact=True).first).to_be_visible()
-        expect(page.get_by_text("能力 · 事实识记与提取", exact=True).first).to_be_visible()
+        expect(page.locator(".blueprint-candidate:visible").get_by_text("知识 · 鸦片战争爆发时间", exact=True).first).to_be_visible()
+        expect(page.locator(".blueprint-candidate:visible").get_by_text("能力 · 事实识记与提取", exact=True).first).to_be_visible()
         confirm = page.get_by_role("button", name="确认并建立作业")
         expect(confirm).to_be_enabled()
 

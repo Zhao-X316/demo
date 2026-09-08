@@ -1,3 +1,4 @@
+from ui_navigation import enter_exam as navigate_exam, enter_materials, enter_learning, enter_dashboard
 """K1-5 题目实际表现与版本变更影响浏览器冒烟测试。
 
 验证页面只展示已发布的老师确认统计，老师可查看新版对历史作业、学习证据和
@@ -59,6 +60,7 @@ window.__TAURI_INTERNALS__ = {
     if (cmd === "list_class_teaching_events"
         || cmd === "list_class_teaching_inputs"
         || cmd === "list_class_action_drafts") return [];
+    if (cmd === "k1_question_search") return {items:[],total:0,boundary_note:"测试资料"};
     if (cmd === "k1_blueprint_options") {
       return {
         classes: [{ id: 1, name: "八年级一班", term: "2026秋" }],
@@ -304,8 +306,7 @@ def test_k1_question_performance(base_url: str) -> None:
         page.goto(base_url)
         page.wait_for_load_state("networkidle")
 
-        page.locator(".mod-row").filter(has_text="改作业").click()
-        page.get_by_role("button", name="题目与题库").click()
+        enter_materials(page)
         page.get_by_role("button", name="表现与版本影响").click()
 
         expect(page.get_by_text("平均得分率", exact=True)).to_be_visible()

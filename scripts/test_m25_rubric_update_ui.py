@@ -1,3 +1,4 @@
+from ui_navigation import enter_exam as navigate_exam, enter_materials, enter_learning, enter_dashboard
 """M2.5-3a 批改中简答评分点更新建议浏览器冒烟测试。"""
 
 from pathlib import Path
@@ -209,8 +210,7 @@ def test_rubric_update(base_url: str) -> None:
         page.goto(base_url)
         page.wait_for_load_state("networkidle")
 
-        page.locator(".mod-row").filter(has_text="改作业").click()
-        page.get_by_role("button", name="题目批改").click()
+        navigate_exam(page)
         page.get_by_role("button", name="答题卡主观题").click()
 
         expect(page.get_by_text("老师逐项确认 · 4 / 4 分", exact=True)).to_be_visible()

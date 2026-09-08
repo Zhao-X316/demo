@@ -1,3 +1,4 @@
+from ui_navigation import enter_exam as navigate_exam, enter_materials, enter_learning, enter_dashboard
 """固定默写终审 Tab 的筛选、证据、校正、终审、重试和发布行为。"""
 
 from playwright.sync_api import Page, expect, sync_playwright
@@ -390,8 +391,7 @@ window.__TAURI_INTERNALS__.invoke = async (cmd, args = {}) => {
 def reach_dictation_tab(page: Page, url: str) -> None:
     page.goto(url)
     page.wait_for_load_state("networkidle")
-    page.locator(".mod-row").filter(has_text="改作业").click()
-    page.get_by_role("button", name="题目批改").click()
+    navigate_exam(page)
     expect(page.get_by_role("heading", name="题目批改")).to_be_visible()
     page.get_by_role("button", name="默写复核", exact=True).click()
     expect(page.get_by_text("本题证据", exact=False)).to_be_visible()
@@ -626,11 +626,10 @@ def test_dictation_review_empty(base_url: str) -> None:
         page.add_init_script(DICTATION_MOCK_SCRIPT)
         page.goto(f"{base_url}?dictationEmpty=1")
         page.wait_for_load_state("networkidle")
-        page.locator(".mod-row").filter(has_text="改作业").click()
-        page.get_by_role("button", name="题目批改").click()
+        navigate_exam(page)
         page.get_by_role("button", name="默写复核", exact=True).click()
 
-        empty = page.locator(".objective-empty")
+        empty = page.locator(".objective-empty:visible")
         expect(empty).to_contain_text("还没有可终审的默写结果")
         expect(empty).to_contain_text("上传固定默写后，系统会按已确认模板裁出每个答案区")
         expect(empty).to_contain_text("精确结果可批量确认，分歧只需老师查看原图")

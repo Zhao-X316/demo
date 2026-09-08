@@ -399,22 +399,33 @@ function RecitationHistory({
 export function StudentProfilePanel({
   classId,
   students,
+  selectedStudentId,
+  onStudentChange,
   refreshToken: externalRefreshToken,
   onOpenExam,
 }: {
   classId: number;
   students: Student[];
+  selectedStudentId: number | null;
+  onStudentChange: (id: number) => void;
   refreshToken: number;
   onOpenExam: () => void;
 }) {
   const today = shanghaiDate();
-  const [studentId, setStudentId] = useState<number | null>(students[0]?.id ?? null);
+  const studentId = students.some((student) =>
+    student.id === selectedStudentId && student.class_id === classId && student.enabled)
+    ? selectedStudentId : null;
   const [rangeStart, setRangeStart] = useState(shiftShanghaiDate(today, -89));
   const [rangeEnd, setRangeEnd] = useState(today);
   const [scopeOptions, setScopeOptions] = useState<ProfileScopeOption[]>([]);
   const [scopeSelectorKey, setScopeSelectorKey] = useState("auto_evidence_maps");
-  const [preview, setPreview] = useState<StudentProfilePreview | null>(null);
-  const [snapshot, setSnapshot] = useState<StudentProfileSnapshot | null>(null);
+  const [loadedPreview, setPreview] = useState<StudentProfilePreview | null>(null);
+  const [loadedSnapshot, setSnapshot] = useState<StudentProfileSnapshot | null>(null);
+  // A new selection must never reuse the previous student's evidence or generation permission.
+  const preview = loadedPreview?.student.id === studentId && loadedPreview.student.class_id === classId
+    ? loadedPreview : null;
+  const snapshot = loadedSnapshot?.student.id === studentId && loadedSnapshot.student.class_id === classId
+    ? loadedSnapshot : null;
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [reporting, setReporting] = useState(false);
@@ -446,13 +457,6 @@ export function StudentProfilePanel({
       current = false;
     };
   }, []);
-
-  useEffect(() => {
-    setStudentId((current) =>
-      current != null && students.some((student) => student.id === current)
-        ? current
-        : students[0]?.id ?? null);
-  }, [students]);
 
   useEffect(() => {
     if (studentId == null || !rangeStart || !rangeEnd || rangeStart > rangeEnd) {
@@ -577,7 +581,8 @@ export function StudentProfilePanel({
           <label>
             <span>学生</span>
             <select aria-label="掌握快照学生" value={studentId ?? ""}
-              onChange={(event) => setStudentId(Number(event.target.value))}>
+              onChange={(event) => onStudentChange(Number(event.target.value))}>
+              {studentId == null && <option value="" disabled>请选择本班启用学生</option>}
               {students.map((student) => (
                 <option value={student.id} key={student.id}>
                   {student.student_no}号 {student.name}
