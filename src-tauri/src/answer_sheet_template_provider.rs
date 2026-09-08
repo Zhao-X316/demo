@@ -278,7 +278,7 @@ fn failure(
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     use std::thread;
 
@@ -295,8 +295,30 @@ mod tests {
         let address = listener.local_addr().unwrap();
         thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 16_384];
-            let _ = stream.read(&mut request);
+            // Closing a socket with unread request bytes can reset it on Windows.
+            stream
+                .set_read_timeout(Some(Duration::from_secs(30)))
+                .unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        content_length = value.trim().parse::<u64>().unwrap();
+                    }
+                }
+            }
+            let mut request = Vec::new();
+            reader
+                .take(content_length)
+                .read_to_end(&mut request)
+                .unwrap();
+            assert_eq!(request.len() as u64, content_length);
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(), body

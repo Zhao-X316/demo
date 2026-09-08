@@ -13,9 +13,9 @@ use suite_core::models::{ModuleKey, TaskKind, TaskStatus};
 
 const M: ModuleKey = ModuleKey::Recitation;
 
-fn imp<'a>(stem: &'a str, hash: &'a str) -> import::ImportItem<'a> {
+fn imp<'a>(file_path: &'a str, stem: &'a str, hash: &'a str) -> import::ImportItem<'a> {
     import::ImportItem {
-        file_path: "/tmp/jiaofu-suite-e2e.m4a",
+        file_path,
         file_stem: stem,
         file_hash: hash,
         duration_ms: Some(5000),
@@ -24,7 +24,10 @@ fn imp<'a>(stem: &'a str, hash: &'a str) -> import::ImportItem<'a> {
 
 #[test]
 fn full_recitation_flow() {
-    std::fs::write("/tmp/jiaofu-suite-e2e.m4a", b"test audio evidence").unwrap();
+    let audio_path =
+        std::env::temp_dir().join(format!("jiaofu-suite-e2e-{}.m4a", std::process::id()));
+    std::fs::write(&audio_path, b"test audio evidence").unwrap();
+    let file_path = audio_path.to_str().unwrap();
     let conn = open_in_memory().unwrap();
     run_migrations(&conn, CORE_MIGRATIONS).unwrap();
     run_migrations(&conn, module_recitation::recitation_migrations()).unwrap();
@@ -69,11 +72,15 @@ fn full_recitation_flow() {
     assert_eq!(made.created, 2);
 
     // 批量导入
-    let o1 = import::import_one(&conn, &imp("20260625_2023001_张三_C012", "hA")).unwrap();
-    let o2 = import::import_one(&conn, &imp("20260625_2023002_李四_C012", "hB")).unwrap();
-    let odup = import::import_one(&conn, &imp("20260625_2023001_张三_C012", "hA")).unwrap();
-    let obad = import::import_one(&conn, &imp("garbage-name", "hC")).unwrap();
-    let ounknown = import::import_one(&conn, &imp("20260625_9999999_王五_C012", "hD")).unwrap();
+    let o1 =
+        import::import_one(&conn, &imp(file_path, "20260625_2023001_张三_C012", "hA")).unwrap();
+    let o2 =
+        import::import_one(&conn, &imp(file_path, "20260625_2023002_李四_C012", "hB")).unwrap();
+    let odup =
+        import::import_one(&conn, &imp(file_path, "20260625_2023001_张三_C012", "hA")).unwrap();
+    let obad = import::import_one(&conn, &imp(file_path, "garbage-name", "hC")).unwrap();
+    let ounknown =
+        import::import_one(&conn, &imp(file_path, "20260625_9999999_王五_C012", "hD")).unwrap();
 
     let sub1 = match o1 {
         import::ImportOutcome::Imported { submission_id, .. } => submission_id,
