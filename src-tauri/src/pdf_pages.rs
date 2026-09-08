@@ -373,7 +373,7 @@ pub fn render_to_jpegs(_path: &Path) -> CoreResult<Vec<Vec<u8>>> {
     ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn two_page_pdf_fixture() -> Vec<u8> {
     let objects = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
@@ -405,7 +405,7 @@ pub(crate) fn two_page_pdf_fixture() -> Vec<u8> {
     bytes
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 
